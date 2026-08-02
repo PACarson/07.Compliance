@@ -1,0 +1,83 @@
+/**
+ * 141_Tests_VerifiedIncome.js
+ * （样本文字/assertEqual_/fakeSheetAccessor_/fakeLockProvider_ 从
+ * 105_TestUtils.js 来，不在这里重复定义。）
+ */
+if (typeof require === 'function') {
+  var {
+    buildVerifiedIncomeRecord_, buildIncomeVerifiedEvent_, writeVerifiedIncome_,
+    verifyAndPublishIncome_, VERIFIED_INCOME_COLUMNS
+  } = require('./140_VerifiedIncome.js');
+  var { createTruthWriter_ } = require('./115_TruthWriter.js');
+  var { ParserRegistry } = require('./120_DocumentParsing.js');
+  require('./121_GrabWeeklyParser.js');
+  var { reconcileStatement_ } = require('./130_Reconciliation.js');
+  var { assertEqual_, fakeSheetAccessor_, fakeLockProvider_, TEST_FIXTURE_GRAB_WEEKLY_STATEMENT } = require('./105_TestUtils.js');
+}
+
+function runAllVerifiedIncomeTests() {
+  const results = [];
+
+  const parser = ParserRegistry.getParserFor({ source: 'Grab', document_type: 'Weekly Statement' });
+  const parsedStatement = parser.parse({ source: 'Grab', document_type: 'Weekly Statement' }, TEST_FIXTURE_GRAB_WEEKLY_STATEMENT);
+  const reconciled = reconcileStatement_(parsedStatement, { daily_estimate_total: 1720.00, reward_estimate_total: 14.10 });
+  const week = parsedStatement.document_meta.week;
+  const fixedNow = new Date('2026-07-28T09:00:00Z');
+
+  const record = buildVerifiedIncomeRecord_(week, parsedStatement, reconciled, fixedNow);
+  assertEqual_('income_id', record.income_id, 'CMP-INCOME-2026-W30', results);
+  assertEqual_('source 固定 Compliance OS（CMP-P2）', record.source, 'Compliance OS', results);
+  assertEqual_('origin_platform 是 Grab（内部用）', record.origin_platform, 'Grab', results);
+  assertEqual_('net 等于对账后的总额', record.net, 1734.10, results);
+  assertEqual_('incentive 细项来自 parsedStatement', record.incentive, 557.10, results);
+
+  const badReconciled = reconcileStatement_(parsedStatement, { daily_estimate_total: 1000.00, reward_estimate_total: 0.00 });
+  let threwOnNeedsReview = false;
+  try { buildVerifiedIncomeRecord_(week, parsedStatement, badReconciled, fixedNow); }
+  catch (e) { threwOnNeedsReview = true; }
+  results.push({ name: 'Needs_Review 结果建 Verified Income 时抛错', pass: threwOnNeedsReview });
+
+  let threwOnBadDate = false;
+  try { buildVerifiedIncomeRecord_(week, parsedStatement, reconciled, new Date('not-a-date')); }
+  catch (e) { threwOnBadDate = true; }
+  results.push({ name: 'now 不是合法 Date 时抛错', pass: threwOnBadDate });
+
+  const event = buildIncomeVerifiedEvent_(record, 'CMP-EVT-20260728-0001');
+  assertEqual_('event.income_id 跟 record 一致', event.income_id, record.income_id, results);
+  assertEqual_('event.source 固定 Compliance OS', event.source, 'Compliance OS', results);
+
+  const accessor = fakeSheetAccessor_();
+  const truthWriter = createTruthWriter_(accessor, fakeLockProvider_());
+  writeVerifiedIncome_(truthWriter, record);
+  const writtenRow = accessor.getWritten('Verified_Income')[0];
+  assertEqual_('写入的栏位数跟 VERIFIED_INCOME_COLUMNS 一致', writtenRow.length, VERIFIED_INCOME_COLUMNS.length, results);
+  assertEqual_('写入第一栏是 income_id', writtenRow[0], record.income_id, results);
+
+  const accessor2 = fakeSheetAccessor_();
+  const truthWriter2 = createTruthWriter_(accessor2, fakeLockProvider_());
+  const { record: r2, event: e2 } = verifyAndPublishIncome_(week, parsedStatement, reconciled, truthWriter2, 'CMP-EVT-20260728-0002', fixedNow);
+  assertEqual_('端到端·record.income_id', r2.income_id, 'CMP-INCOME-2026-W30', results);
+  assertEqual_('端到端·真的写进了 Sheet', accessor2.getWritten('Verified_Income').length, 1, results);
+  assertEqual_('端到端·event_id 有带上', e2.event_id, 'CMP-EVT-20260728-0002', results);
+
+  const allPass = results.every((r) => r.pass);
+  results.forEach((r) => {
+    console.log(`${r.pass ? 'PASS' : 'FAIL'} ${r.name}` + (r.pass ? '' : ` (got ${JSON.stringify(r.actual)}, expected ${JSON.stringify(r.expected)})`));
+  });
+  console.log(allPass ? '\n=== runAllVerifiedIncomeTests: 全部通过 ===' : '\n=== 有失败项 ===');
+  return allPass;
+}
+
+if (typeof require === 'function' && require.main === module) {
+  const ok = runAllVerifiedIncomeTests();
+  process.exit(ok ? 0 : 1);
+}
+if (typeof module !== 'undefined') {
+  module.exports = { runAllVerifiedIncomeTests };
+}
+
+/**
+ * ============ 人工验证清单 ============
+ * [ ] publishComplianceEvent_() 目前只 log，EventBus 真实调用方式确认后要接上
+ * [ ] verified_at 存进 Sheet 要确认那一栏已经设成 plain-text('@') 格式
+ */
