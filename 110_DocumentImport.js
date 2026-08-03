@@ -2,31 +2,30 @@
  * 110_DocumentImport.js
  * Compliance OS — Document Import Engine（对应治理文档 §2.1、§4.1、CMP-P4）
  *
- * 老实说清楚这个文件现在能做什么、不能做什么：
- *  - 能：document_id 生成、去重判断、组 Documents 记录、写入（透过 TruthWriter）、
- *    真实的文件 hash 计算（GAS 的 Utilities.computeDigest，不是占位）。
- *  - 不能：还没有「怎么把 PDF 存进 Drive」「怎么把 PDF 转成文字」的实作——
- *    这两件事的具体做法（哪个 Drive 目录、要不要用 Advanced Drive Service
- *    做 OCR）还没跟你确认过，猜一个签名去实作是 UCR7 明确说不要做的事，所以
- *    先留成呼叫方要自己提供的输入（originalFileUrl、extractedText），不是
- *    这个引擎内部自己去做。
- *  - existingHashes（去重要比对的既有 hash 清单）也是呼叫方提供——
- *    TruthWriter 现在只处理写入，还没有对应的读取工具（EP3：不为了这一个
- *    用途现在就先造一个通用 Sheet Reader，等真的需要频繁读的时候再补）。
+ * v2（采纳 Drive 存档建议后）：
+ *  - Sheet 只存 drive_file_id（权威、稳定引用）+ drive_path（人类可读缓存，
+ *    明确标注可能过期，不是真相来源——真正需要路径时应该向 Drive 查询，
+ *    不该只信 Sheet 里存的字符串；这是 EP4「可推导的东西不当权威来源」在
+ *    这里的具体应用）。不存完整 URL——URL 是 drive_file_id 的纯字符串组合，
+ *    需要时现算，不占一个欄位。
+ *  - PDF → 文字抽取现在透过 112_DocumentTextExtractor.js（UCR7 Adapter）取得，
+ *    不再只是文档注释里说"外部提供"——但抽取器本身还是占位，Drive 存档
+ *    位置/建议文件名/文件夹结构是可以现在就定的（不依赖任何未确认的外部
+ *    服务），所以先把这部分做实。
  */
 
 if (typeof require === 'function') {
   var { ParserRegistry } = require('./120_DocumentParsing.js');
   var { runReconciliationForWeek_ } = require('./130_Reconciliation.js');
+  var { DocumentTextExtractor } = require('./112_DocumentTextExtractor.js');
 }
 
 var DOCUMENTS_COLUMNS = [
   'document_id', 'source', 'document_type', 'document_class',
-  'period', 'file_hash', 'original_file_url', 'status'
+  'period', 'file_hash', 'drive_file_id', 'drive_path', 'status'
 ];
 
-/** CMP-DOC-{YYYYMMDD}-{SOURCE}-{TYPE}-{时间戳}——用时间戳而不是递增序号，
- *  避免需要先读 Sheet 才能算下一个序号（同样是 EP3：不为了这个提前造读取工具）。 */
+/** CMP-DOC-{YYYYMMDD}-{SOURCE}-{TYPE}-{时间戳} */
 function computeDocumentId_(source, documentType, now) {
   if (!(now instanceof Date) || isNaN(now.getTime())) {
     throw new Error('computeDocumentId_: now 必须是合法的 Date 对象'); // UCR4
@@ -43,6 +42,27 @@ function isDuplicateHash_(fileHash, existingHashes) {
   return (existingHashes || []).indexOf(fileHash) !== -1;
 }
 
+/**
+ * 建议的 Drive 文件名：{SOURCE}_{TYPE_CODE}_{PERIOD}.pdf。
+ * typeCode 由呼叫方明确指定，不自动从 documentType 猜——不同来源的简称
+ * 习惯不一样（GRAB_WEEKLY / EPF_STATEMENT / LHDN_EA 没有统一规则，猜比
+ * 明确指定更容易出错，CMP-P10）。
+ * @example computeSuggestedFileName_('GRAB', 'WEEKLY', '2026-W30') -> "GRAB_WEEKLY_2026_W30.pdf"
+ */
+function computeSuggestedFileName_(source, typeCode, period) {
+  const periodCode = String(period).replace(/-/g, '_');
+  return `${String(source).toUpperCase()}_${String(typeCode).toUpperCase()}_${periodCode}.pdf`;
+}
+
+/**
+ * 建议的 Drive 目录路径：Compliance OS/{source}/{year}/{文件夹标签}。
+ * 不存进 Sheet——纯粹给实际上传流程参考用来决定放哪个目录。
+ * @example computeSuggestedFolderPath_('Grab', '2026', 'Weekly Statements') -> "Compliance OS/Grab/2026/Weekly Statements"
+ */
+function computeSuggestedFolderPath_(source, year, folderLabel) {
+  return `Compliance OS/${source}/${year}/${folderLabel}`;
+}
+
 function buildDocumentRecord_(documentId, meta) {
   return {
     document_id: documentId,
@@ -51,7 +71,8 @@ function buildDocumentRecord_(documentId, meta) {
     document_class: meta.documentClass,
     period: meta.period,
     file_hash: meta.fileHash,
-    original_file_url: meta.originalFileUrl,
+    drive_file_id: meta.driveFileId,
+    drive_path: meta.drivePath || '',
     status: 'Imported'
   };
 }
@@ -60,12 +81,7 @@ function writeDocumentRecord_(truthWriter, record) {
   return truthWriter.appendValidatedRow('Documents', record, DOCUMENTS_COLUMNS);
 }
 
-/**
- * 真实实作（不是占位）：GAS 的 Utilities.computeDigest 是稳定、有文件的
- * API，不是猜的签名。fileBytesProvider 可替换，方便测试。
- * @param {Array} fileBytes （GAS 里通常是 blob.getBytes() 的结果）
- * @return {string} 十六进制 SHA-256
- */
+/** GAS 的 Utilities.computeDigest 是稳定、有文件的 API，不是猜的签名。 */
 function computeFileHash_(fileBytes) {
   if (typeof Utilities === 'undefined') {
     throw new Error('computeFileHash_ 需要 GAS 的 Utilities 服务，Node 环境请改用测试用的假 hash');
@@ -75,9 +91,9 @@ function computeFileHash_(fileBytes) {
 }
 
 /**
- * 核心编排：去重 → 生成 ID → 写入 Documents。不碰 Drive、不碰文字抽取——
- * 这两件事呼叫方要自己先做好，把结果（originalFileUrl）传进来。
- * @param {{fileHash: string, source: string, documentType: string, documentClass: string, period: string, originalFileUrl: string, existingHashes: string[]}} input
+ * 核心编排：去重 → 生成 ID → 写入 Documents。不碰 Drive 上传本身（呼叫方
+ * 已经把文件存进 Drive、算好 driveFileId 才会调用这个函数）。
+ * @param {{fileHash: string, source: string, documentType: string, documentClass: string, period: string, driveFileId: string, drivePath: string, existingHashes: string[]}} input
  * @param {{truthWriter: Object, now: Date}} deps
  * @return {{status: string, document_id: (string|null), record: (Object|null)}}
  */
@@ -92,13 +108,15 @@ function importDocument_(input, deps) {
 }
 
 /**
- * 示范：把目前已经存在的引擎串成一条完整链——Import → Parse → Reconciliation
- * （→ Verified Income，Reconciliation 内部已经接了）。之所以叫"示范"而不是
- * 正式对外的编排函数：extractedText 目前还是外部传进来的（对应上面说的文字
- * 抽取还没实作），等那部分接上真实来源后，这个函数的骨架不用大改，只是
- * extractedText 的来源从"参数"变成"内部调用抽取"。
- * @param {Object} importInput 见 importDocument_
- * @param {string} extractedText Document Import Engine 目前还不会自己产生，外部提供
+ * 完整链路：Import → Parse → Reconciliation（→ Verified Income，
+ * Reconciliation 内部已经接了）。
+ *
+ * extractedText 现在是可选的：不给的话会透过 DocumentTextExtractor 去拿
+ * （目前是占位，会抛错——等抽取方式确认后，呼叫方从此不用改，只是不再
+ * 需要手动传 extractedText 这个参数）。给了就直接用，主要给测试用，
+ * 也适合「抽取已经在别处发生」的情况。
+ * @param {Object} importInput 见 importDocument_，另外可选 fileId（给 extractor 用）
+ * @param {string} [extractedText]
  * @param {{truthWriter: Object, riderOSAdapter: Object, now: Date}} deps
  * @return {Object}
  */
@@ -108,8 +126,10 @@ function processGrabStatement_(importInput, extractedText, deps) {
     return { stage: 'Import', result: importResult };
   }
 
+  const text = extractedText || DocumentTextExtractor.extract({ fileId: importInput.driveFileId, mimeType: 'application/pdf' });
+
   const parser = ParserRegistry.getParserFor({ source: importInput.source, document_type: importInput.documentType });
-  const parsedStatement = parser.parse({ source: importInput.source, document_type: importInput.documentType }, extractedText);
+  const parsedStatement = parser.parse({ source: importInput.source, document_type: importInput.documentType }, text);
 
   const reconciliationResult = runReconciliationForWeek_(
     parsedStatement.document_meta.week,
@@ -125,6 +145,8 @@ if (typeof module !== 'undefined') {
     DOCUMENTS_COLUMNS,
     computeDocumentId_,
     isDuplicateHash_,
+    computeSuggestedFileName_,
+    computeSuggestedFolderPath_,
     buildDocumentRecord_,
     writeDocumentRecord_,
     computeFileHash_,

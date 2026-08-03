@@ -228,7 +228,7 @@ COMPLIANCE_DUE_SOON / COMPLIANCE_OVERDUE / COMPLIANCE_COMPLETED
 
 **900s Engineering**：900_Constitution.js（§1，含 ADR-000，**已写**——CMP-P1-10 原则 + CMP-CR1-5 编码规则）／901_System_Architecture.js（§2，**已写**——Compliance OS 自己的模块目录 + Architecture-Layers-to-Blueprint 映射）／902_Event_Model.js（§5）／903_State_Model.js（§2.3）／904_Data_Ownership.js（§3）／905_CoreBridge.js（§4）／906_AI_Integration.js（Reserved T3）／907_File_Map.js（本节）／908_Project_State.js（§9）／909_ADR.js（§1 ADR-000、§4.2 ADR-001、§3.2 ADR-002）
 
-**100s Blueprint**：101_Vision.js（§0）／102_Principles.js／105_TestUtils.js（**已写**）／110_DocumentImport.js（**已写**）／111_Tests_DocumentImport.js（**已写**）／115_TruthWriter.js（**已写**）／116_Tests_TruthWriter.js（**已写**）／120_DocumentParsing.js（已写）／121_GrabWeeklyParser.js（已写）／122_Tests_GrabWeeklyParser.js（已写）／123_RiderOSAdapter.js（已写，占位版）／124_Tests_RiderOSAdapter.js（已写）／130_Reconciliation.js（**已写**，含真实 TruthWriter/VerifiedIncome 整合）／131_Tests_Reconciliation.js（**已写**）／140_VerifiedIncome.js（**已写**）／141_Tests_VerifiedIncome.js（**已写**）／150_ComplianceCalendar.js（唯一还没写的主线功能）
+**100s Blueprint**：101_Vision.js（§0）／102_Principles.js／105_TestUtils.js（**已写**）／110_DocumentImport.js（**已写**，v2）／111_Tests_DocumentImport.js（**已写**）／112_DocumentTextExtractor.js（**已写**）／113_Tests_DocumentTextExtractor.js（**已写**）／115_TruthWriter.js（**已写**）／116_Tests_TruthWriter.js（**已写**）／120_DocumentParsing.js（已写）／121_GrabWeeklyParser.js（已写）／122_Tests_GrabWeeklyParser.js（已写）／123_RiderOSAdapter.js（已写，占位版）／124_Tests_RiderOSAdapter.js（已写）／130_Reconciliation.js（**已写**）／131_Tests_Reconciliation.js（**已写**）／140_VerifiedIncome.js（**已写**，v2：EventPublisher）／141_Tests_VerifiedIncome.js（**已写**）／150_ComplianceCalendar.js（唯一还没写的主线功能）
 
 > ⚠️ **实测发现（不是靠推理）**：用 Node 的 vm 模块把交付的文件按 GAS 实际的文件名字母序整个合并执行了一次（模拟 GAS 单一全局作用域），抓到 122 跟 141 两个测试文件各自用 `const` 宣告了同名的 `SAMPLE_RAW_TEXT`——这在 GAS 里会直接 SyntaxError，整个项目会加载失败，不是运行时才出错。已经抽成 `105_TestUtils.js` 共用，重新跑过合并模拟，确认不会再发生。
 
@@ -236,7 +236,11 @@ COMPLIANCE_DUE_SOON / COMPLIANCE_OVERDUE / COMPLIANCE_COMPLETED
 
 ## 7. Sheet Schema
 
-**Documents**：document_id `CMP-DOC-{YYYYMMDD}-{SOURCE}-{TYPE}-{SEQ}` / source / document_type / document_class / period / file_hash / original_file_url / status
+**Documents**：document_id `CMP-DOC-{YYYYMMDD}-{SOURCE}-{TYPE}-{SEQ}` / source / document_type / document_class / period / file_hash / **drive_file_id**（权威引用，取代原本设想的 original_file_url）/ **drive_path**（人类可读缓存，可能过期，不是真相来源）/ status
+
+**Drive 存档规范（采纳建议）**：
+- 目录结构：`Compliance OS/{source}/{year}/{可读标签}`，例如 `Compliance OS/Grab/2026/Weekly Statements`；新增文件类型只需要新增子目录，不动架构
+- 建议文件名：`{SOURCE}_{TYPE_CODE}_{PERIOD}.pdf`，例如 `GRAB_WEEKLY_2026_W30.pdf`、`EPF_STATEMENT_2026_07.pdf`——但这是给人看的，不是系统去重的依据；真正防止重复导入的还是 file_hash，两份文件名一样但内容不同（或反过来）都不影响去重逻辑
 
 **Parsed_Statements**：parse_id / document_id / parser_id / parser_version / period / gross_income / incentive / adjustment / penalty / total / raw_json / is_current
 
@@ -294,4 +298,4 @@ COMPLIANCE_DUE_SOON / COMPLIANCE_OVERDUE / COMPLIANCE_COMPLETED
   - `120_DocumentParsing.js` / `121_GrabWeeklyParser.js` 补上 UCR1-4；新增 `122_Tests_GrabWeeklyParser.js`（按 `NN_Tests_<FeatureId>.js` 惯例，含人工验证清单），15 项测试全部通过
   - ADR-001 改用 UCR7 的 Adapter 模式（`RiderOSAdapter`，内部先占位）；新增 `publishComplianceEvent_()` 作为 EventBus 发布的唯一出口
   - 待确认：UCR2 私有函数前缀 vs 后缀下划线，见 §8
-- Next：核心的 Import → Parse → Reconciliation → Verified Income 链路已经全部写完、测试过（含端到端）。剩下两类：(1) `150_ComplianceCalendar.js`——还没开始的主线功能；(2) 几个明确标注的外部依赖需要你确认才能从占位变真的——Drive 存档位置、PDF→文字抽取方式、Personal AI Core EventBus 真实调用方式、Rider OS 的 RIDER_WEEKLY_ESTIMATE_READY 发布能力
+- Next：核心链路（Import → Parse → Reconciliation → Verified Income）连同 Drive 存档规范、PDF→文字 Adapter、EventBus Adapter 都已经就位并测试过。剩下：(1) `150_ComplianceCalendar.js`——还没开始的主线功能；(2) 几个占位需要你确认才能变真的——具体用哪种 PDF→文字方式（Drive OCR/Gemini/OpenAI/Claude）、Personal AI Core EventBus 真实调用方式、Rider OS 的 RIDER_WEEKLY_ESTIMATE_READY 发布能力。这三个不影响继续开发，占位版已经能撑住其余逻辑往下走

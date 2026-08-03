@@ -31,6 +31,11 @@ var COMPLIANCE_OS_ARCHITECTURE = {
       date: '2026-08-01',
       method: 'Node vm 模块模拟合并执行，扩大到全部 16 个文件（含新加入的 110/111）',
       result: '通过——没有新的撞名或加载顺序问题'
+    },
+    {
+      date: '2026-08-01',
+      method: 'Node vm 模块模拟合并执行，扩大到全部 18 个文件（新增 DocumentTextExtractor 相关两个文件），改用目录扫描（不是手动列文件名）确保真的照 GAS 实际的字母序',
+      result: '通过'
     }
   ],
 
@@ -84,7 +89,13 @@ var COMPLIANCE_OS_ARCHITECTURE = {
       name: 'Document Import Engine',
       file: '110_DocumentImport.js / 111_Tests_DocumentImport.js',
       status: 'Tested',
-      note: '真实逻辑：去重、document_id 生成、写入 Documents、真实 SHA-256（Utilities.computeDigest，不是占位）。诚实的缺口：Drive 存档位置、PDF→文字抽取方式都还没确认，目前是呼叫方要提供 originalFileUrl / extractedText，不是这个引擎自己做。processGrabStatement_() 把 Import→Parse→Reconciliation→VerifiedIncome 串成一条链，20 项测试通过，含完整链路 + 重复文件在 Import 阶段就正确短路'
+      note: '去重、document_id 生成、真实 SHA-256、Documents 写入都是真实实作。采纳建议后：Sheet 存 drive_file_id（权威引用）+ drive_path（人类可读缓存，明确不是真相来源）而不是存 URL；新增建议文件名/目录路径的纯函数（{SOURCE}_{TYPE}_{PERIOD}.pdf，Compliance OS/{source}/{year}/{标签}）。processGrabStatement_() 串完整链路，21 项测试通过'
+    },
+    {
+      name: 'DocumentTextExtractor（PDF→文字 Adapter）',
+      file: '112_DocumentTextExtractor.js',
+      status: 'Tested',
+      note: 'UCR7 占位实现，跟 RiderOSAdapter 同一套路——底层要用 Drive OCR 还是 LLM API 都还没定，Adapter 层先确定，之后只换内部实现。3 项测试通过'
     },
     {
       name: 'Reconciliation Engine',
@@ -96,7 +107,7 @@ var COMPLIANCE_OS_ARCHITECTURE = {
       name: 'Verified Income 发布',
       file: '140_VerifiedIncome.js',
       status: 'Tested',
-      note: 'buildVerifiedIncomeRecord_/writeVerifiedIncome_/publishComplianceEvent_ 都写了并跟 Reconciliation Engine 串起来测过（14+19 项测试）；publishComplianceEvent_ 仍是占位——EventBus 真实调用方式还没确认'
+      note: 'buildVerifiedIncomeRecord_/writeVerifiedIncome_ 都写了并跟 Reconciliation Engine 串起来测过。EventBus 发布改成 EventPublisher（createEventPublisher_ 工厂 + 注入），跟 RiderOSAdapter/TruthWriter/DocumentTextExtractor 同一套 Adapter 模式，不再是单独一个裸函数——仍是占位，EventBus 真实调用方式还没确认'
     },
     {
       name: 'Compliance Calendar',

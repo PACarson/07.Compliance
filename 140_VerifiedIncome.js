@@ -78,18 +78,32 @@ function buildIncomeVerifiedEvent_(verifiedIncomeRecord, eventId) {
 }
 
 /**
- * UCR7 Adapter——EventBus 发布的唯一出口。目前是纯占位：Personal AI Core
- * 的 EventBus 真实调用方式还没确认，不猜签名，只记录。等确认了，只改这个
- * 函数内部，调用方（这个文件、Reconciliation Engine）完全不用动。
+ * UCR7 Adapter——EventBus 发布的唯一出口，跟 RiderOSAdapter/TruthWriter 同一个
+ * 套路：工厂函数 + 注入，方便测试；GAS 环境下用真正的实现，Personal AI Core
+ * 的 EventBus 真实调用方式确认前，先用占位实现（记录、不猜签名硬调用）。
  */
-function publishComplianceEvent_(eventType, payload) {
-  const msg = `[占位实现，等确认 Personal AI Core EventBus 的真实调用方式] event_type=${eventType}`;
-  if (typeof AlertService !== 'undefined' && typeof AlertService.log === 'function') {
-    AlertService.log('INFO', 'ComplianceEventPublisher', 'publishComplianceEvent_', { eventType, payload }, msg);
-  } else {
-    console.log(`[publishComplianceEvent_] ${msg}`, JSON.stringify(payload));
-  }
+function createEventPublisher_(publisher) {
+  return {
+    publish(eventType, payload) {
+      return publisher.publish(eventType, payload);
+    }
+  };
 }
+
+function placeholderEventPublisher_() {
+  return {
+    publish(eventType, payload) {
+      const msg = `[占位实现，等确认 Personal AI Core EventBus 的真实调用方式] event_type=${eventType}`;
+      if (typeof AlertService !== 'undefined' && typeof AlertService.log === 'function') {
+        AlertService.log('INFO', 'ComplianceEventPublisher', 'publish', { eventType, payload }, msg);
+      } else {
+        console.log(`[EventPublisher.publish] ${msg}`, JSON.stringify(payload));
+      }
+    }
+  };
+}
+
+var EventPublisher = createEventPublisher_(placeholderEventPublisher_());
 
 /**
  * 把 Verified_Income 一行写进 Sheet（透过 TruthWriter，UCR6）。
@@ -115,7 +129,7 @@ function verifyAndPublishIncome_(week, parsedStatement, reconciliationResult, tr
   const record = buildVerifiedIncomeRecord_(week, parsedStatement, reconciliationResult, now);
   writeVerifiedIncome_(truthWriter, record);
   const event = buildIncomeVerifiedEvent_(record, eventId);
-  publishComplianceEvent_('INCOME_VERIFIED', event);
+  EventPublisher.publish('INCOME_VERIFIED', event);
   return { record, event };
 }
 
@@ -124,7 +138,8 @@ if (typeof module !== 'undefined') {
     VERIFIED_INCOME_COLUMNS,
     buildVerifiedIncomeRecord_,
     buildIncomeVerifiedEvent_,
-    publishComplianceEvent_,
+    createEventPublisher_,
+    EventPublisher,
     writeVerifiedIncome_,
     verifyAndPublishIncome_
   };
