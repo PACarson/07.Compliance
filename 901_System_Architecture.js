@@ -16,6 +16,24 @@
  */
 
 var COMPLIANCE_OS_ARCHITECTURE = {
+  verificationHistory: [
+    {
+      date: '2026-08-01',
+      method: 'Node vm 模块模拟合并执行（按 GAS 文件名字母序，沙盒内没有 require/module/process）',
+      result: '第一次跑发现真实 bug（122/141 的 const SAMPLE_RAW_TEXT 撞名，GAS 里会是 SyntaxError），修复后（105_TestUtils.js）重跑通过'
+    },
+    {
+      date: '2026-08-01',
+      method: '真实 Google Apps Script 项目，实际执行 runAllTruthWriterTests / runAllGrabWeeklyParserTests / runAllRiderOSAdapterTests / runAllReconciliationTests / runAllVerifiedIncomeTests',
+      result: 'Steven 确认全部通过——这是目前唯一在真实 GAS 环境跑过的证据，比 Node 模拟更直接'
+    },
+    {
+      date: '2026-08-01',
+      method: 'Node vm 模块模拟合并执行，扩大到全部 16 个文件（含新加入的 110/111）',
+      result: '通过——没有新的撞名或加载顺序问题'
+    }
+  ],
+
   pipeline: [
     'Document Import Engine',
     'Document Parsing Engine',
@@ -64,9 +82,9 @@ var COMPLIANCE_OS_ARCHITECTURE = {
     },
     {
       name: 'Document Import Engine',
-      file: '110_DocumentImport.js',
-      status: 'Designed',
-      note: '§2.1 有流程设计（hash 去重、Document ID、Drive 存档），还没写代码——现在是唯一还没写的环节'
+      file: '110_DocumentImport.js / 111_Tests_DocumentImport.js',
+      status: 'Tested',
+      note: '真实逻辑：去重、document_id 生成、写入 Documents、真实 SHA-256（Utilities.computeDigest，不是占位）。诚实的缺口：Drive 存档位置、PDF→文字抽取方式都还没确认，目前是呼叫方要提供 originalFileUrl / extractedText，不是这个引擎自己做。processGrabStatement_() 把 Import→Parse→Reconciliation→VerifiedIncome 串成一条链，20 项测试通过，含完整链路 + 重复文件在 Import 阶段就正确短路'
     },
     {
       name: 'Reconciliation Engine',
