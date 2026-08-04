@@ -228,7 +228,9 @@ COMPLIANCE_DUE_SOON / COMPLIANCE_OVERDUE / COMPLIANCE_COMPLETED
 
 **900s Engineering**：900_Constitution.js（§1，含 ADR-000，**已写**——CMP-P1-10 原则 + CMP-CR1-5 编码规则）／901_System_Architecture.js（§2，**已写**——Compliance OS 自己的模块目录 + Architecture-Layers-to-Blueprint 映射）／902_Event_Model.js（§5）／903_State_Model.js（§2.3）／904_Data_Ownership.js（§3）／905_CoreBridge.js（§4）／906_AI_Integration.js（Reserved T3）／907_File_Map.js（本节）／908_Project_State.js（§9）／909_ADR.js（§1 ADR-000、§4.2 ADR-001、§3.2 ADR-002）
 
-**100s Blueprint**：101_Vision.js（§0）／102_Principles.js／105_TestUtils.js（**已写**）／110_DocumentImport.js（**已写**，v2）／111_Tests_DocumentImport.js（**已写**）／112_DocumentTextExtractor.js（**已写**）／113_Tests_DocumentTextExtractor.js（**已写**）／115_TruthWriter.js（**已写**）／116_Tests_TruthWriter.js（**已写**）／120_DocumentParsing.js（已写）／121_GrabWeeklyParser.js（已写）／122_Tests_GrabWeeklyParser.js（已写）／123_RiderOSAdapter.js（已写，占位版）／124_Tests_RiderOSAdapter.js（已写）／130_Reconciliation.js（**已写**）／131_Tests_Reconciliation.js（**已写**）／140_VerifiedIncome.js（**已写**，v2：EventPublisher）／141_Tests_VerifiedIncome.js（**已写**）／150_ComplianceCalendar.js（唯一还没写的主线功能）
+**100s Blueprint**：101_Vision.js（§0）／102_Principles.js／105_TestUtils.js（**已写**）／110_DocumentImport.js（**已写**，v2）／111_Tests_DocumentImport.js（**已写**）／112_DocumentTextExtractor.js（**已写**）／113_Tests_DocumentTextExtractor.js（**已写**）／115_TruthWriter.js（**已写**）／116_Tests_TruthWriter.js（**已写**）／120_DocumentParsing.js（已写）／121_GrabWeeklyParser.js（已写）／122_Tests_GrabWeeklyParser.js（已写）／123_RiderOSAdapter.js（已写，占位版）／124_Tests_RiderOSAdapter.js（已写）／130_Reconciliation.js（**已写**）／131_Tests_Reconciliation.js（**已写**）／140_VerifiedIncome.js（**已写**，v2：EventPublisher）／141_Tests_VerifiedIncome.js（**已写**）／150_ComplianceCalendar.js（**已写**）／151_Tests_ComplianceCalendar.js（**已写**）／190_Tests_Contracts.js（**已写**，新增测试类别）
+
+核心 Runtime 主线全部写完。剩下只有 `906_AI_Integration.js`——按 Blueprint BP-3 刻意保留 Tier 3，不展开。
 
 > ⚠️ **实测发现（不是靠推理）**：用 Node 的 vm 模块把交付的文件按 GAS 实际的文件名字母序整个合并执行了一次（模拟 GAS 单一全局作用域），抓到 122 跟 141 两个测试文件各自用 `const` 宣告了同名的 `SAMPLE_RAW_TEXT`——这在 GAS 里会直接 SyntaxError，整个项目会加载失败，不是运行时才出错。已经抽成 `105_TestUtils.js` 共用，重新跑过合并模拟，确认不会再发生。
 
@@ -248,17 +250,24 @@ COMPLIANCE_DUE_SOON / COMPLIANCE_OVERDUE / COMPLIANCE_COMPLETED
 
 **Verified_Income**（Finance OS 唯一读取的表）：income_id `CMP-INCOME-{YYYY}-W{WW}` / period / currency / net_delivery_income / incentive / tip / other_payments / total_deductions / net / amount / source（固定 "Compliance OS"）/ origin_platform / status / verified_at
 
-**Compliance_Calendar**（v0.5：按 UEF EP4「可推导的状态别存」重新设计）
+**Compliance_Calendar**（v0.6：实作时进一步修正——完成记录改成独立的 append-only 表）
 
 | 字段 | 说明 |
 |---|---|
-| obligation_id | `CMP-CAL-{TYPE}-{YYYY}` |
+| obligation_id | `CMP-CAL-{CODE}-{YYYY}`，CODE 由建立时明确指定（例如 ROADTAX），不从 category 自动推 |
 | category / title / due_date / recurrence | |
 | reminder_lead_days | |
-| completed_at | **存的是事实**（真的完成了没有），nullable |
 | linked_document_id | |
 
-⚠️ 之前 v0.1-v0.4 的 `status` 字段（Upcoming/Due_Soon/Overdue/Completed）删掉——按 EP4（Property OS 的 Obligation Engine 就是这个原则的原始案例：Overdue 完全可以从 due_date + 宽限期 + 当下时间推出来，存成字段只会变成第二个真相来源，还要靠排程 job 保持同步，job 一失败状态就是错的）。现在：Upcoming / Due_Soon / Overdue 三态查询时用 `due_date`、`reminder_lead_days`、当下时间即时算出来；`Completed` 才是真的需要写入的事实（是否真的完成了，没法用时间推），用 `completed_at` 是否有值判断。
+**Compliance_Completions**（v0.6 新增，append-only）
+
+| 字段 | 说明 |
+|---|---|
+| obligation_id | 对应 Compliance_Calendar 的哪一笔 |
+| completed_at | 真正的事实——这个动作什么时候发生 |
+| linked_document_id / note | |
+
+⚠️ v0.1-v0.4 设想 `completed_at` 直接存在 Compliance_Calendar 那一行，实作时发现这需要 UPDATE 既有行——但 TruthWriter（UCR6）现在只支援 append，且这更贴近生态整体的 event-sourcing 风格（Rider OS TruthEngine、Personal AI Core EventBus 都是只加不改）。改成：Compliance_Calendar 的一行只在建立时写一次（不可变定义），完成与否改成查「Compliance_Completions 里有没有这个 obligation_id 的记录」——周期性义务因此每一期用新的 obligation_id（不是同一笔复用），避免要处理"这笔完成记录属于哪一期"的对应问题。Upcoming/Due_Soon/Overdue 三态维持 v0.5 的判断：查询时用 `due_date`、`reminder_lead_days`、当下时间即时算，不存欄位。
 
 **Audit_Log / Compliance_Events_Log**：字段略，留痕每次解析/人工覆盖/发布事件。
 
@@ -273,6 +282,7 @@ COMPLIANCE_DUE_SOON / COMPLIANCE_OVERDUE / COMPLIANCE_COMPLETED
 - **ADR-002**：Official Truth Principle → 已决定，见 §3.2
 - Decision OS → 维持不纳入
 - Finance OS 904 → 已确认，见 §3
+- **评审建议「平台稳定 ID 优先于路径/显示名」推广到整个生态**（Drive→file_id、Calendar→event_id、Sheets→spreadsheet_id、Gmail→message_id）→ 方向认同，但按 BP-2/UEF §0.9，Blueprint 层级的推广需要第二个项目独立验证同样的模式，或有明确的生态级效益，不是单一项目讲得通就够。目前只有 Compliance OS 一个实例（drive_file_id vs drive_path），先留在这里当 Compliance OS 自己的原则（CMP-P 系列可以补一条），不越权直接宣告成生态规则——这也是 UEF 自己的 Candidate Patterns（D7）机制存在的原因
 
 **已确认（v0.6）**：私有函数命名不照 UEF 原文字面的「前缀」，GAS 继续用后缀下划线 `functionName_()`（隐藏于 Apps Script Run 下拉选单的实际平台好处）。代码已经改回来。
 
@@ -283,19 +293,8 @@ COMPLIANCE_DUE_SOON / COMPLIANCE_OVERDUE / COMPLIANCE_COMPLETED
 
 ## 9. Project State — 对应 `908_Project_State.js`
 
-- Status：**Draft v0.6**
-- v0.6 变更：v0.5 六项修正（EP3、Property OS 理由、UCR1-4/1899 bug、Compliance Calendar Projection、RiderOSAdapter 设计、ADR-000）全部确认；私有函数命名改回 GAS 后缀惯例，`120_DocumentParsing.js`/`121_GrabWeeklyParser.js`/`122_Tests_GrabWeeklyParser.js` 同步改名，测试重跑全过；新增并测试通过 `123_RiderOSAdapter.js` + `124_Tests_RiderOSAdapter.js`（占位版，7 项测试全过）；记录了 Language Convention Override 提案文字，供你合并进实际 UEF 文档
-- Phase 2 实际进度校正：Step 1（字段分析）、Step 2（JSON Schema）、Step 3（GrabWeeklyParser）都已完成；Step 4（Reconciliation Engine）的前置依赖 RiderOSAdapter 已经写好，Reconciliation Engine 本体还没写——这是唯一剩下的部分，不是从头开始
-- v0.5 变更（对照你上传的 UEF v1.5 / Blueprint v1.2 原文修正）：
-  - 引用错误修正：anti-premature-engineering 从误引的「P6」改成正确的「EP3」
-  - Blueprint 0-5 层的 Tier 从「整行笼统标注」改成逐节点精确对照原文（尤其 Integration 层：Bridge/Import-Export/External Systems 三者 Tier 并不相同，之前混在一起标 T2 是不精确的）
-  - §3.1 Property OS 现状修正：它不是"还没开始 Governance"，而是已经有真实跑起来的 Foundation 层 + Obligation Engine/Scheduler Runtime；不采纳 Document Repository 的结论不变，理由改成"能力不同（Obligation/Scheduling ≠ 文件导入解析），不是进度不同"
-  - 新增 ADR-000（为什么是独立项目）
-  - 新增 §2.4 对照 UEF Reference Architecture，标出 Observability 偏薄、Reminder 层刻意外包给 Reminder OS 两点
-  - 新增 §3.3 Security，明确对应 Blueprint Cross-Cutting Capabilities 而不是自己发明一套
-  - Compliance_Calendar 按 EP4 重新设计：删掉存储的 status，Upcoming/Due_Soon/Overdue 改成查询时用 due_date 即时算，只有 Completed（用 completed_at）是真正需要存的事实
-  - 新增 Sheets 日期序列值静默转换的提醒（Failure Catalog 里 Property OS 上线前发现的教训）
-  - `120_DocumentParsing.js` / `121_GrabWeeklyParser.js` 补上 UCR1-4；新增 `122_Tests_GrabWeeklyParser.js`（按 `NN_Tests_<FeatureId>.js` 惯例，含人工验证清单），15 项测试全部通过
-  - ADR-001 改用 UCR7 的 Adapter 模式（`RiderOSAdapter`，内部先占位）；新增 `publishComplianceEvent_()` 作为 EventBus 发布的唯一出口
-  - 待确认：UCR2 私有函数前缀 vs 后缀下划线，见 §8
-- Next：核心链路（Import → Parse → Reconciliation → Verified Income）连同 Drive 存档规范、PDF→文字 Adapter、EventBus Adapter 都已经就位并测试过。剩下：(1) `150_ComplianceCalendar.js`——还没开始的主线功能；(2) 几个占位需要你确认才能变真的——具体用哪种 PDF→文字方式（Drive OCR/Gemini/OpenAI/Claude）、Personal AI Core EventBus 真实调用方式、Rider OS 的 RIDER_WEEKLY_ESTIMATE_READY 发布能力。这三个不影响继续开发，占位版已经能撑住其余逻辑往下走
+- Status：**Architecture Freeze**（采纳评审建议的表述）——Governance 层（Architecture / Data Ownership / Module Boundary / File Map / Sheet Schema / Event Model / ADR-000-002）内容稳定，往后除非有新证据或真实数据暴露问题，不再主动扩充设计。重心转向工程质量（测试覆盖、Contract Test、已知限制的透明度），跟 UEF Blueprint Change Policy（§0.9）的精神一致——不因为"讨论起来合理"就继续加，只有第二个项目的独立证据或真实需求才动
+- **核心 Runtime 现状**（用 `901_System_Architecture.js` 的 `computeComplianceOsEngineeringMetrics_()` 算，不是手动维护的数字）：12 个模块，11 个 Tested，1 个 Designed（`906_AI_Integration.js`，按 Blueprint BP-3 刻意保留 Tier 3，不是缺测试）。21 个文件的 GAS 合并模拟持续通过
+- **已知限制**（占位、等你确认才能变真的，都不影响继续开发）：PDF→文字抽取方式（Drive OCR/Gemini/OpenAI/Claude 选哪个）、Personal AI Core EventBus 真实调用方式、Rider OS 的 RIDER_WEEKLY_ESTIMATE_READY 发布能力、Compliance Calendar 的通知去重策略（连续多天 Due_Soon 会不会重复吵）
+- **历史变更摘要**（v0.1→v0.6 完整细节见各版本自身，这里只列大方向）：v0.1-v0.3 定下 Compliance OS 的定位、Data Ownership、Parser/Reconciliation/Event 设计，三轮外部评审逐步收敛（Document Repository 不抽离、通用 Compliance 事件不加具名类型、Official Truth Principle）；v0.4 用真实 Grab Statement 修正了收入结构假设；v0.5 对照 UEF v1.5/Blueprint v1.2 原文修正了引用错误与 Tier 判断，新增 ADR-000；v0.6 起进入实作阶段——`900_Constitution.js`/`901_System_Architecture.js` 落成 Compliance OS 自己的 UEF/Blueprint，核心链路（Import→Parse→Reconciliation→VerifiedIncome→ComplianceCalendar）全部写完测试，含一次实测抓到的真实 GAS 撞名 bug（详见 `901` 的 verificationHistory）
+- Next：Compliance OS 这套工程模式本身已经稳定，接下来价值更高的不是继续加 Compliance OS 的设计，而是（评审建议，你自己判断优先级）：(1) 补齐上面列的已知限制，把占位换成真的；(2) 把这套 UEF-in-miniature 的模式（Constitution + Architecture + Adapter-everywhere + NN_Tests + Contract Tests）拿去 Finance OS 或 Property OS 验证是不是真的可复用——只有第二个项目独立走出同样的模式，才是这套工程惯例该不该进 UEF/Blueprint 共享能力的真正证据

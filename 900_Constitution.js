@@ -100,6 +100,12 @@ var COMPLIANCE_OS_CONSTITUTION = {
       name: '异常要显性，不能静默',
       statement:
         '解析失败或对账差异超出容差，必须落到一个明确状态（Failed_Parse / Needs_Review），绝不能默默用默认值、跳过，或悄悄发布一个可能是错的 Verified Income。'
+    },
+    {
+      id: 'CMP-P11',
+      name: '平台稳定 ID 优先于路径/显示名',
+      statement:
+        '涉及外部平台（目前是 Google Drive）的记录，一律保存平台自己的稳定 ID（drive_file_id）当权威引用；路径、显示名这类可能因为整理/重新命名而改变的东西，只当人类可读的缓存，明确标注不是真相来源，需要准确信息时应该向平台重新查询。这是 EP4（Fact vs Projection）在这个 domain 的具体应用；目前只有 Compliance OS 一个实例，还没到能推广成生态规则的证据门槛（BP-2/UEF §0.9），先记在这里。'
     }
   ],
 

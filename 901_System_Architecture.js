@@ -36,6 +36,11 @@ var COMPLIANCE_OS_ARCHITECTURE = {
       date: '2026-08-01',
       method: 'Node vm 模块模拟合并执行，扩大到全部 18 个文件（新增 DocumentTextExtractor 相关两个文件），改用目录扫描（不是手动列文件名）确保真的照 GAS 实际的字母序',
       result: '通过'
+    },
+    {
+      date: '2026-08-01',
+      method: '补齐 Compliance Calendar 测试（27 项）+ 新增 Contract Tests（12 项，采纳评审建议的新测试类别）；Node vm 模拟扩大到全部 21 个文件',
+      result: '通过；11/12 模块 Tested，唯一未测的 AI Extraction 是按 Blueprint BP-3 刻意保留的 Tier 3 占位，不是核心 Runtime 缺测试'
     }
   ],
 
@@ -111,9 +116,15 @@ var COMPLIANCE_OS_ARCHITECTURE = {
     },
     {
       name: 'Compliance Calendar',
-      file: '150_ComplianceCalendar.js',
-      status: 'Designed',
-      note: 'Schema 已按 EP4 重新设计（status 不存），还没写代码'
+      file: '150_ComplianceCalendar.js / 151_Tests_ComplianceCalendar.js',
+      status: 'Tested',
+      note: '按 EP4 设计：Upcoming/Due_Soon/Overdue 查询时即时算，不存欄位；"完成"是 append-only 的 Compliance_Completions 记录，不是 UPDATE 既有行（配合 TruthWriter 目前只支援 append，也更贴近生态的 event-sourcing 风格）。27 项测试通过。故意留着没解决：连续多天都是 Due_Soon 会不会重复发通知太吵——没有实际使用证据前不猜方案'
+    },
+    {
+      name: 'Contract Tests（新增测试类别，采纳评审建议）',
+      file: '190_Tests_Contracts.js',
+      status: 'Tested',
+      note: '跟 NN_Tests_<FeatureId>.js 不同维度：测的是"所有实现某 Adapter 契约的东西形状对不对"（ParserRegistry 里每个 Parser 是否满足 DocumentParser 的 4 个方法、每个 createXxx_() 工厂是否产出文档承诺的方法），不是"这个模块自己的行为对不对"。12 项测试通过'
     },
     {
       name: 'AI Extraction / 差异解释',
@@ -159,6 +170,24 @@ var COMPLIANCE_OS_ARCHITECTURE = {
   }
 };
 
+/**
+ * Engineering Metrics / Project Health（采纳评审建议新增）。
+ * 故意写成"从 modules 算出来的函数"，不是另外手动维护的一组数字——
+ * 手动维护的汇总数字会跟 modules 实际内容脱钩、需要两边同步更新，这正是
+ * EP4 想避免的那种「可推导却被存成第二份真相」。要看最新数字，呼叫这个
+ * 函数，不要抄一份写死的数字到别的地方。
+ * @return {{fileCount: number, moduleCount: number, tested: number, designed: number, knownLimitations: string[]}}
+ */
+function computeComplianceOsEngineeringMetrics_() {
+  const modules = COMPLIANCE_OS_ARCHITECTURE.modules;
+  const tested = modules.filter((m) => m.status === 'Tested').length;
+  const designed = modules.filter((m) => m.status === 'Designed').length;
+  const knownLimitations = modules
+    .filter((m) => /占位|还没|未确认|Reserved/.test(m.note))
+    .map((m) => `${m.name}: ${m.note}`);
+  return { moduleCount: modules.length, tested, designed, knownLimitations };
+}
+
 if (typeof module !== 'undefined') {
-  module.exports = { COMPLIANCE_OS_ARCHITECTURE };
+  module.exports = { COMPLIANCE_OS_ARCHITECTURE, computeComplianceOsEngineeringMetrics_ };
 }
