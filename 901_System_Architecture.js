@@ -126,6 +126,18 @@ var COMPLIANCE_OS_ARCHITECTURE = {
       note: '按 EP4 设计：Upcoming/Due_Soon/Overdue 查询时即时算，不存欄位；"完成"是 append-only 的 Compliance_Completions 记录，不是 UPDATE 既有行（配合 TruthWriter 目前只支援 append，也更贴近生态的 event-sourcing 风格）。27 项测试通过。故意留着没解决：连续多天都是 Due_Soon 会不会重复发通知太吵——没有实际使用证据前不猜方案'
     },
     {
+      name: 'Monthly Projection Engine（新增，评估结论：属于 Compliance OS，不存储，即时算）',
+      file: '160_MonthlyProjection.js / 161_Tests_MonthlyProjection.js',
+      status: 'Tested',
+      note: '纯函数消费 Verified_Income 记录聚合成月度/YTD 汇总，标示 _source: "Projection"，不产生新的 Verified 记录。ISO 周→月份用该周星期四所在月份，已用已知真实样本（2026-W30=2026-07）核对正确。14 项测试通过。可以直接消费历史 Verified_Income 回填，不需要重新解析 PDF'
+    },
+    {
+      name: 'Utils（生产代码共用工具，新增）',
+      file: '106_Utils.js',
+      status: 'Tested',
+      note: '把原本在 130/160 各自重复宣告的 round2_() 收成一份——function 重复宣告不会像 const 那样直接崩溃，但一样是脆弱模式，跟 105_TestUtils.js 同样的理由清理掉'
+    },
+    {
       name: 'Contract Tests（新增测试类别，采纳评审建议）',
       file: '190_Tests_Contracts.js',
       status: 'Tested',
