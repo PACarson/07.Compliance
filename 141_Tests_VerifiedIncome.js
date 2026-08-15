@@ -78,6 +78,6 @@ if (typeof module !== 'undefined') {
 
 /**
  * ============ 人工验证清单 ============
- * [ ] publishComplianceEvent_() 目前只 log，EventBus 真实调用方式确认后要接上
+ * [ ] EventPublisher.publish() 目前只 log，EventBus 真实调用方式确认后要接上
  * [ ] verified_at 存进 Sheet 要确认那一栏已经设成 plain-text('@') 格式
  */

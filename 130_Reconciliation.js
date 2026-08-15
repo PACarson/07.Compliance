@@ -17,10 +17,7 @@
 
 if (typeof require === 'function') {
   var { verifyAndPublishIncome_ } = require('./140_VerifiedIncome.js');
-}
-
-function round2_(n) {
-  return Math.round((n + Number.EPSILON) * 100) / 100;
+  var { round2_ } = require('./106_Utils.js');
 }
 
 /** 预设容差：RM5 或总额的 0.5%，取较大者。还没被真实数据验证过，是合理猜测。 */
