@@ -73,7 +73,7 @@ function runAllDocumentImportTests() {
   );
   assertEqual_('drivePath 省略时不报错', importedNoPath.status, 'Imported', results);
 
-  // ---- processGrabStatement_：完整链路 ----
+  // ---- processGrabStatement_：完整链路（有 Rider OS 数据）----
   const accessor3 = fakeSheetAccessor_();
   const riderAdapter = createRiderOSAdapter_(fakeStore_());
   riderAdapter.onWeeklyEstimateReady({ week: '2026-W30', daily_estimate_total: 1720.00, reward_estimate_total: 14.10, status: 'Ready' });
@@ -83,9 +83,49 @@ function runAllDocumentImportTests() {
     TEST_FIXTURE_GRAB_WEEKLY_STATEMENT,
     deps3
   );
-  assertEqual_('完整链路·stage', chainResult.stage, 'Reconciliation', results);
-  assertEqual_('完整链路·对账 Auto_Verified', chainResult.reconciliationResult.status, 'Auto_Verified', results);
+  assertEqual_('完整链路·stage', chainResult.stage, 'Verified', results);
+  assertEqual_('完整链路·Verified Income 真的发布了', chainResult.verifyResult.record.status, 'Verified', results);
+  assertEqual_('完整链路·对账 Matched', chainResult.reconciliationResult.status, 'Matched', results);
   assertEqual_('完整链路·Verified_Income 写了', accessor3.getWritten('Verified_Income').length, 1, results);
+  assertEqual_('完整链路·Reconciliation_Log 也写了', accessor3.getWritten('Reconciliation_Log').length, 1, results);
+
+  // ---- processGrabStatement_：ADR-003 核心——完全没有 Rider OS 数据时，
+  // Verified Income 照样发布（Compliance OS v1 不依赖 Rider OS 独立运行）----
+  const accessor3b = fakeSheetAccessor_();
+  const emptyRiderAdapter = createRiderOSAdapter_(fakeStore_());
+  const deps3b = { truthWriter: createTruthWriter_(accessor3b, fakeLockProvider_()), riderOSAdapter: emptyRiderAdapter, now: fixedNow };
+  const noRiderResult = processGrabStatement_(
+    { fileHash: 'stu222', source: 'Grab', documentType: 'Weekly Statement', documentClass: 'Income', period: '2026-W30', driveFileId: '1NoRider', existingHashes: [] },
+    TEST_FIXTURE_GRAB_WEEKLY_STATEMENT,
+    deps3b
+  );
+  assertEqual_('无 Rider OS 数据·stage 仍是 Verified', noRiderResult.stage, 'Verified', results);
+  assertEqual_('无 Rider OS 数据·Verified Income 仍然发布', noRiderResult.verifyResult.record.status, 'Verified', results);
+  assertEqual_('无 Rider OS 数据·reconciliationResult.status 是 Not_Performed', noRiderResult.reconciliationResult.status, 'Not_Performed', results);
+  assertEqual_('无 Rider OS 数据·Verified_Income 照样写了', accessor3b.getWritten('Verified_Income').length, 1, results);
+  assertEqual_('无 Rider OS 数据·Reconciliation_Log 也写了（Not_Performed 留痕）', accessor3b.getWritten('Reconciliation_Log').length, 1, results);
+
+  // ---- processGrabStatement_：ADR-003 的非阻断保证——就算 Reconciliation
+  // 端丢一个「预期外」的例外（不是正常的没数据 null，是真的坏掉），已经
+  // 发布的 Verified Income 也不能跟着报错 ----
+  const accessor3c = fakeSheetAccessor_();
+  const throwingRiderAdapter = { getWeeklyEstimate() { throw new Error('模拟 Rider OS Adapter 未预期的故障'); } };
+  const deps3c = { truthWriter: createTruthWriter_(accessor3c, fakeLockProvider_()), riderOSAdapter: throwingRiderAdapter, now: fixedNow };
+  let threwDespiteReconciliationError = false;
+  let resultDespiteReconciliationError = null;
+  try {
+    resultDespiteReconciliationError = processGrabStatement_(
+      { fileHash: 'vwx333', source: 'Grab', documentType: 'Weekly Statement', documentClass: 'Income', period: '2026-W30', driveFileId: '1BadAdapter', existingHashes: [] },
+      TEST_FIXTURE_GRAB_WEEKLY_STATEMENT,
+      deps3c
+    );
+  } catch (e) {
+    threwDespiteReconciliationError = true;
+  }
+  results.push({ name: 'Reconciliation 未预期例外·processGrabStatement_ 本身不抛错', pass: !threwDespiteReconciliationError });
+  assertEqual_('Reconciliation 未预期例外·Verified Income 仍然发布', resultDespiteReconciliationError && resultDespiteReconciliationError.verifyResult.record.status, 'Verified', results);
+  assertEqual_('Reconciliation 未预期例外·reconciliationResult 是 null（失败了，不是假装成功）', resultDespiteReconciliationError && resultDespiteReconciliationError.reconciliationResult, null, results);
+  assertEqual_('Reconciliation 未预期例外·Verified_Income 确实写进 Sheet 了', accessor3c.getWritten('Verified_Income').length, 1, results);
 
   // ---- processGrabStatement_：不给 extractedText 时会走 DocumentTextExtractor（目前占位，应该抛错，不是静默失败）----
   const accessor4 = fakeSheetAccessor_();
@@ -129,4 +169,7 @@ if (typeof module !== 'undefined') {
  *     processGrabStatement_() 不再需要手动传 extractedText 也能跑通
  * [ ] existingHashes 目前是外部传入——等有读 Sheet 的工具后，要确认真的会
  *     去读 Documents 表全部现有的 file_hash
+ * [ ] ADR-003：真实环境下让 riderOSAdapter.getWeeklyEstimate 丢一个未预期的
+ *     例外（不是正常的 null），确认 processGrabStatement_ 仍然回传已经发布
+ *     好的 verifyResult，不会整个调用都失败
  */

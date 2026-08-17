@@ -1,14 +1,23 @@
 /**
  * 130_Reconciliation.js
- * Compliance OS — Reconciliation Engine（对应治理文档 §2.1、§4.2 ADR-001、CMP-P5/P7/P10）
+ * Compliance OS — Reconciliation Engine（对应治理文档 §2.1、§2.5 ADR-003、
+ * §4.2 ADR-001、CMP-P5/P7/P10/P12）
+ *
+ * ADR-003（v0.7，Steven 已签字）：Reconciliation 是独立、可选、非阻断的次要
+ * 验证——完全不碰 Verified_Income（不写、不查、不 import 140_VerifiedIncome.js，
+ * 这个文件现在对 140 零依赖）。Verified Income 的发布在 110_DocumentImport.js
+ * 里解析成功当下就完成，不等这个模块。
  *
  * 三层：
  *  - reconcileStatement_()：纯逻辑，不碰 I/O，可以直接测。
  *  - recordReconciliationResult_()：把结果写进 Reconciliation_Log（透过
- *    115_TruthWriter.js，UCR6），Auto_Verified 时再呼叫 140_VerifiedIncome.js
- *    的 verifyAndPublishIncome_() 写 Verified_Income + 发布事件。
- *  - runReconciliationForWeek_()：编排层，透过 RiderOSAdapter 取数（UCR7），
- *    「两边到齐才跑」。
+ *    115_TruthWriter.js，UCR6）——不管有没有 Rider OS 数据都会写一行，「尝试
+ *    过」本身要留痕，不是没数据就整个跳过不留任何记录。
+ *  - runReconciliationForWeek_()：编排层，透过 RiderOSAdapter 取数（UCR7）。
+ *  - getCurrentReconciliationStatus_()：查询时用——某一周「现在」的对账状态
+ *    从 Reconciliation_Log 取最新一笔算，不是存在别的地方等着被回头更新
+ *    （TruthWriter/UCR6 只支援 append，没有原地更新的方法；这里跟
+ *    150_ComplianceCalendar.js 的 Completed 判定同一个模式，EP4）。
  *
  * 依赖（riderOSAdapter / truthWriter / now）一律用 deps 对象注入，不在函数
  * 内部直接 new Date() 或直接引用全局 RiderOSAdapter/TruthWriter——这样单元
@@ -16,7 +25,6 @@
  */
 
 if (typeof require === 'function') {
-  var { verifyAndPublishIncome_ } = require('./140_VerifiedIncome.js');
   var { round2_ } = require('./106_Utils.js');
 }
 
@@ -75,7 +83,10 @@ function reconcileStatement_(parsedStatement, riderEstimate, config) {
     difference_pct: differencePct,
     within_tolerance: withinTolerance,
     reason,
-    status: withinTolerance ? 'Auto_Verified' : 'Needs_Review'
+    // ADR-003/CMP-P12：这个 status 现在纯粹是「对账本身的比对结果」，跟
+    // Verified Income 发不发布无关（那件事在解析成功当下已经完成了）。
+    // Discrepancy_Flagged 只是显性标注，不撤销、不阻断已经 Verified 的记录。
+    status: withinTolerance ? 'Matched' : 'Discrepancy_Flagged'
   };
 }
 
@@ -96,9 +107,9 @@ function recordReconciliationResult_(week, result, truthWriter, now) {
 }
 
 /**
- * 编排层：「两边到齐才跑」。parsedStatement 目前用参数传入——Document Import
- * Engine + 读 Parsed_Statements 的机制还没写，等那部分建好，这里改成内部
- * 自己去读，函数签名不用变。
+ * 编排层。ADR-003：Rider OS 没资料不再是「等待、不留痕」，而是照样写一笔
+ * Not_Performed 的 Reconciliation_Log（尝试过这件事本身要看得见，CMP-P10），
+ * 且完全不影响 Verified Income——那份记录在这个函数被呼叫之前就已经发布了。
  * @param {string} week 例如 "2026-W30"
  * @param {Object} parsedStatement
  * @param {{riderOSAdapter: Object, truthWriter: Object, now: Date}} deps
@@ -107,21 +118,41 @@ function recordReconciliationResult_(week, result, truthWriter, now) {
  */
 function runReconciliationForWeek_(week, parsedStatement, deps, config) {
   const riderEstimate = deps.riderOSAdapter.getWeeklyEstimate(week);
+
   if (!riderEstimate) {
-    // 两边没到齐——回传等待状态，不是当成 0 去算，也不是抛错
-    return { week, status: 'Waiting_For_Rider_Estimate' };
+    const notPerformed = {
+      statement_total: parsedStatement && parsedStatement.summary ? parsedStatement.summary.weekly_net : null,
+      rider_os_estimate: null,
+      reward_sheet_total: null,
+      rider_total: null,
+      difference: null,
+      difference_pct: null,
+      within_tolerance: null,
+      reason: 'No_Rider_Estimate',
+      status: 'Not_Performed'
+    };
+    const reconciliationId = recordReconciliationResult_(week, notPerformed, deps.truthWriter, deps.now);
+    return Object.assign({ week, reconciliation_id: reconciliationId }, notPerformed);
   }
 
   const result = reconcileStatement_(parsedStatement, riderEstimate, config);
   const reconciliationId = recordReconciliationResult_(week, result, deps.truthWriter, deps.now);
+  return Object.assign({ week, reconciliation_id: reconciliationId }, result);
+}
 
-  let verifiedIncome = null;
-  if (result.status === 'Auto_Verified') {
-    const eventId = `CMP-EVT-${week}-${deps.now.getTime()}`;
-    verifiedIncome = verifyAndPublishIncome_(week, parsedStatement, result, deps.truthWriter, eventId, deps.now);
-  }
-
-  return Object.assign({ week, reconciliation_id: reconciliationId, verifiedIncome }, result);
+/**
+ * 查询时用——某一周「现在」的对账状态，从 Reconciliation_Log 全部记录里取
+ * 最新一笔算出来，不是一个被回头改写的欄位（UCR6：TruthWriter 只支援
+ * append）。reconciliation_id 带 now.getTime()，字串排序即时间排序。
+ * @param {string} week
+ * @param {Array<{week: string, reconciliation_id: string, status: string}>} reconciliationLogRecords
+ * @return {string} 'Not_Performed' | 'Matched' | 'Discrepancy_Flagged'
+ */
+function getCurrentReconciliationStatus_(week, reconciliationLogRecords) {
+  const forWeek = (reconciliationLogRecords || []).filter((r) => r.week === week);
+  if (forWeek.length === 0) return 'Not_Performed';
+  const latest = forWeek.reduce((a, b) => (a.reconciliation_id > b.reconciliation_id ? a : b));
+  return latest.status;
 }
 
 if (typeof module !== 'undefined') {
@@ -130,6 +161,7 @@ if (typeof module !== 'undefined') {
     RECONCILIATION_LOG_COLUMNS,
     reconcileStatement_,
     recordReconciliationResult_,
-    runReconciliationForWeek_
+    runReconciliationForWeek_,
+    getCurrentReconciliationStatus_
   };
 }

@@ -106,6 +106,13 @@ var COMPLIANCE_OS_CONSTITUTION = {
       name: '平台稳定 ID 优先于路径/显示名',
       statement:
         '涉及外部平台（目前是 Google Drive）的记录，一律保存平台自己的稳定 ID（drive_file_id）当权威引用；路径、显示名这类可能因为整理/重新命名而改变的东西，只当人类可读的缓存，明确标注不是真相来源，需要准确信息时应该向平台重新查询。这是 EP4（Fact vs Projection）在这个 domain 的具体应用；目前只有 Compliance OS 一个实例，还没到能推广成生态规则的证据门槛（BP-2/UEF §0.9），先记在这里。'
+    },
+    {
+      id: 'CMP-P12',
+      name: 'Reconciliation is an annotation, not a publication gate',
+      statement:
+        'Verified Income 的发布只取决于官方文件是否解析成功并通过现有验证逻辑；Rider OS 对账（或未来任何其他交叉验证来源）只能在事后为已发布的记录附加状态注解（reconciliation_status：Not_Performed / Matched / Discrepancy_Flagged），永远不能决定该记录发不发布或延迟发布，Discrepancy_Flagged 也不得撤销或阻断已经 Verified 的官方收入。跟 CMP-P5（陈述值优先于计算值）是同一种「检查用来标注、不用来否决」的模式，只是这次的检查来源在 Compliance OS 外部（Rider OS）而不是内部重新计算。',
+      adr: 'ADR-003'
     }
   ],
 
@@ -140,11 +147,17 @@ var COMPLIANCE_OS_CONSTITUTION = {
     }
   ],
 
-  /** 已记录的 ADR，完整内容见治理文档 909_ADR.js（对应 compliance-os-governance-draft.md §1/§3.2/§4.2） */
+  /**
+   * 已记录的 ADR，完整内容见治理文档 compliance-os-governance-draft.md
+   * §1/§3.2/§4.2/§2.5——909_ADR.js 从未真的建过（一直只是文件地图里的
+   * 占位引用），这里改指向实际存在、一直在用的地方，不是新的决定，只是
+   * 修正一个从没被抓到的旧指针（跟本次 ADR-003 本身无关，顺手修的）。
+   */
   adrs: [
     { id: 'ADR-000', title: '为什么 Compliance OS 是独立 GAS 项目', status: 'Decided' },
     { id: 'ADR-001', title: 'Reconciliation Engine 如何读取 Rider OS 数据', status: 'Decided' },
-    { id: 'ADR-002', title: 'Official Truth Principle', status: 'Decided' }
+    { id: 'ADR-002', title: 'Official Truth Principle', status: 'Decided' },
+    { id: 'ADR-003', title: 'Reconciliation 与 Verified Income 解耦（Reconciliation is an annotation, not a publication gate）', status: 'Decided' }
   ]
 };
 

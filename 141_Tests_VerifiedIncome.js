@@ -11,7 +11,6 @@ if (typeof require === 'function') {
   var { createTruthWriter_ } = require('./115_TruthWriter.js');
   var { ParserRegistry } = require('./120_DocumentParsing.js');
   require('./121_GrabWeeklyParser.js');
-  var { reconcileStatement_ } = require('./130_Reconciliation.js');
   var { assertEqual_, fakeSheetAccessor_, fakeLockProvider_, TEST_FIXTURE_GRAB_WEEKLY_STATEMENT } = require('./105_TestUtils.js');
 }
 
@@ -20,25 +19,27 @@ function runAllVerifiedIncomeTests() {
 
   const parser = ParserRegistry.getParserFor({ source: 'Grab', document_type: 'Weekly Statement' });
   const parsedStatement = parser.parse({ source: 'Grab', document_type: 'Weekly Statement' }, TEST_FIXTURE_GRAB_WEEKLY_STATEMENT);
-  const reconciled = reconcileStatement_(parsedStatement, { daily_estimate_total: 1720.00, reward_estimate_total: 14.10 });
   const week = parsedStatement.document_meta.week;
   const fixedNow = new Date('2026-07-28T09:00:00Z');
 
-  const record = buildVerifiedIncomeRecord_(week, parsedStatement, reconciled, fixedNow);
+  // ADR-003：这个函数现在完全不需要 Reconciliation 结果——这就是 Compliance OS
+  // v1 能不依赖 Rider OS 独立运行的核心。net/amount 直接来自 parsedStatement
+  // 自己的 summary.weekly_net（陈述值，CMP-P5），不经过任何对账步骤。
+  const record = buildVerifiedIncomeRecord_(week, parsedStatement, fixedNow);
   assertEqual_('income_id', record.income_id, 'CMP-INCOME-2026-W30', results);
   assertEqual_('source 固定 Compliance OS（CMP-P2）', record.source, 'Compliance OS', results);
   assertEqual_('origin_platform 是 Grab（内部用）', record.origin_platform, 'Grab', results);
-  assertEqual_('net 等于对账后的总额', record.net, 1734.10, results);
+  assertEqual_('net 直接来自 parsedStatement.summary.weekly_net（不经过 Reconciliation）', record.net, 1734.10, results);
   assertEqual_('incentive 细项来自 parsedStatement', record.incentive, 557.10, results);
+  assertEqual_('status 就是 Verified——解析成功即发布', record.status, 'Verified', results);
 
-  const badReconciled = reconcileStatement_(parsedStatement, { daily_estimate_total: 1000.00, reward_estimate_total: 0.00 });
-  let threwOnNeedsReview = false;
-  try { buildVerifiedIncomeRecord_(week, parsedStatement, badReconciled, fixedNow); }
-  catch (e) { threwOnNeedsReview = true; }
-  results.push({ name: 'Needs_Review 结果建 Verified Income 时抛错', pass: threwOnNeedsReview });
+  let threwOnMissingWeeklyNet = false;
+  try { buildVerifiedIncomeRecord_(week, { document_meta: parsedStatement.document_meta, income_breakdown: parsedStatement.income_breakdown, summary: {} }, fixedNow); }
+  catch (e) { threwOnMissingWeeklyNet = true; }
+  results.push({ name: 'summary.weekly_net 缺失时抛错', pass: threwOnMissingWeeklyNet });
 
   let threwOnBadDate = false;
-  try { buildVerifiedIncomeRecord_(week, parsedStatement, reconciled, new Date('not-a-date')); }
+  try { buildVerifiedIncomeRecord_(week, parsedStatement, new Date('not-a-date')); }
   catch (e) { threwOnBadDate = true; }
   results.push({ name: 'now 不是合法 Date 时抛错', pass: threwOnBadDate });
 
@@ -55,7 +56,7 @@ function runAllVerifiedIncomeTests() {
 
   const accessor2 = fakeSheetAccessor_();
   const truthWriter2 = createTruthWriter_(accessor2, fakeLockProvider_());
-  const { record: r2, event: e2 } = verifyAndPublishIncome_(week, parsedStatement, reconciled, truthWriter2, 'CMP-EVT-20260728-0002', fixedNow);
+  const { record: r2, event: e2 } = verifyAndPublishIncome_(week, parsedStatement, truthWriter2, 'CMP-EVT-20260728-0002', fixedNow);
   assertEqual_('端到端·record.income_id', r2.income_id, 'CMP-INCOME-2026-W30', results);
   assertEqual_('端到端·真的写进了 Sheet', accessor2.getWritten('Verified_Income').length, 1, results);
   assertEqual_('端到端·event_id 有带上', e2.event_id, 'CMP-EVT-20260728-0002', results);

@@ -1,7 +1,14 @@
 /**
  * 140_VerifiedIncome.js
- * Compliance OS — Verified Income：把 Reconciliation 的 Auto_Verified 结果
- * 变成 Verified_Income 记录 + 发布 INCOME_VERIFIED（对应治理文档 §5.3、§7）。
+ * Compliance OS — Verified Income：把成功解析的官方文件变成 Verified_Income
+ * 记录 + 发布 INCOME_VERIFIED（对应治理文档 §5.3、§7）。
+ *
+ * ADR-003（v0.7，Steven 已签字）：发布只取决于 Statement 解析成功，不再等
+ * Reconciliation。Rider OS 对账现在是独立、可选、非阻断的次要验证——「当前
+ * 对账状态」不存在这个模块的记录上（TruthWriter/UCR6 只支援 append，没有
+ * 原地更新；跟 Compliance_Calendar 的 Completed 判定同一个模式：真相是
+ * Reconciliation_Log，查询时算，不在这里多存一个会过期的欄位），要看某一周
+ * 现在的对账状态，呼叫 130_Reconciliation.js 的 getCurrentReconciliationStatus_()。
  *
  * publishComplianceEvent_() 是 UCR7 的 Adapter——目前还没确认 Personal AI
  * Core 的 EventBus 实际调用方式，所以只做记录，不猜签名硬调用（UCR7 明确
@@ -16,16 +23,16 @@ var VERIFIED_INCOME_COLUMNS = [
 ];
 
 /**
- * 把 GrabWeeklyParser（或未来其他 Parser）的输出 + Reconciliation 结果，
- * 组成 Verified_Income 的一行。net_delivery_income/incentive/tip/other_payments
- * 这些细项来自 parsedStatement，Reconciliation 只知道汇总，这里两边都要。
+ * 把 GrabWeeklyParser（或未来其他 Parser）的输出组成 Verified_Income 的一行。
+ * ADR-003：只要求解析成功（parsedStatement.income_breakdown 存在）——net/amount
+ * 直接来自 parsedStatement.summary.weekly_net（陈述值本身，CMP-P5），不再经过
+ * Reconciliation。Rider OS 对账完全不参与这个函数。
  * @param {string} week
  * @param {Object} parsedStatement GrabWeeklyParser 输出
- * @param {Object} reconciliationResult reconcileStatement_() 的回传
  * @param {Date} [now]
  * @return {Object}
  */
-function buildVerifiedIncomeRecord_(week, parsedStatement, reconciliationResult, now) {
+function buildVerifiedIncomeRecord_(week, parsedStatement, now) {
   const nowDate = now || new Date();
   if (!(nowDate instanceof Date) || isNaN(nowDate.getTime())) {
     throw new Error('buildVerifiedIncomeRecord_: now 必须是合法的 Date 对象'); // UCR4
@@ -33,8 +40,8 @@ function buildVerifiedIncomeRecord_(week, parsedStatement, reconciliationResult,
   if (!parsedStatement || !parsedStatement.income_breakdown) {
     throw new Error('buildVerifiedIncomeRecord_: parsedStatement.income_breakdown 缺失');
   }
-  if (!reconciliationResult || reconciliationResult.status !== 'Auto_Verified') {
-    throw new Error('buildVerifiedIncomeRecord_: 只能对 Auto_Verified 的对账结果建立 Verified Income（CMP-P1 Official Truth Principle——未通过对账的不能发布）');
+  if (!parsedStatement.summary || typeof parsedStatement.summary.weekly_net !== 'number') {
+    throw new Error('buildVerifiedIncomeRecord_: parsedStatement.summary.weekly_net 缺失或不是数字');
   }
 
   const b = parsedStatement.income_breakdown;
@@ -47,8 +54,8 @@ function buildVerifiedIncomeRecord_(week, parsedStatement, reconciliationResult,
     tip: b.tip.amount,
     other_payments: b.other_payments.amount,
     total_deductions: parsedStatement.summary.total_deductions,
-    net: reconciliationResult.statement_total,
-    amount: reconciliationResult.statement_total,
+    net: parsedStatement.summary.weekly_net,
+    amount: parsedStatement.summary.weekly_net,
     source: 'Compliance OS', // CMP-P2：固定这个，不是 origin_platform
     origin_platform: parsedStatement.document_meta.source,
     status: 'Verified',
@@ -115,18 +122,16 @@ function writeVerifiedIncome_(truthWriter, record) {
 }
 
 /**
- * 编排：Auto_Verified 才会走到这里（呼叫方负责判断，这个函数本身也会再检查
- * 一次，双重保险——CMP-P1 太重要，不能只靠呼叫方守规矩）。
+ * 编排：解析成功就发布（ADR-003）——不等、也不需要 Reconciliation 结果。
  * @param {string} week
  * @param {Object} parsedStatement
- * @param {Object} reconciliationResult
  * @param {Object} truthWriter
  * @param {string} eventId
  * @param {Date} [now]
  * @return {{record: Object, event: Object}}
  */
-function verifyAndPublishIncome_(week, parsedStatement, reconciliationResult, truthWriter, eventId, now) {
-  const record = buildVerifiedIncomeRecord_(week, parsedStatement, reconciliationResult, now);
+function verifyAndPublishIncome_(week, parsedStatement, truthWriter, eventId, now) {
+  const record = buildVerifiedIncomeRecord_(week, parsedStatement, now);
   writeVerifiedIncome_(truthWriter, record);
   const event = buildIncomeVerifiedEvent_(record, eventId);
   EventPublisher.publish('INCOME_VERIFIED', event);

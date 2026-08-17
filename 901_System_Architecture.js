@@ -46,6 +46,11 @@ var COMPLIANCE_OS_ARCHITECTURE = {
       date: '2026-08-01',
       method: '真实 GAS 项目，Steven 确认 runAllComplianceCalendarTests / runAllContractTests 也跑过',
       result: '通过——8 组 runAllXTests() 现在全部都有真实 GAS 环境的直接证据，不只是 Node 模拟'
+    },
+    {
+      date: '2026-08-17',
+      method: 'ADR-003（Reconciliation 与 Verified Income 解耦）实作后，Node vm 模块模拟合并执行全部 22 个文件（含 900/901 本身）',
+      result: '通过，没有新的撞名或加载顺序问题；10 组 runAllXTests() 全部通过（Reconciliation 24 项、Verified Income 15 项、Document Import 32 项，均含新增的 ADR-003 行为测试）。真实 GAS 环境的重跑仍待 Steven 手动执行（人工验证清单见 111/131 文件底部）'
     }
   ],
 
@@ -53,11 +58,12 @@ var COMPLIANCE_OS_ARCHITECTURE = {
     'Document Import Engine',
     'Document Parsing Engine',
     'Structured Statement Data',
-    'Reconciliation Engine',
-    'Compliance OS Truth Layer',
+    'Compliance OS Truth Layer（Verified Income 在此发布——ADR-003，不等 Reconciliation）',
     'Event Bus',
     '→ Finance OS (Verified Income) / Reminder OS (Compliance Calendar)'
   ],
+  /** ADR-003（v0.7，已签字）：Reconciliation 不在主线上，是独立、可选、非阻断的旁支——有 Rider OS 数据才跑，跑完只在 Reconciliation_Log 留下 reconciliation_status 注解，从不影响上面主线是否发布 */
+  optionalPlugins: ['Reconciliation Engine（对账 Rider OS，见 130_Reconciliation.js）'],
 
   /**
    * §1 Compliance OS 自己的模块目录。
@@ -99,7 +105,7 @@ var COMPLIANCE_OS_ARCHITECTURE = {
       name: 'Document Import Engine',
       file: '110_DocumentImport.js / 111_Tests_DocumentImport.js',
       status: 'Tested',
-      note: '去重、document_id 生成、真实 SHA-256、Documents 写入都是真实实作。采纳建议后：Sheet 存 drive_file_id（权威引用）+ drive_path（人类可读缓存，明确不是真相来源）而不是存 URL；新增建议文件名/目录路径的纯函数（{SOURCE}_{TYPE}_{PERIOD}.pdf，Compliance OS/{source}/{year}/{标签}）。processGrabStatement_() 串完整链路，21 项测试通过'
+      note: '去重、document_id 生成、真实 SHA-256、Documents 写入都是真实实作。Sheet 存 drive_file_id（权威引用）+ drive_path（人类可读缓存，明确不是真相来源）而不是存 URL；新增建议文件名/目录路径的纯函数（{SOURCE}_{TYPE}_{PERIOD}.pdf，Compliance OS/{source}/{year}/{标签}）。ADR-003（v0.7）：processGrabStatement_() 解析成功先发布 Verified Income，Reconciliation 变成包在 try/catch 里的非阻断次要步骤（就算它丢未预期例外，已发布的 Verified Income 不受影响）；32 项测试通过'
     },
     {
       name: 'DocumentTextExtractor（PDF→文字 Adapter）',
@@ -108,16 +114,16 @@ var COMPLIANCE_OS_ARCHITECTURE = {
       note: 'UCR7 占位实现，跟 RiderOSAdapter 同一套路——底层要用 Drive OCR 还是 LLM API 都还没定，Adapter 层先确定，之后只换内部实现。3 项测试通过'
     },
     {
-      name: 'Reconciliation Engine',
+      name: 'Reconciliation Engine（ADR-003：独立、可选、非阻断的旁支，对 140_VerifiedIncome.js 零依赖）',
       file: '130_Reconciliation.js',
       status: 'Tested',
-      note: '纯逻辑（reconcileStatement_）+ 编排层（runReconciliationForWeek_，含「两边到齐才跑」）+ 真的透过 TruthWriter 写 Reconciliation_Log；19 项测试通过，含端到端 Auto_Verified / Needs_Review 两条路径'
+      note: '纯逻辑（reconcileStatement_，status 词汇 v0.7 改成 Matched/Discrepancy_Flagged）+ 编排层（runReconciliationForWeek_，「两边到齐才跑」只决定 Reconciliation 自己跑不跑，不再决定 Verified Income 发不发布；没有 Rider OS 数据时也照样写 Not_Performed 的 Reconciliation_Log，不是整个跳过不留痕）+ 新增 getCurrentReconciliationStatus_()（查询时从 Reconciliation_Log 取最新一笔算，不是存在别处等着被更新——TruthWriter/UCR6 只支援 append）；24 项测试通过'
     },
     {
       name: 'Verified Income 发布',
       file: '140_VerifiedIncome.js',
       status: 'Tested',
-      note: 'buildVerifiedIncomeRecord_/writeVerifiedIncome_ 都写了并跟 Reconciliation Engine 串起来测过。EventBus 发布改成 EventPublisher（createEventPublisher_ 工厂 + 注入），跟 RiderOSAdapter/TruthWriter/DocumentTextExtractor 同一套 Adapter 模式，不再是单独一个裸函数——仍是占位，EventBus 真实调用方式还没确认'
+      note: 'ADR-003（v0.7，Steven 已签字）：buildVerifiedIncomeRecord_/verifyAndPublishIncome_ 不再需要 reconciliationResult——net/amount 直接来自 parsedStatement.summary.weekly_net（陈述值，CMP-P5），解析成功即可发布，不等对账。EventBus 发布仍是 EventPublisher（createEventPublisher_ 工厂 + 注入）占位实现，EventBus 真实调用方式还没确认；15 项测试通过'
     },
     {
       name: 'Compliance Calendar',

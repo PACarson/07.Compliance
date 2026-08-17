@@ -17,6 +17,7 @@
 if (typeof require === 'function') {
   var { ParserRegistry } = require('./120_DocumentParsing.js');
   var { runReconciliationForWeek_ } = require('./130_Reconciliation.js');
+  var { verifyAndPublishIncome_ } = require('./140_VerifiedIncome.js');
   var { DocumentTextExtractor } = require('./112_DocumentTextExtractor.js');
 }
 
@@ -108,8 +109,9 @@ function importDocument_(input, deps) {
 }
 
 /**
- * 完整链路：Import → Parse → Reconciliation（→ Verified Income，
- * Reconciliation 内部已经接了）。
+ * 完整链路（ADR-003）：Import → Parse → Verified Income（解析成功即发布，
+ * 不等对账）→ Reconciliation（独立、可选、非阻断的次要验证，就算这步出错
+ * 或没有 Rider OS 数据，前面已经发布的 Verified Income 完全不受影响）。
  *
  * extractedText 现在是可选的：不给的话会透过 DocumentTextExtractor 去拿
  * （目前是占位，会抛错——等抽取方式确认后，呼叫方从此不用改，只是不再
@@ -130,14 +132,32 @@ function processGrabStatement_(importInput, extractedText, deps) {
 
   const parser = ParserRegistry.getParserFor({ source: importInput.source, document_type: importInput.documentType });
   const parsedStatement = parser.parse({ source: importInput.source, document_type: importInput.documentType }, text);
+  const week = parsedStatement.document_meta.week;
 
-  const reconciliationResult = runReconciliationForWeek_(
-    parsedStatement.document_meta.week,
-    parsedStatement,
-    { riderOSAdapter: deps.riderOSAdapter, truthWriter: deps.truthWriter, now: deps.now }
-  );
+  // ADR-003：解析成功，Verified Income 立刻发布——不等下面的 Reconciliation。
+  const eventId = `CMP-EVT-${week}-${deps.now.getTime()}`;
+  const verifyResult = verifyAndPublishIncome_(week, parsedStatement, deps.truthWriter, eventId, deps.now);
 
-  return { stage: 'Reconciliation', importResult, parsedStatement, reconciliationResult };
+  // Reconciliation：独立、可选、非阻断——就算这里丢错，也不能让呼叫方以为
+  // 上面已经成功发布的 Verified Income 也失败了（CMP-P10：异常要显性，但
+  // 不能让次要步骤的问题冒充主要步骤的失败）。
+  let reconciliationResult = null;
+  try {
+    reconciliationResult = runReconciliationForWeek_(
+      week,
+      parsedStatement,
+      { riderOSAdapter: deps.riderOSAdapter, truthWriter: deps.truthWriter, now: deps.now }
+    );
+  } catch (err) {
+    const msg = `Reconciliation 失败，但不影响已发布的 Verified Income（${verifyResult.record.income_id}）：${err.message}`;
+    if (typeof AlertService !== 'undefined' && typeof AlertService.log === 'function') {
+      AlertService.log('WARN', 'processGrabStatement_', 'reconciliation', { week }, msg);
+    } else {
+      console.warn(`[processGrabStatement_] ${msg}`);
+    }
+  }
+
+  return { stage: 'Verified', importResult, parsedStatement, verifyResult, reconciliationResult };
 }
 
 if (typeof module !== 'undefined') {
