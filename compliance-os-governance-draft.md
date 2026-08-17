@@ -1,8 +1,10 @@
-# Compliance OS — Governance Layer（Draft v0.6）
+# Compliance OS — Governance Layer（Draft v0.7）
 
-> **状态：Draft，Governance layer 内容收尾，v0.5 的 6 项修正你已全部确认，1 项（私有函数命名）改成 GAS 平台惯例。这层不再继续展开——按你的意见，再讨论治理细节收益递减，重心转到 Phase 2 Step 4。**
+> **状态：v0.6 之后本已 Architecture Freeze（见 §9）；v0.7 是 Freeze 自己写的例外条款——「有新证据或真实数据暴露问题」——触发原因：Steven 要求 Compliance OS v1 必须能不依赖 Rider OS 独立跑完整条链路，而现行实作（`130`/`140`.js）在这点上比已批准的 ADR-002 原文更严格。v0.7 只动这一件事（ADR-003），不重开其他已冻结的设计，签字前不动 `900`/`901` 实际代码。**
 >
 > v0.6：确认 v0.5 六项（EP3、Property OS 理由、UCR1-4/1899 bug、Compliance Calendar Projection、RiderOSAdapter、ADR-000）；私有函数命名改回 GAS 后缀惯例 `functionName_()`；`RiderOSAdapter` 已经写好并测试（占位版）。改动清单见 §9。
+>
+> v0.7（提议，待 Steven 签字）：新增 ADR-003（Reconciliation 与 Verified Income 解耦）+ 拟新增原则 CMP-P12；更新 §2.1 Pipeline、§2.3 Document Lifecycle、§7 Verified_Income/Reconciliation_Log schema；PDF 抽取方式确认双实作（Drive OCR + LLM API）。改动清单见新增 §2.5。
 
 ---
 
@@ -54,16 +56,18 @@ Document Parsing Engine       [Runtime / Execution]  ← 可插拔 Parser
 Structured Statement Data
       │
       ▼
-Reconciliation Engine         [Runtime / Decision]  ← 对账 Rider OS
-      │
-      ▼
-Compliance OS Truth Layer     [Runtime / Projection]
+Compliance OS Truth Layer     [Runtime / Projection]  ← Verified Income 在此发布（不等 Reconciliation，ADR-003）
       │
       ▼
 Event Bus                     [Runtime / Event, Integration / Bridge]
       │
       ▼
 Finance OS（Verified Income）   Reminder OS（Compliance Calendar）
+
+Reconciliation Engine         [Runtime / Decision]  ← ADR-003：独立旁支，可选、非阻断
+      │                          有 Rider OS 数据才跑（ADR-001 不变）；跑完只更新
+      ▼                          既有 Verified_Income 记录的 reconciliation_status
+Reconciliation_Log
 ```
 
 ### 2.2 对应 Blueprint 0–5 层（v0.5：改成对照原文的精确 Tier，不是之前整行笼统标注）
@@ -90,14 +94,16 @@ Finance OS（Verified Income）   Reminder OS（Compliance Calendar）
 ### 2.3 Document Lifecycle — 对应 `903_State_Model.js`
 
 ```
-Imported → Parsed → Reconciled → Verified
-              │          │
-              ▼          ▼
-        Failed_Parse   Needs_Review ──(人工确认)──▶ Verified
-                                   └──(判定有误)──▶ Rejected
+Imported → Parsed → Verified
+              │         │
+              ▼         └── reconciliation_status（旁支注解，见 §2.5 ADR-003）：
+        Failed_Parse         Not_Performed（预设）──▶ Matched
+                              Not_Performed（预设）──▶ Discrepancy_Flagged ──(人工判断)──▶ 更新注解，或 Rejected
 
 重新解析：Verified → Superseded（旧版本保留，新版本变当前）
 ```
+
+v0.6 及之前：`Reconciled` 是 `Verified` 前必经的独立状态，Rider OS 未提供数据或对账超容差时文件停在 `Needs_Review`，永远不会变成 `Verified`。v0.7（ADR-003）：`Verified` 只取决于解析成功；对账结果改为发布后才附加的注解，不再是前置状态。
 
 ### 2.4 对照 UEF 的 Reference Architecture（新增小节）
 
@@ -113,6 +119,51 @@ UEF 定了新 Domain OS 的默认起始模板：`Truth → State → Event → S
 | Operational Intelligence | 对应 §2.2 的 Intelligence 层，T3 预留 |
 | Reminder | **刻意偏离**：不在 Compliance OS 内部做，直接对接既有的 Reminder OS（§4.3），理由：Reminder OS 已经是生态级共用服务，Compliance OS 自己再做一层没有意义 |
 | Intelligence-stub | 对应 §2.2 的 T3 预留 |
+
+---
+
+### 2.5 Reconciliation 与 Verified Income 解耦 — ADR-003（提议，待 Steven 签字）
+
+**触发**：Steven 要求 Compliance OS v1 必须能不依赖 Rider OS 独立跑完整条 Import→Parse→Verified→Monthly Projection 链路。检查现行实作（`130_Reconciliation.js`／`140_VerifiedIncome.js`／`110_DocumentImport.js`）后发现：Rider OS 尚未提供本周估算、或提供的估算跟 Grab Statement 差异超出容差时，Verified Income **完全不会被建立**——不是标记出来，是那笔记录根本不存在。这正好落在 Architecture Freeze（§9）自己写的例外条款内：「除非有新证据或真实数据暴露问题」。
+
+**Question**：Reconciliation（对账 Rider OS）应不应该是 Verified Income 能不能发布的前提条件？
+
+**Options**：
+(a) 维持现状——Reconciliation 必须先跑、且落在 `Auto_Verified`，Verified Income 才写入
+(b) 完全移除 Reconciliation，不再对账
+(c) Reconciliation 变成独立、可选、非阻断的次要验证层——Verified Income 在解析成功后立即发布，携带 `reconciliation_status`（`Not_Performed` / `Matched` / `Discrepancy_Flagged`）注解；Reconciliation 有 Rider OS 数据才跑（ADR-001「两边到齐才跑」不变），跑完只更新既有记录的注解，从不决定该记录发不发布
+
+**Decision**：(c)。
+
+**Evidence**：
+- ADR-002 / CMP-P1 原文（§3.2）只要求「只有 Compliance OS 能解析并发布官方结果」，没有一句话要求「Rider OS 对账通过才算发布」——现行代码的强制闸门是实作阶段自行收紧的隐性假设，比已批准的原则文字更严格。这个 ADR 是让实作跟已批准的决策对齐，不是推翻 ADR-002
+- ADR-001（§4.2）「两边到齐才跑」描述的是 Reconciliation *自己* 何时启动（对账本来就需要两边都有数字），从没说过"没启动"等于"不能发布"——这条本身不需要改
+- 更符合 CMP-P10（异常要显性，不能静默）：现状是「无数据」或「差异超容差」都让 Verified Income 沉默缺席，比"发布了但标注有问题"更容易被忽略
+- 直接满足 Steven 的目标：Compliance OS v1 不依赖 Rider OS 就能独立发布完整月份的 Verified Income
+
+**新增原则（提议，随本 ADR 一并生效，正式写入待签字后同步进 `900_Constitution.js`）**：
+> **CMP-P12「Reconciliation 是可选、非阻断的次要验证」**：Verified Income 的发布只取决于官方文件解析成功；Rider OS 对账（或未来任何其他交叉验证来源）只能在事后为已发布的记录附加状态注解，永远不能决定该记录发不发布或延迟发布。
+
+**影响范围（Impact）**：
+- `110_DocumentImport.js`：`processGrabStatement_()` 解析成功后直接发布 Verified Income，不再 hard-call `runReconciliationForWeek_` 当唯一路径；Reconciliation 变成之后可独立呼叫的次要步骤
+- `130_Reconciliation.js`：`runReconciliationForWeek_()` 没有 Rider OS 数据时，改成写一笔 `reconciliation_status: Not_Performed` 的 `Reconciliation_Log`（不再是整个跳过、不写任何记录）；有数据时正常对账，把结果（`Matched`/`Discrepancy_Flagged`）写回对应的 `Verified_Income` 记录，而不只是写 log
+- `140_VerifiedIncome.js`：`buildVerifiedIncomeRecord_()` 移除 `reconciliationResult.status === 'Auto_Verified'` 的强制检查，解析成功即可建立记录，`reconciliation_status` 预设 `Not_Performed`；新增一个更新既有记录 `reconciliation_status` 的函数，供 Reconciliation Engine 事后调用；`buildIncomeVerifiedEvent_()` 的事件 payload 同步加上 `reconciliation_status`
+- **Verified_Income schema**：新增 `reconciliation_status` 欄位（见 §7 更新）——只是加欄位，不是破坏性变更，但仍记录在案，不是默默改
+- `901_System_Architecture.js`：签字后同步更新（本草稿的 §2.1/§2.3/§4.2/§7/§8 已先更新）
+- 既有测试：`111/116/122/124/131/141` 等文件里「`Needs_Review` 时 `verifiedIncome` 为 `null`」一类断言需要更新为新行为；`190_Tests_Contracts.js` 的契约检查同步跟着调整
+- **未涉及**：Rider OS 自己的任何代码；`123_RiderOSAdapter.js` 的两个方法签名（`onWeeklyEstimateReady`/`getWeeklyEstimate`）不变
+
+**Next Steps**：
+1. Steven 签字确认本 ADR + CMP-P12
+2. 实作上述影响范围（110/130/140 + schema 欄位 + 既有测试更新）
+3. 签字后才同步进 `900_Constitution.js`（`adrs[]` 加入 ADR-003、`principles[]` 加入 CMP-P12）与 `901_System_Architecture.js`——在那之前这些是草稿里的提议，不进已经在跑的 GAS 项目代码，避免草稿到代码之间出现 drift
+4. 之后才进入 Operator Console（HTMLService）+ Drive 直读 + `drive_file_id` 去重 + PDF 抽取器 + 批次汇入的实作阶段——这些都建立在 Verified Income 已经不依赖 Reconciliation 的前提上
+
+**PDF 抽取方式（附带确认，非本 ADR 主体，§9 已知限制同步更新）**：Steven 确认 Drive 原生 OCR 与 LLM API 两种都要——`112_DocumentTextExtractor.js` 现有的 Adapter 接口（`extract({fileId, mimeType})`）本来就是为了这种可替换性设计的，不需要为此另开 ADR。设计为两个具体实现挂在同一个 Adapter 下，由 Operator Console 端选择用哪一个（预设 Drive OCR，零外部依赖）；LLM API 版本先按 UCR7 惯例占位——供应商（Claude / Gemini / OpenAI）与 API 细节等实作那一步再确认，不在这里猜。
+
+**Review Trigger**：Rider OS 真正开始发布 `RIDER_WEEKLY_ESTIMATE_READY`、且累积出真实的 `Discrepancy_Flagged` 案例后，回头检查现有容差设定（`DEFAULT_RECONCILIATION_CONFIG`）与人工判断流程是否需要细化——容差数字本身仍是 CMP-P10 意义下「合理猜测、未经真实数据验证」的占位值，这个 ADR 不改变那件事。
+
+**Related ADRs**：ADR-001（不变，§4.2 的 Adapter 模式与触发机制沿用）、ADR-002（不变，本 ADR 是对齐其原文，不是修改）
 
 ---
 
@@ -132,6 +183,8 @@ UEF 定了新 Domain OS 的默认起始模板：`Truth → State → Event → S
 ### 3.2 Official Truth Principle（ADR-002，不变）
 
 所有官方 / 法定文件只能由 Compliance OS 解析并发布 Verified Result；其他 Domain 不得自行解析或推导官方性质的结果，但可以用 Verified Result 做自己的下游计算（Finance OS 算净资产不受影响）。
+
+> v0.7：ADR-003（§2.5）澄清了这条原文本身从未要求的一件事——Rider OS 对账不是「能不能发布 Verified Result」的前提。本节文字不变，只是实作现在才真正对齐它。
 
 ### 3.3 Security & Retention（新增，对应 Blueprint Cross-Cutting Capabilities · Security，原文 T3 保留）
 
@@ -168,6 +221,8 @@ RIDER_WEEKLY_ESTIMATE_READY   (Rider OS 发布 → Compliance OS 订阅，透过
 ```
 
 Rider OS 在自己既有的每周结算完成后发布一次，不做每日同步。Reconciliation Engine 采「两边到齐才跑」：本周期的 Parsed_Statements 与 RIDER_WEEKLY_ESTIMATE_READY，不管谁先到，都先缓存，两个都到齐才开始 Reconciliation。
+
+> v0.7：「两边到齐才跑」描述的仍然只是 Reconciliation *本身* 何时启动——不再等同于「没启动就不能发布 Verified Income」。两者的解耦见 §2.5 ADR-003。
 
 ### 4.3 Reminder OS Contract
 
@@ -246,9 +301,9 @@ COMPLIANCE_DUE_SOON / COMPLIANCE_OVERDUE / COMPLIANCE_COMPLETED
 
 **Parsed_Statements**：parse_id / document_id / parser_id / parser_version / period / gross_income / incentive / adjustment / penalty / total / raw_json / is_current
 
-**Reconciliation_Log**：reconciliation_id / parse_id / statement_total / rider_os_estimate / reward_sheet_total / difference / difference_pct / reason / within_tolerance / status
+**Reconciliation_Log**：reconciliation_id / week / statement_total / rider_os_estimate / reward_sheet_total / rider_total / difference / difference_pct / reason / within_tolerance / status（v0.7：对照 `130_Reconciliation.js` 的 `RECONCILIATION_LOG_COLUMNS` 修正——原文档写的是 `parse_id`，实际字段是 `week`，且原文档漏列了 `rider_total`；顺手修正的既有 drift，跟 ADR-003 本身无关）
 
-**Verified_Income**（Finance OS 唯一读取的表）：income_id `CMP-INCOME-{YYYY}-W{WW}` / period / currency / net_delivery_income / incentive / tip / other_payments / total_deductions / net / amount / source（固定 "Compliance OS"）/ origin_platform / status / verified_at
+**Verified_Income**（Finance OS 唯一读取的表）：income_id `CMP-INCOME-{YYYY}-W{WW}` / period / currency / net_delivery_income / incentive / tip / other_payments / total_deductions / net / amount / source（固定 "Compliance OS"）/ origin_platform / status / verified_at / **reconciliation_status**（v0.7 新增，ADR-003：`Not_Performed`（预设）/ `Matched` / `Discrepancy_Flagged`，Reconciliation Engine 事后更新，从不影响 status 或这笔记录存不存在）
 
 **Compliance_Calendar**（v0.6：实作时进一步修正——完成记录改成独立的 append-only 表）
 
@@ -280,6 +335,7 @@ COMPLIANCE_DUE_SOON / COMPLIANCE_OVERDUE / COMPLIANCE_COMPLETED
 - **ADR-000**：为什么 Compliance OS 是独立项目 → 已决定，见 §1
 - **ADR-001**：Reconciliation Engine 读取 Rider OS 数据 → 已决定，见 §4.2（Event + Weekly Settlement 触发 + UCR7 Adapter 模式，Adapter 内部先占位）
 - **ADR-002**：Official Truth Principle → 已决定，见 §3.2
+- **ADR-003**：Reconciliation 与 Verified Income 解耦（Rider OS 从必要条件变成可选、非阻断的次要验证）→ **提议中，待 Steven 签字**，见 §2.5
 - Decision OS → 维持不纳入
 - Finance OS 904 → 已确认，见 §3
 - **评审建议「平台稳定 ID 优先于路径/显示名」推广到整个生态**（Drive→file_id、Calendar→event_id、Sheets→spreadsheet_id、Gmail→message_id）→ 方向认同，但按 BP-2/UEF §0.9，Blueprint 层级的推广需要第二个项目独立验证同样的模式，或有明确的生态级效益，不是单一项目讲得通就够。目前只有 Compliance OS 一个实例（drive_file_id vs drive_path），先留在这里当 Compliance OS 自己的原则（CMP-P 系列可以补一条），不越权直接宣告成生态规则——这也是 UEF 自己的 Candidate Patterns（D7）机制存在的原因
@@ -293,8 +349,8 @@ COMPLIANCE_DUE_SOON / COMPLIANCE_OVERDUE / COMPLIANCE_COMPLETED
 
 ## 9. Project State — 对应 `908_Project_State.js`
 
-- Status：**Architecture Freeze**（采纳评审建议的表述）——Governance 层（Architecture / Data Ownership / Module Boundary / File Map / Sheet Schema / Event Model / ADR-000-002）内容稳定，往后除非有新证据或真实数据暴露问题，不再主动扩充设计。重心转向工程质量（测试覆盖、Contract Test、已知限制的透明度），跟 UEF Blueprint Change Policy（§0.9）的精神一致——不因为"讨论起来合理"就继续加，只有第二个项目的独立证据或真实需求才动
+- Status：**Architecture Freeze**（采纳评审建议的表述）——Governance 层（Architecture / Data Ownership / Module Boundary / File Map / Sheet Schema / Event Model / ADR-000-002）内容稳定，往后除非有新证据或真实数据暴露问题，不再主动扩充设计。重心转向工程质量（测试覆盖、Contract Test、已知限制的透明度），跟 UEF Blueprint Change Policy（§0.9）的精神一致——不因为"讨论起来合理"就继续加，只有第二个项目的独立证据或真实需求才动。**v0.7：Freeze 本身写了例外条款，ADR-003（§2.5）是目前唯一在跑的例外——不是重新打开整层设计，ADR-000/001/002 与 Freeze 其余范围维持不变，签字前也不动 `900`/`901` 实际代码**
 - **核心 Runtime 现状**（用 `901_System_Architecture.js` 的 `computeComplianceOsEngineeringMetrics_()` 算，不是手动维护的数字）：12 个模块，11 个 Tested，1 个 Designed（`906_AI_Integration.js`，按 Blueprint BP-3 刻意保留 Tier 3，不是缺测试）。21 个文件的 GAS 合并模拟持续通过
-- **已知限制**（占位、等你确认才能变真的，都不影响继续开发）：PDF→文字抽取方式（Drive OCR/Gemini/OpenAI/Claude 选哪个）、Personal AI Core EventBus 真实调用方式、Rider OS 的 RIDER_WEEKLY_ESTIMATE_READY 发布能力、Compliance Calendar 的通知去重策略（连续多天 Due_Soon 会不会重复吵）
-- **历史变更摘要**（v0.1→v0.6 完整细节见各版本自身，这里只列大方向）：v0.1-v0.3 定下 Compliance OS 的定位、Data Ownership、Parser/Reconciliation/Event 设计，三轮外部评审逐步收敛（Document Repository 不抽离、通用 Compliance 事件不加具名类型、Official Truth Principle）；v0.4 用真实 Grab Statement 修正了收入结构假设；v0.5 对照 UEF v1.5/Blueprint v1.2 原文修正了引用错误与 Tier 判断，新增 ADR-000；v0.6 起进入实作阶段——`900_Constitution.js`/`901_System_Architecture.js` 落成 Compliance OS 自己的 UEF/Blueprint，核心链路（Import→Parse→Reconciliation→VerifiedIncome→ComplianceCalendar）全部写完测试，含一次实测抓到的真实 GAS 撞名 bug（详见 `901` 的 verificationHistory）
+- **已知限制**（占位、等你确认才能变真的，都不影响继续开发）：PDF→文字抽取方式（**v0.7 已确认**：Drive OCR + LLM API 双实作，透过 `DocumentTextExtractor` Adapter 切换，见 §2.5；LLM 供应商仍待选）、Personal AI Core EventBus 真实调用方式、Rider OS 的 RIDER_WEEKLY_ESTIMATE_READY 发布能力、Compliance Calendar 的通知去重策略（连续多天 Due_Soon 会不会重复吵）
+- **历史变更摘要**（v0.1→v0.7 完整细节见各版本自身，这里只列大方向）：v0.1-v0.3 定下 Compliance OS 的定位、Data Ownership、Parser/Reconciliation/Event 设计，三轮外部评审逐步收敛（Document Repository 不抽离、通用 Compliance 事件不加具名类型、Official Truth Principle）；v0.4 用真实 Grab Statement 修正了收入结构假设；v0.5 对照 UEF v1.5/Blueprint v1.2 原文修正了引用错误与 Tier 判断，新增 ADR-000；v0.6 起进入实作阶段——`900_Constitution.js`/`901_System_Architecture.js` 落成 Compliance OS 自己的 UEF/Blueprint，核心链路（Import→Parse→Reconciliation→VerifiedIncome→ComplianceCalendar）全部写完测试，含一次实测抓到的真实 GAS 撞名 bug（详见 `901` 的 verificationHistory）；v0.7（提议）：Steven 要求 v1 不依赖 Rider OS 独立运行，触发 ADR-003——Reconciliation 从 Verified Income 的前提条件改成可选、非阻断的事后注解，核心链路简化为 Import→Parse→VerifiedIncome→（可选）Reconciliation→ComplianceCalendar；同时确认 PDF 抽取方式采 Drive OCR + LLM API 双实作
 - Next：Compliance OS 这套工程模式本身已经稳定，接下来价值更高的不是继续加 Compliance OS 的设计，而是（评审建议，你自己判断优先级）：(1) 补齐上面列的已知限制，把占位换成真的；(2) 把这套 UEF-in-miniature 的模式（Constitution + Architecture + Adapter-everywhere + NN_Tests + Contract Tests）拿去 Finance OS 或 Property OS 验证是不是真的可复用——只有第二个项目独立走出同样的模式，才是这套工程惯例该不该进 UEF/Blueprint 共享能力的真正证据
