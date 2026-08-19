@@ -109,34 +109,54 @@ function importDocument_(input, deps) {
 }
 
 /**
- * 完整链路（ADR-003）：Import → Parse → Verified Income（解析成功即发布，
- * 不等对账）→ Reconciliation（独立、可选、非阻断的次要验证，就算这步出错
- * 或没有 Rider OS 数据，前面已经发布的 Verified Income 完全不受影响）。
+ * 共用核心序列：Import → Extract → Parse → Verify（ADR-003：解析成功即发布）
+ * → Reconciliation（非阻断）。不管每一步成功或失败都回传结构化结果，不丢
+ * 例外——单次直接调用（processGrabStatement_）或批次汇入（Operator Console）
+ * 自己决定要不要把失败转成 throw。这样序列本身只有一份，不会因为要支援
+ * 批次重试就复制一份逻辑出来（UCR5）。
  *
- * extractedText 现在是可选的：不给的话会透过 DocumentTextExtractor 去拿
- * （目前是占位，会抛错——等抽取方式确认后，呼叫方从此不用改，只是不再
- * 需要手动传 extractedText 这个参数）。给了就直接用，主要给测试用，
- * 也适合「抽取已经在别处发生」的情况。
- * @param {Object} importInput 见 importDocument_，另外可选 fileId（给 extractor 用）
+ * importInput.skipImport = true 时跳过 importDocument_（Retry 用——文件的
+ * Documents 记录已经存在，不需要、也不应该再重复检查一次 file_hash 去重，
+ * 直接从抽取开始）。
+ * deps.existingIncomeIds 会原样传给 verifyAndPublishIncome_ 做发布前的幂等
+ * 检查（见 140_VerifiedIncome.js）。
+ * @param {Object} importInput 见 importDocument_，另外可选 fileId/skipImport
  * @param {string} [extractedText]
- * @param {{truthWriter: Object, riderOSAdapter: Object, now: Date}} deps
- * @return {Object}
+ * @param {{truthWriter: Object, riderOSAdapter: Object, now: Date, existingIncomeIds: (string[]|undefined)}} deps
+ * @return {{stage: string, importResult: Object, parsedStatement: (Object|undefined), verifyResult: (Object|undefined), reconciliationResult: (Object|undefined), error: (string|undefined)}}
  */
-function processGrabStatement_(importInput, extractedText, deps) {
-  const importResult = importDocument_(importInput, deps);
+function runImportPipeline_(importInput, extractedText, deps) {
+  const importResult = importInput.skipImport
+    ? { status: 'Already_Imported', document_id: null, record: null }
+    : importDocument_(importInput, deps);
+
   if (importResult.status === 'Duplicate_Skipped') {
-    return { stage: 'Import', result: importResult };
+    return { stage: 'Skipped_Duplicate', importResult };
   }
 
-  const text = extractedText || DocumentTextExtractor.extract({ fileId: importInput.driveFileId, mimeType: 'application/pdf' });
+  let text;
+  try {
+    text = extractedText || DocumentTextExtractor.extract({ fileId: importInput.driveFileId, mimeType: 'application/pdf' });
+  } catch (err) {
+    return { stage: 'Extraction_Failed', importResult, error: err.message };
+  }
 
-  const parser = ParserRegistry.getParserFor({ source: importInput.source, document_type: importInput.documentType });
-  const parsedStatement = parser.parse({ source: importInput.source, document_type: importInput.documentType }, text);
+  let parsedStatement;
+  try {
+    const parser = ParserRegistry.getParserFor({ source: importInput.source, document_type: importInput.documentType });
+    parsedStatement = parser.parse({ source: importInput.source, document_type: importInput.documentType }, text);
+  } catch (err) {
+    return { stage: 'Parse_Failed', importResult, error: err.message };
+  }
+
   const week = parsedStatement.document_meta.week;
-
-  // ADR-003：解析成功，Verified Income 立刻发布——不等下面的 Reconciliation。
-  const eventId = `CMP-EVT-${week}-${deps.now.getTime()}`;
-  const verifyResult = verifyAndPublishIncome_(week, parsedStatement, deps.truthWriter, eventId, deps.now);
+  let verifyResult;
+  try {
+    const eventId = `CMP-EVT-${week}-${deps.now.getTime()}`;
+    verifyResult = verifyAndPublishIncome_(week, parsedStatement, deps.truthWriter, eventId, deps.now, deps.existingIncomeIds);
+  } catch (err) {
+    return { stage: 'Verify_Failed', importResult, parsedStatement, error: err.message };
+  }
 
   // Reconciliation：独立、可选、非阻断——就算这里丢错，也不能让呼叫方以为
   // 上面已经成功发布的 Verified Income 也失败了（CMP-P10：异常要显性，但
@@ -151,13 +171,34 @@ function processGrabStatement_(importInput, extractedText, deps) {
   } catch (err) {
     const msg = `Reconciliation 失败，但不影响已发布的 Verified Income（${verifyResult.record.income_id}）：${err.message}`;
     if (typeof AlertService !== 'undefined' && typeof AlertService.log === 'function') {
-      AlertService.log('WARN', 'processGrabStatement_', 'reconciliation', { week }, msg);
+      AlertService.log('WARN', 'runImportPipeline_', 'reconciliation', { week }, msg);
     } else {
-      console.warn(`[processGrabStatement_] ${msg}`);
+      console.warn(`[runImportPipeline_] ${msg}`);
     }
   }
 
-  return { stage: 'Verified', importResult, parsedStatement, verifyResult, reconciliationResult };
+  return {
+    stage: verifyResult.skipped ? 'Already_Verified' : 'Verified',
+    importResult, parsedStatement, verifyResult, reconciliationResult
+  };
+}
+
+/**
+ * 对外的单次调用入口——维持既有「失败就 throw」的行为/契约不变（既有测试
+ * 全部照旧）。内部改叫 runImportPipeline_ 共用序列，Extraction_Failed/
+ * Parse_Failed/Verify_Failed 这几种结构化失败在这里转成 throw；
+ * Skipped_Duplicate/Already_Verified/Verified 都正常回传，不是失败。
+ * @param {Object} importInput 见 importDocument_，另外可选 fileId（给 extractor 用）
+ * @param {string} [extractedText]
+ * @param {{truthWriter: Object, riderOSAdapter: Object, now: Date}} deps
+ * @return {Object}
+ */
+function processGrabStatement_(importInput, extractedText, deps) {
+  const result = runImportPipeline_(importInput, extractedText, deps);
+  if (result.stage === 'Extraction_Failed' || result.stage === 'Parse_Failed' || result.stage === 'Verify_Failed') {
+    throw new Error(`[${result.stage}] ${result.error}`);
+  }
+  return result;
 }
 
 if (typeof module !== 'undefined') {
@@ -171,6 +212,7 @@ if (typeof module !== 'undefined') {
     writeDocumentRecord_,
     computeFileHash_,
     importDocument_,
+    runImportPipeline_,
     processGrabStatement_
   };
 }

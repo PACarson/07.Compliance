@@ -54,6 +54,13 @@ function gasSheetAccessor_() {
       const sheet = SpreadsheetApp.getActive().getSheetByName(sheetName);
       if (!sheet) throw new Error(`找不到 Sheet："${sheetName}"——需要先建表（含 plain-text 格式设置）`);
       sheet.appendRow(rowArray);
+    },
+    getAllRows(sheetName) {
+      const sheet = SpreadsheetApp.getActive().getSheetByName(sheetName);
+      if (!sheet) throw new Error(`找不到 Sheet："${sheetName}"——需要先建表`);
+      const lastRow = sheet.getLastRow();
+      if (lastRow < 2) return []; // 只有表头或整张表是空的
+      return sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn()).getValues(); // 跳过表头
     }
   };
 }
@@ -79,5 +86,5 @@ var TruthWriter = (typeof SpreadsheetApp !== 'undefined' && typeof LockService !
   : null;
 
 if (typeof module !== 'undefined') {
-  module.exports = { createTruthWriter_, TruthWriter };
+  module.exports = { createTruthWriter_, gasSheetAccessor_, TruthWriter };
 }

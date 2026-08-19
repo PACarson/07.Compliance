@@ -56,10 +56,26 @@ function runAllVerifiedIncomeTests() {
 
   const accessor2 = fakeSheetAccessor_();
   const truthWriter2 = createTruthWriter_(accessor2, fakeLockProvider_());
-  const { record: r2, event: e2 } = verifyAndPublishIncome_(week, parsedStatement, truthWriter2, 'CMP-EVT-20260728-0002', fixedNow);
+  const { record: r2, event: e2, skipped: skipped2 } = verifyAndPublishIncome_(week, parsedStatement, truthWriter2, 'CMP-EVT-20260728-0002', fixedNow);
   assertEqual_('端到端·record.income_id', r2.income_id, 'CMP-INCOME-2026-W30', results);
   assertEqual_('端到端·真的写进了 Sheet', accessor2.getWritten('Verified_Income').length, 1, results);
   assertEqual_('端到端·event_id 有带上', e2.event_id, 'CMP-EVT-20260728-0002', results);
+  assertEqual_('端到端·没传 existingIncomeIds 时 skipped 是 false', skipped2, false, results);
+
+  // ---- 幂等：existingIncomeIds 已经有这个 income_id 时，不重复写入 ----
+  const accessor3 = fakeSheetAccessor_();
+  const truthWriter3 = createTruthWriter_(accessor3, fakeLockProvider_());
+  const dup = verifyAndPublishIncome_(week, parsedStatement, truthWriter3, 'CMP-EVT-20260728-0003', fixedNow, ['CMP-INCOME-2026-W30']);
+  assertEqual_('幂等·skipped 是 true', dup.skipped, true, results);
+  assertEqual_('幂等·event 是 null（没有真的发布）', dup.event, null, results);
+  assertEqual_('幂等·完全没写进 Sheet', accessor3.getWritten('Verified_Income').length, 0, results);
+
+  // ---- 幂等：existingIncomeIds 有值但不包含这个 income_id 时，照样正常发布 ----
+  const accessor4 = fakeSheetAccessor_();
+  const truthWriter4 = createTruthWriter_(accessor4, fakeLockProvider_());
+  const notDup = verifyAndPublishIncome_(week, parsedStatement, truthWriter4, 'CMP-EVT-20260728-0004', fixedNow, ['CMP-INCOME-2026-W01', 'CMP-INCOME-2026-W02']);
+  assertEqual_('不是同一笔·skipped 是 false', notDup.skipped, false, results);
+  assertEqual_('不是同一笔·正常写进 Sheet', accessor4.getWritten('Verified_Income').length, 1, results);
 
   const allPass = results.every((r) => r.pass);
   results.forEach((r) => {

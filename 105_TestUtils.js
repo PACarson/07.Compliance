@@ -28,7 +28,8 @@ function fakeSheetAccessor_() {
   const written = {};
   return {
     appendRow(sheetName, rowArray) { (written[sheetName] = written[sheetName] || []).push(rowArray); },
-    getWritten(sheetName) { return written[sheetName] || []; }
+    getWritten(sheetName) { return written[sheetName] || []; },
+    getAllRows(sheetName) { return written[sheetName] || []; } // 假的 Sheet：写过的就是现在存在的
   };
 }
 

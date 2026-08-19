@@ -51,10 +51,22 @@ var COMPLIANCE_OS_ARCHITECTURE = {
       date: '2026-08-17',
       method: 'ADR-003（Reconciliation 与 Verified Income 解耦）实作后，Node vm 模块模拟合并执行全部 22 个文件（含 900/901 本身）',
       result: '通过，没有新的撞名或加载顺序问题；10 组 runAllXTests() 全部通过（Reconciliation 24 项、Verified Income 15 项、Document Import 32 项，均含新增的 ADR-003 行为测试）。真实 GAS 环境的重跑仍待 Steven 手动执行（人工验证清单见 111/131 文件底部）'
+    },
+    {
+      date: '2026-08-17',
+      method: 'Real Data Pilot 第一步：112_DocumentTextExtractor.js 接上真的 Drive OCR（driveOcrExtractor_ + realDriveOcrService_），Node vm 模拟重跑全部文件',
+      result: '通过，10 组 runAllXTests() 全部过（DocumentTextExtractor 3→15 项，新增对 driveOcrExtractor_ 编排逻辑的测试——用假 driveService，不是真的 DriveApp/Drive/DocumentApp）。真的调用 Google API 那一步（getOrCreateFolder/copyWithOcr/readDocText/trashFile 的真实实现）无法在 Node 验证，是这次新增的人工验证清单里份量最重的一项，待 Steven 拿真实 PDF 在 GAS 里跑'
+    },
+    {
+      date: '2026-08-18',
+      method: 'Real Data Pilot 第二步：Operator Console 整套（SheetReader 新模块、110 重构出 runImportPipeline_、140 新增发布幂等检查、170 Console 后端 + HTML 前端），Node vm 模拟合并执行全部 28 个 .js 文件',
+      result: '通过，没有撞名或加载顺序问题；12 组 runAllXTests() 全部通过，共 229 项断言。既有测试（Reconciliation/VerifiedIncome/DocumentImport）全部照旧通过，确认 runImportPipeline_ 重构、幂等检查都是可加行为、没有破坏既有契约。真的调用 DriveApp（folder 扫描、批次汇入、Retry）跟真的打开 doGet 部署页面，Node 环境验证不到，是这次份量最重的人工验证清单（见 171 文件底部）'
     }
   ],
 
   pipeline: [
+    'Google Drive（指定 Folder）',
+    'Operator Console（HTMLService，扫描未汇入 PDF + 批次汇入 + Retry——见 170_OperatorConsole.js/.html）',
     'Document Import Engine',
     'Document Parsing Engine',
     'Structured Statement Data',
@@ -64,6 +76,8 @@ var COMPLIANCE_OS_ARCHITECTURE = {
   ],
   /** ADR-003（v0.7，已签字）：Reconciliation 不在主线上，是独立、可选、非阻断的旁支——有 Rider OS 数据才跑，跑完只在 Reconciliation_Log 留下 reconciliation_status 注解，从不影响上面主线是否发布 */
   optionalPlugins: ['Reconciliation Engine（对账 Rider OS，见 130_Reconciliation.js）'],
+  /** compliance-os-console.jsx（v1/v2 的浏览器端重新实现）已被 Operator Console 取代退役——逻辑现在只有真正的 GAS 模块这一份（UCR5），不再有浏览器端的平行副本 */
+  retiredArtifacts: ['compliance-os-console.jsx'],
 
   /**
    * §1 Compliance OS 自己的模块目录。
@@ -90,6 +104,12 @@ var COMPLIANCE_OS_ARCHITECTURE = {
       note: '栏位校验 + 加锁写入，5 项测试通过。Sheet 本身的建立/plain-text 格式设置不在它的职责内，还没写'
     },
     {
+      name: 'SheetReader（新增，Sheet 读取唯一出口，TruthWriter 的对称读取层）',
+      file: '117_SheetReader.js / 118_Tests_SheetReader.js',
+      status: 'Tested',
+      note: 'Real Data Pilot（v0.7）需要读现有 Sheet 内容才能做——existingHashes 这类输入过去一直是外部手动传入，没有真的读过 Sheet。刻意不塞进 TruthWriter（名字/职责本来就限定在「写」），改成对称的新模块，共用同一个 sheetAccessor（115 的 gasSheetAccessor_/fakeSheetAccessor_ 都加了 getAllRows）。readAll() 原样回传欄位值，不做任何猜测性转换（不会把空字串猜回 null）。7 项测试通过'
+    },
+    {
       name: 'GrabWeeklyParser',
       file: '121_GrabWeeklyParser.js',
       status: 'Tested',
@@ -105,13 +125,13 @@ var COMPLIANCE_OS_ARCHITECTURE = {
       name: 'Document Import Engine',
       file: '110_DocumentImport.js / 111_Tests_DocumentImport.js',
       status: 'Tested',
-      note: '去重、document_id 生成、真实 SHA-256、Documents 写入都是真实实作。Sheet 存 drive_file_id（权威引用）+ drive_path（人类可读缓存，明确不是真相来源）而不是存 URL；新增建议文件名/目录路径的纯函数（{SOURCE}_{TYPE}_{PERIOD}.pdf，Compliance OS/{source}/{year}/{标签}）。ADR-003（v0.7）：processGrabStatement_() 解析成功先发布 Verified Income，Reconciliation 变成包在 try/catch 里的非阻断次要步骤（就算它丢未预期例外，已发布的 Verified Income 不受影响）；32 项测试通过'
+      note: '去重、document_id 生成、真实 SHA-256、Documents 写入都是真实实作。Sheet 存 drive_file_id（权威引用）+ drive_path（人类可读缓存，明确不是真相来源）而不是存 URL；新增建议文件名/目录路径的纯函数（{SOURCE}_{TYPE}_{PERIOD}.pdf，Compliance OS/{source}/{year}/{标签}）。ADR-003（v0.7）后再一次重构（Real Data Pilot）：拆出共用核心 runImportPipeline_()——不丢例外，结构化回传每一步的 stage（Skipped_Duplicate/Extraction_Failed/Parse_Failed/Verify_Failed/Verified/Already_Verified），Operator Console 的批次汇入靠这个才能一个文件失败不中断整批；processGrabStatement_() 变成薄封装，维持既有「失败就 throw」的契约不变（UCR5：序列只有一份，不是两份平行逻辑）。skipImport 参数支援 Retry：文件已经有 Documents 记录时跳过重新 import，不会被 file_hash 去重挡住。46 项测试通过'
     },
     {
       name: 'DocumentTextExtractor（PDF→文字 Adapter）',
       file: '112_DocumentTextExtractor.js',
       status: 'Tested',
-      note: 'UCR7 占位实现，跟 RiderOSAdapter 同一套路——底层要用 Drive OCR 还是 LLM API 都还没定，Adapter 层先确定，之后只换内部实现。3 项测试通过'
+      note: 'Real Data Pilot（v0.7）：driveOcrExtractor_ 是真的实作了——Drive API v2 的 Files.copy(convert+ocr) 转成 Google Doc 读文字，读完把暂存 Doc 丢进垃圾桶；低层 Drive 操作透过 driveService 注入，Node 环境测编排逻辑（清暂存档时机、空结果处理），真的调 DriveApp/Drive/DocumentApp 那步只能在真实 GAS 验证。LLM API 继续占位（UCR7），GAS 环境自动接 Drive OCR、Node 环境退回 placeholderExtractor_；appsscript.json 新增 Drive Advanced Service（v2）。15 项测试通过'
     },
     {
       name: 'Reconciliation Engine（ADR-003：独立、可选、非阻断的旁支，对 140_VerifiedIncome.js 零依赖）',
@@ -123,7 +143,7 @@ var COMPLIANCE_OS_ARCHITECTURE = {
       name: 'Verified Income 发布',
       file: '140_VerifiedIncome.js',
       status: 'Tested',
-      note: 'ADR-003（v0.7，Steven 已签字）：buildVerifiedIncomeRecord_/verifyAndPublishIncome_ 不再需要 reconciliationResult——net/amount 直接来自 parsedStatement.summary.weekly_net（陈述值，CMP-P5），解析成功即可发布，不等对账。EventBus 发布仍是 EventPublisher（createEventPublisher_ 工厂 + 注入）占位实现，EventBus 真实调用方式还没确认；15 项测试通过'
+      note: 'ADR-003（v0.7，Steven 已签字）：buildVerifiedIncomeRecord_/verifyAndPublishIncome_ 不再需要 reconciliationResult——net/amount 直接来自 parsedStatement.summary.weekly_net（陈述值，CMP-P5），解析成功即可发布，不等对账。Real Data Pilot 再加一层：verifyAndPublishIncome_ 新增可选的 existingIncomeIds 参数，发布前检查这个 income_id 是不是已经存在，存在就跳过（skipped: true），不重复写——「已导入文件不能因为重复点击而重复产生 Verified Income」这个要求落在发布本身，不是靠上层各自小心；不传这个参数时行为完全不变（既有呼叫方不用改）。EventBus 发布仍是 EventPublisher 占位实现，真实调用方式还没确认；21 项测试通过'
     },
     {
       name: 'Compliance Calendar',
@@ -138,6 +158,12 @@ var COMPLIANCE_OS_ARCHITECTURE = {
       note: '纯函数消费 Verified_Income 记录聚合成月度/YTD 汇总，标示 _source: "Projection"，不产生新的 Verified 记录。ISO 周→月份用该周星期四所在月份，已用已知真实样本（2026-W30=2026-07）核对正确。14 项测试通过。可以直接消费历史 Verified_Income 回填，不需要重新解析 PDF'
     },
     {
+      name: 'Operator Console（Real Data Pilot，v0.7，取代 compliance-os-console.jsx）',
+      file: '170_OperatorConsole.js / .html / 171_Tests_OperatorConsole.js',
+      status: 'Tested',
+      note: '真正的 HTMLService 页面（doGet 入口），前端用 google.script.run 直接呼叫下面这些真实的 GAS 函数——逻辑只有一份（UCR5），不是浏览器端重新实现一次 121/130/160 的平行副本（那是旧 .jsx 的做法，已退役）。consoleScanFolder_ 用 drive_file_id 对照 Documents 现有记录去重（CMP-P11 第一次真的拿来当去重键，不只是存着，且不用先下载/算 hash）；consoleBatchImport_ 逐一处理未汇入文件，靠 110 的 runImportPipeline_ 让单一文件失败不中断整批，文件之间加节流（Drive.Files.copy 紧密循环连续调用曾有零星失败报告，见 113 的记录）；consoleRetryFile_ 用 skipImport 跳过重复 import；consoleManualImport_ 是 Debug/Fallback（不是主要流程，Steven 明确要求）；consoleRebuildProjections_ 批次结束自动重建 Monthly/YTD（160 本来就是即时算，这里没有新架构，只是编排）。低层 Drive 操作透过 folderScanner 注入，Node 环境测编排逻辑，真的调 DriveApp 那几行只能在真实 GAS 验证（见 171 人工验证清单）。appsscript.json 新增 webapp 部署设定（access: MYSELF）。22 项测试通过'
+    },
+    {
       name: 'Utils（生产代码共用工具，新增）',
       file: '106_Utils.js',
       status: 'Tested',
@@ -147,7 +173,7 @@ var COMPLIANCE_OS_ARCHITECTURE = {
       name: 'Contract Tests（新增测试类别，采纳评审建议）',
       file: '190_Tests_Contracts.js',
       status: 'Tested',
-      note: '跟 NN_Tests_<FeatureId>.js 不同维度：测的是"所有实现某 Adapter 契约的东西形状对不对"（ParserRegistry 里每个 Parser 是否满足 DocumentParser 的 4 个方法、每个 createXxx_() 工厂是否产出文档承诺的方法），不是"这个模块自己的行为对不对"。12 项测试通过'
+      note: '跟 NN_Tests_<FeatureId>.js 不同维度：测的是"所有实现某 Adapter 契约的东西形状对不对"（ParserRegistry 里每个 Parser 是否满足 DocumentParser 的 4 个方法、每个 createXxx_() 工厂是否产出文档承诺的方法），不是"这个模块自己的行为对不对"。Real Data Pilot 新增 SheetReader 的契约检查（readAll）'
     },
     {
       name: 'AI Extraction / 差异解释',
@@ -177,7 +203,7 @@ var COMPLIANCE_OS_ARCHITECTURE = {
     intelligence: '全部 Tier 3，按 BP-3 预留不展开',
     integration: {
       bridge: 'CoreBridge（比现有生态 Tier 2 的「共用 Sheet 非正式桥接」更结构化的事件契约）',
-      importExport: 'Document Import Engine——生态级 Tier 3（无任何实现），Compliance OS 一旦写出代码会是第一个实现',
+      importExport: 'Document Import Engine + Operator Console——生态级 Tier 3（目前唯一的具体实现），Real Data Pilot（v0.7）之前只是「以后会是第一个」，现在是真的第一个跑 Drive 扫描 + 批次汇入的实现',
       externalSystems: 'Grab——生态级 Tier 2（"常被提到但没人真正对接过"），GrabWeeklyParser 是第一次真正处理 Grab 数据'
     },
     testing: '122_Tests_GrabWeeklyParser.js / 124_Tests_RiderOSAdapter.js，跟 NN_Tests_<FeatureId>.js + runAllXTests() 惯例一致（Blueprint Tier 1）',

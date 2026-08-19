@@ -12,6 +12,7 @@ if (typeof require === 'function') {
   require('./121_GrabWeeklyParser.js');
   var { createRiderOSAdapter_ } = require('./123_RiderOSAdapter.js');
   var { createTruthWriter_ } = require('./115_TruthWriter.js');
+  var { createSheetReader_ } = require('./117_SheetReader.js');
   var { createDocumentTextExtractor_ } = require('./112_DocumentTextExtractor.js');
   var { createEventPublisher_ } = require('./140_VerifiedIncome.js');
   var { assertEqual_, fakeStore_, fakeSheetAccessor_, fakeLockProvider_ } = require('./105_TestUtils.js');
@@ -39,6 +40,7 @@ function runAllContractTests() {
   // ---- Adapter 契约：createXxx_() 工厂产出的物件都要有文档承诺的方法 ----
   assertHasMethods_('RiderOSAdapter', createRiderOSAdapter_(fakeStore_()), ['onWeeklyEstimateReady', 'getWeeklyEstimate'], results);
   assertHasMethods_('TruthWriter', createTruthWriter_(fakeSheetAccessor_(), fakeLockProvider_()), ['appendValidatedRow'], results);
+  assertHasMethods_('SheetReader', createSheetReader_(fakeSheetAccessor_()), ['readAll'], results);
   assertHasMethods_('DocumentTextExtractor', createDocumentTextExtractor_({ extract: () => '' }), ['extract'], results);
   assertHasMethods_('EventPublisher', createEventPublisher_({ publish: () => {} }), ['publish'], results);
 

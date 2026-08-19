@@ -4,7 +4,7 @@
 if (typeof require === 'function') {
   var {
     computeDocumentId_, isDuplicateHash_, computeSuggestedFileName_, computeSuggestedFolderPath_,
-    importDocument_, processGrabStatement_, DOCUMENTS_COLUMNS
+    importDocument_, runImportPipeline_, processGrabStatement_, DOCUMENTS_COLUMNS
   } = require('./110_DocumentImport.js');
   var { createTruthWriter_ } = require('./115_TruthWriter.js');
   var { createRiderOSAdapter_ } = require('./123_RiderOSAdapter.js');
@@ -143,6 +143,86 @@ function runAllDocumentImportTests() {
   results.push({ name: '不给 extractedText 时走占位 Extractor 并正确抛错', pass: threwOnNoExtractor });
   // 但 Import 阶段应该已经先成功写入了（duplicate check 和 import 发生在 extractor 调用之前）
   assertEqual_('占位 Extractor 抛错前，Documents 已经先写好了', accessor4.getWritten('Documents').length, 1, results);
+
+  // ============ runImportPipeline_：批次汇入要靠的共用核心（不丢例外）============
+
+  // ---- 重复文件：stage 是 Skipped_Duplicate，欄位叫 importResult 不是 result ----
+  const accessor5 = fakeSheetAccessor_();
+  accessor5.appendRow('Documents', ['x', 'Grab', 'Weekly Statement', 'Income', '2026-W30', 'dup-hash', 'f1', '', 'Imported']);
+  const deps5 = { truthWriter: createTruthWriter_(accessor5, fakeLockProvider_()), riderOSAdapter: createRiderOSAdapter_(fakeStore_()), now: fixedNow };
+  const dupPipelineResult = runImportPipeline_(
+    { fileHash: 'dup-hash', source: 'Grab', documentType: 'Weekly Statement', documentClass: 'Income', period: '2026-W30', driveFileId: 'f1', existingHashes: ['dup-hash'] },
+    TEST_FIXTURE_GRAB_WEEKLY_STATEMENT,
+    deps5
+  );
+  assertEqual_('runImportPipeline_·重复文件·stage', dupPipelineResult.stage, 'Skipped_Duplicate', results);
+  assertEqual_('runImportPipeline_·重复文件·importResult.status', dupPipelineResult.importResult.status, 'Duplicate_Skipped', results);
+
+  // ---- 抽取失败：结构化回传 Extraction_Failed，不丢例外（占位 Extractor 会抛错，正好拿来测）----
+  const accessor6 = fakeSheetAccessor_();
+  const deps6 = { truthWriter: createTruthWriter_(accessor6, fakeLockProvider_()), riderOSAdapter: createRiderOSAdapter_(fakeStore_()), now: fixedNow };
+  let threwOnExtractionFailedPipeline = false;
+  let extractionFailedResult = null;
+  try {
+    extractionFailedResult = runImportPipeline_(
+      { fileHash: 'pqr222', source: 'Grab', documentType: 'Weekly Statement', documentClass: 'Income', period: '2026-W33', driveFileId: '1BadPdf', existingHashes: [] },
+      undefined,
+      deps6
+    );
+  } catch (e) { threwOnExtractionFailedPipeline = true; }
+  results.push({ name: 'runImportPipeline_·抽取失败·不丢例外（批次要能继续跑下一个文件）', pass: !threwOnExtractionFailedPipeline });
+  assertEqual_('runImportPipeline_·抽取失败·stage', extractionFailedResult && extractionFailedResult.stage, 'Extraction_Failed', results);
+  assertEqual_('runImportPipeline_·抽取失败·有带 error 讯息', typeof (extractionFailedResult && extractionFailedResult.error), 'string', results);
+  assertEqual_('runImportPipeline_·抽取失败·Documents 还是先写好了（Import 阶段本来就在抽取之前）', accessor6.getWritten('Documents').length, 1, results);
+
+  // ---- 解析失败：结构化回传 Parse_Failed，不丢例外 ----
+  const accessor7 = fakeSheetAccessor_();
+  const deps7 = { truthWriter: createTruthWriter_(accessor7, fakeLockProvider_()), riderOSAdapter: createRiderOSAdapter_(fakeStore_()), now: fixedNow };
+  const parseFailedResult = runImportPipeline_(
+    { fileHash: 'stu333', source: 'Grab', documentType: 'Weekly Statement', documentClass: 'Income', period: '2026-W34', driveFileId: '1GarbageText', existingHashes: [] },
+    '这份文件里面完全没有 Grab Weekly Statement 该有的任何栏位标签',
+    deps7
+  );
+  assertEqual_('runImportPipeline_·解析失败·stage', parseFailedResult.stage, 'Parse_Failed', results);
+  assertEqual_('runImportPipeline_·解析失败·Verified_Income 完全没写', accessor7.getWritten('Verified_Income').length, 0, results);
+
+  // ---- processGrabStatement_ 仍然维持既有「失败就 throw」契约（薄封装，不是行为改变）----
+  const accessor8 = fakeSheetAccessor_();
+  const deps8 = { truthWriter: createTruthWriter_(accessor8, fakeLockProvider_()), riderOSAdapter: createRiderOSAdapter_(fakeStore_()), now: fixedNow };
+  let threwViaThinWrapper = false;
+  try {
+    processGrabStatement_(
+      { fileHash: 'vwx444', source: 'Grab', documentType: 'Weekly Statement', documentClass: 'Income', period: '2026-W35', driveFileId: '1GarbageText2', existingHashes: [] },
+      '一样是垃圾文字，不含任何有效栏位',
+      deps8
+    );
+  } catch (e) { threwViaThinWrapper = true; }
+  results.push({ name: 'processGrabStatement_·Parse_Failed 仍然 throw（既有契约不变）', pass: threwViaThinWrapper });
+
+  // ---- Retry：skipImport 跳过 importDocument_，不会重复写 Documents，直接从抽取开始 ----
+  const accessor9 = fakeSheetAccessor_();
+  // 先模拟「第一次尝试」已经写过 Documents 了（例如上一轮批次汇入时抽取失败，但 Import 阶段已经成功）
+  accessor9.appendRow('Documents', ['CMP-DOC-old', 'Grab', 'Weekly Statement', 'Income', 'Pending', 'retry-hash', '1RetryFile', '', 'Imported']);
+  const deps9 = { truthWriter: createTruthWriter_(accessor9, fakeLockProvider_()), riderOSAdapter: createRiderOSAdapter_(fakeStore_()), now: fixedNow };
+  const retryResult = runImportPipeline_(
+    { skipImport: true, source: 'Grab', documentType: 'Weekly Statement', driveFileId: '1RetryFile' },
+    TEST_FIXTURE_GRAB_WEEKLY_STATEMENT,
+    deps9
+  );
+  assertEqual_('Retry·跳过 Import，直接成功走到 Verified', retryResult.stage, 'Verified', results);
+  assertEqual_('Retry·importResult.status 是 Already_Imported（没有真的又调用一次 importDocument_）', retryResult.importResult.status, 'Already_Imported', results);
+  assertEqual_('Retry·Documents 没有被重复写入第二次', accessor9.getWritten('Documents').length, 1, results);
+
+  // ---- Already_Verified：existingIncomeIds 已经有这个 week 时，跳过重复发布，但不当失败 ----
+  const accessor10 = fakeSheetAccessor_();
+  const deps10 = { truthWriter: createTruthWriter_(accessor10, fakeLockProvider_()), riderOSAdapter: createRiderOSAdapter_(fakeStore_()), now: fixedNow, existingIncomeIds: ['CMP-INCOME-2026-W30'] };
+  const alreadyVerifiedResult = runImportPipeline_(
+    { fileHash: 'yz555', source: 'Grab', documentType: 'Weekly Statement', documentClass: 'Income', period: '2026-W30', driveFileId: '1AlreadyDone', existingHashes: [] },
+    TEST_FIXTURE_GRAB_WEEKLY_STATEMENT,
+    deps10
+  );
+  assertEqual_('Already_Verified·stage', alreadyVerifiedResult.stage, 'Already_Verified', results);
+  assertEqual_('Already_Verified·没有真的再写一次 Verified_Income', accessor10.getWritten('Verified_Income').length, 0, results);
 
   const allPass = results.every((r) => r.pass);
   results.forEach((r) => {

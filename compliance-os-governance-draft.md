@@ -1,10 +1,12 @@
-# Compliance OS — Governance Layer（Draft v0.7）
+# Compliance OS — Governance Layer（Draft v0.8）
 
-> **状态：v0.6 之后本已 Architecture Freeze（见 §9）；v0.7 是 Freeze 自己写的例外条款——「有新证据或真实数据暴露问题」——触发原因：Steven 要求 Compliance OS v1 必须能不依赖 Rider OS 独立跑完整条链路，而现行实作（`130`/`140`.js）在这点上比已批准的 ADR-002 原文更严格。v0.7 只动这一件事（ADR-003），不重开其他已冻结的设计，签字前不动 `900`/`901` 实际代码。**
+> **状态：v0.6 之后本已 Architecture Freeze（见 §9）；v0.7 的 ADR-003 是 Freeze 自己写的例外条款；v0.8 是同一个例外的延续执行——Steven 2026-08-17 决定的 Real Data Pilot（不是新的例外，是 ADR-003 生效后「下一步该做什么」的直接指示，不需要另开 ADR）。不重开其他已冻结的设计。**
 >
 > v0.6：确认 v0.5 六项（EP3、Property OS 理由、UCR1-4/1899 bug、Compliance Calendar Projection、RiderOSAdapter、ADR-000）；私有函数命名改回 GAS 后缀惯例 `functionName_()`；`RiderOSAdapter` 已经写好并测试（占位版）。改动清单见 §9。
 >
 > v0.7（**已批准并实作，2026-08-17**）：新增 ADR-003（Reconciliation 与 Verified Income 解耦）+ CMP-P12；更新 §2.1 Pipeline、§2.3 Document Lifecycle、§7 Reconciliation_Log schema（Verified_Income schema 维持不变，见 §7 说明）；110/130/140 与对应测试已实作、Node 模拟 + 10 组 `runAllXTests()` 重跑通过，`900`/`901` 已同步。PDF 抽取方式：Drive OCR 先接成真的，LLM API 按证据决定，见 §9。
+>
+> v0.8（**已实作，2026-08-17～18**）：Real Data Pilot——112 接上真的 Drive OCR；新增 117_SheetReader.js（Sheet 读取唯一出口，TruthWriter 的对称层）；110 拆出 runImportPipeline_（不丢例外的共用核心，批次/重试都靠它）；140 新增发布幂等检查（existingIncomeIds）+ 新原则 CMP-P13；新增 170_OperatorConsole.js/.html/171（真正的 HTMLService Console，取代 `compliance-os-console.jsx`——见 §9 已退役）。appsscript.json 新增 Drive Advanced Service + webapp 部署设定。12 组 `runAllXTests()`、共 229 项断言通过。
 
 ---
 
@@ -44,8 +46,11 @@
 ### 2.1 Pipeline
 
 ```
-PDF / 官方文件
+Google Drive（指定 Folder）
       │
+      ▼
+Operator Console               [新增 v0.8]  ← HTMLService，扫描未汇入 PDF（drive_file_id
+      │                          去重）+ 批次汇入 + Retry，见 170_OperatorConsole.js/.html
       ▼
 Document Import Engine        [Integration / Import-Export]
       │
@@ -72,6 +77,8 @@ Reconciliation_Log               UCR6），从不回头改 Verified_Income
                                   取最新一笔算，见实作阶段新增的
                                   getCurrentReconciliationStatus_()）
 ```
+
+手动贴 Statement 文字（旧 `compliance-os-console.jsx` 的唯一入口方式）现在是 Operator Console 页面里的 Debug/Fallback，不是主要流程——Steven 2026-08-17 明确要求。
 
 ### 2.2 对应 Blueprint 0–5 层（v0.5：改成对照原文的精确 Tier，不是之前整行笼统标注）
 
@@ -163,13 +170,30 @@ UEF 定了新 Domain OS 的默认起始模板：`Truth → State → Event → S
 1. ~~Steven 签字确认本 ADR + CMP-P12~~ **已完成（2026-08-17）**
 2. ~~实作上述影响范围~~ **已完成（2026-08-17）**——110/130/140 + 既有测试全部更新，Node 模拟 + 10 组 `runAllXTests()` 重跑通过
 3. ~~签字后同步进 900/901~~ **已完成**——`adrs[]` 加入 ADR-003（status: Decided）、`principles[]` 加入 CMP-P12，pipeline 图/模块说明/verificationHistory 同步更新
-4. **下一步（Real Data Pilot，Steven 2026-08-17 定的优先序，Finance OS 暂缓）**：先把 `112_DocumentTextExtractor.js` 的 Drive OCR 接成真的可运行实现，直接拿 2026-01 至今的真实 Grab Weekly Statement 批次跑一次；Operator Console（HTMLService）+ Drive 直读 + `drive_file_id` 去重 + 批次汇入是这一步的操作介面。目标不是把架构做得更完整，是让真实数据跑起来、暴露真实 bug（Parser failure / OCR 失败 / 去重失败 / 周界/月界 / schema mismatch / 缺欄位 / 金额解析错误 / 重试与幂等 等），当作下一轮 Architecture 决策的证据——不是继续按「以后可能需要」设计
+4. **下一步（Real Data Pilot，Steven 2026-08-17 定的优先序，Finance OS 暂缓）**：`112_DocumentTextExtractor.js` 的 Drive OCR 真实实作**已完成**（2026-08-17，见下方历史摘要）——appsscript.json 已加 Drive Advanced Service（v2），driveOcrExtractor_ 编排逻辑 15 项测试通过，真的调用 Google API 那步待 Steven 在真实 GAS 里用真实 PDF 验证（见 113 文件底部人工验证清单）。接下来是 Operator Console（HTMLService）+ Drive 直读 + `drive_file_id` 去重 + 批次汇入——这是让 2026-01 至今的真实 Grab Weekly Statement 真正跑起来的操作介面。目标不是把架构做得更完整，是让真实数据跑起来、暴露真实 bug（Parser failure / OCR 失败 / 去重失败 / 周界/月界 / schema mismatch / 缺欄位 / 金额解析错误 / 重试与幂等 等），当作下一轮 Architecture 决策的证据——不是继续按「以后可能需要」设计
 
 **PDF 抽取方式（Steven 2026-08-17 定案，比原本「两个都做」更精确）**：`112_DocumentTextExtractor.js` 现有的 Adapter 接口（`extract({fileId, mimeType})`）保留不动。**现在只把 Drive OCR 接成真的**，拿来跑真实历史 PDF；LLM API 那个实现继续占位（UCR7 惯例），不因为「Adapter 已经在那里」就顺便选定供应商（Claude/Gemini/OpenAI）。只有真实 PDF 数据证明 Drive OCR 不够准时，才根据实际 failure evidence 决定要不要启用 LLM、选哪家——决定权留给证据，不是留给「反正都要做」。
 
 **Review Trigger**：Rider OS 真正开始发布 `RIDER_WEEKLY_ESTIMATE_READY`、且累积出真实的 `Discrepancy_Flagged` 案例后，回头检查现有容差设定（`DEFAULT_RECONCILIATION_CONFIG`）与人工判断流程是否需要细化——容差数字本身仍是 CMP-P10 意义下「合理猜测、未经真实数据验证」的占位值，这个 ADR 不改变那件事。
 
 **Related ADRs**：ADR-001（不变，§4.2 的 Adapter 模式与触发机制沿用）、ADR-002（不变，本 ADR 是对齐其原文，不是修改）
+
+---
+
+### 2.6 Real Data Pilot 实作（v0.8，2026-08-17～18，Steven 直接指示，不另开 ADR）
+
+ADR-003 批准后，Steven 定的下一步优先序：Real Data Pilot 优先于 Finance OS。这不是一个「Question/Options/Decision」式的架构选择——是已经决定方向后的直接执行指示，所以不另开 ADR 记录，直接记在这里。
+
+**新增/改动的模块**：
+- **117_SheetReader.js（新增）**：Sheet 读取的唯一出口，TruthWriter（115）的对称层。之前 `existingHashes` 这类输入一直是外部手动传入，从来没有真的读过 Sheet——Operator Console 的去重、批次汇入后重建 Monthly/YTD、发布前的幂等检查，都要读现有资料，这个模块补上这个能力。刻意不塞进 TruthWriter（名字/职责限定在「写」），两者共用同一个 `sheetAccessor`（115 的 `gasSheetAccessor_`/`fakeSheetAccessor_` 都加了 `getAllRows`，不是两套各自独立的「怎么跟 SpreadsheetApp 说话」）。`readAll()` 原样回传欄位值，不做任何猜测性转换。
+- **110_DocumentImport.js**：拆出共用核心 `runImportPipeline_()`——不丢例外，结构化回传每一步的 stage（`Skipped_Duplicate`/`Extraction_Failed`/`Parse_Failed`/`Verify_Failed`/`Verified`/`Already_Verified`）。`processGrabStatement_()` 变成薄封装，维持既有「失败就 throw」的契约完全不变（UCR5：序列只有一份，不是为了批次另外复制一份逻辑）。新增 `skipImport` 参数支援 Retry：文件已经有 Documents 记录时跳过重新 import，不会被 `file_hash` 去重挡住——这解决了一个真实的设计问题：Documents 是「先写后处理」（Import 阶段在 Extraction/Parse 之前完成），如果 Extraction/Parse 失败，Documents 记录已经存在，naive retry 会被当成 duplicate 挡住，永远无法重试。
+- **140_VerifiedIncome.js**：`verifyAndPublishIncome_()` 新增可选的 `existingIncomeIds` 参数——发布前检查这个 `income_id` 是否已存在，存在就跳过（`skipped: true`），不重复写。不传这个参数时行为完全不变，既有呼叫方不用改。这是 **CMP-P13**（新增原则，见 900）的落地：发布类操作必须幂等，这个检查放在发布函数本身，不是靠 Console 层各自小心。
+- **170_OperatorConsole.js / .html / 171_Tests_OperatorConsole.js（新增）**：真正的 HTMLService 页面，`doGet()` 入口，前端用 `google.script.run` 直接呼叫上面这些真实的 GAS 函数——逻辑只有一份（UCR5），**取代 `compliance-os-console.jsx`**（那份是把 121/130/160 的逻辑在浏览器端重新写一份，PORTED LOGIC，跟真正的 GAS 模块是两份独立代码，从这次起退役，见 §9）。`consoleScanFolder_` 用 `drive_file_id` 对照 Documents 现有记录去重——CMP-P11 第一次真的被拿来当去重键，不需要先下载/算 hash；`file_hash` 仍然留着当第二层防线。`consoleBatchImport_` 逐一处理未汇入文件，一个文件失败不中断整批，文件之间加节流（`Drive.Files.copy` 紧密循环连续调用曾有零星失败报告，查证结果见 113 文件）。批次结束自动呼叫 `consoleRebuildProjections_`——这一步很便宜，160 本来就是即时算、不存汇总表，「重建」就是把新汇入后的全部 `Verified_Income` 重新读一次、重新算一次，没有新架构。手动贴文字保留成 Debug/Fallback，不是主要流程。
+- **appsscript.json**：新增 `enabledAdvancedServices`（Drive v2，OCR 转换要用）+ `webapp`（`access: MYSELF`）。**刻意没有加 `oauthScopes`**——manifest 一旦手动列了 scopes 会关掉 GAS 的自动侦测，这个专案里真实的 sheetAccessor 实现不在交付范围内看得到，硬列反而可能漏掉它需要的 scope、部署时才炸掉；维持自动侦测更安全（查证过 Google 官方文件）。
+
+**范围边界（Steven 2026-08-17 明确列了这次不做的）**：Document Repository、新的 Compliance Event types、Decision OS、其他未来抽象、为了「以后可能需要」而加的 Infrastructure——都没有加。批次导入的 folder-scan/dedup/retry 逻辑虽然是新代码，但都是这次 Real Data Pilot 明确需要的，不是提前建的基础设施。
+
+**验证**：Node vm 模拟合并执行全部 28 个 `.js` 文件（不含新增的 `.html`，模拟只跑 `.js`），没有撞名或加载顺序问题；12 组 `runAllXTests()`、共 229 项断言全部通过。真的调用 `DriveApp`/部署成 Web App 打开 `doGet` 这几件事，Node 环境验证不到，是这次份量最重的人工验证清单（见 171 文件底部）。
 
 ---
 
@@ -287,9 +311,9 @@ COMPLIANCE_DUE_SOON / COMPLIANCE_OVERDUE / COMPLIANCE_COMPLETED
 
 ## 6. File Map — 对应 `907_File_Map.js`
 
-**900s Engineering**：900_Constitution.js（§1，含 ADR-000，**已写**——CMP-P1-12 原则 + CMP-CR1-5 编码规则）／901_System_Architecture.js（§2，**已写**——Compliance OS 自己的模块目录 + Architecture-Layers-to-Blueprint 映射）／902_Event_Model.js（§5）／903_State_Model.js（§2.3）／904_Data_Ownership.js（§3）／905_CoreBridge.js（§4）／906_AI_Integration.js（Reserved T3）／907_File_Map.js（本节）／908_Project_State.js（§9）／909_ADR.js（§1 ADR-000、§4.2 ADR-001、§3.2 ADR-002、§2.5 ADR-003）
+**900s Engineering**：900_Constitution.js（§1，含 ADR-000，**已写**——CMP-P1-13 原则 + CMP-CR1-5 编码规则）／901_System_Architecture.js（§2，**已写**——Compliance OS 自己的模块目录 + Architecture-Layers-to-Blueprint 映射）／902_Event_Model.js（§5）／903_State_Model.js（§2.3）／904_Data_Ownership.js（§3）／905_CoreBridge.js（§4）／906_AI_Integration.js（Reserved T3）／907_File_Map.js（本节）／908_Project_State.js（§9）／909_ADR.js（§1 ADR-000、§4.2 ADR-001、§3.2 ADR-002、§2.5 ADR-003）
 
-**100s Blueprint**：101_Vision.js（§0）／102_Principles.js／105_TestUtils.js（**已写**）／110_DocumentImport.js（**已写**，v2）／111_Tests_DocumentImport.js（**已写**）／112_DocumentTextExtractor.js（**已写**）／113_Tests_DocumentTextExtractor.js（**已写**）／115_TruthWriter.js（**已写**）／116_Tests_TruthWriter.js（**已写**）／120_DocumentParsing.js（已写）／121_GrabWeeklyParser.js（已写）／122_Tests_GrabWeeklyParser.js（已写）／123_RiderOSAdapter.js（已写，占位版）／124_Tests_RiderOSAdapter.js（已写）／130_Reconciliation.js（**已写**）／131_Tests_Reconciliation.js（**已写**）／140_VerifiedIncome.js（**已写**，v2：EventPublisher）／141_Tests_VerifiedIncome.js（**已写**）／150_ComplianceCalendar.js（**已写**）／151_Tests_ComplianceCalendar.js（**已写**）／190_Tests_Contracts.js（**已写**，新增测试类别）
+**100s Blueprint**：101_Vision.js（§0）／102_Principles.js／105_TestUtils.js（**已写**）／106_Utils.js（**已写**）／110_DocumentImport.js（**已写**，v3：拆出 runImportPipeline_）／111_Tests_DocumentImport.js（**已写**）／112_DocumentTextExtractor.js（**已写**，v2：Drive OCR 真实实作）／113_Tests_DocumentTextExtractor.js（**已写**）／115_TruthWriter.js（**已写**）／116_Tests_TruthWriter.js（**已写**）／117_SheetReader.js（**已写，新增**）／118_Tests_SheetReader.js（**已写，新增**）／120_DocumentParsing.js（已写）／121_GrabWeeklyParser.js（已写）／122_Tests_GrabWeeklyParser.js（已写）／123_RiderOSAdapter.js（已写，占位版）／124_Tests_RiderOSAdapter.js（已写）／130_Reconciliation.js（**已写**，v2：ADR-003）／131_Tests_Reconciliation.js（**已写**）／140_VerifiedIncome.js（**已写**，v3：发布幂等检查）／141_Tests_VerifiedIncome.js（**已写**）／150_ComplianceCalendar.js（**已写**）／151_Tests_ComplianceCalendar.js（**已写**）／160_MonthlyProjection.js（**已写**——之前这份清单漏列了，跟本次改动无关，顺手补上）／161_Tests_MonthlyProjection.js（**已写**）／170_OperatorConsole.js（**已写，新增**）／170_OperatorConsole.html（**已写，新增**）／171_Tests_OperatorConsole.js（**已写，新增**）／190_Tests_Contracts.js（**已写**，新增测试类别）
 
 核心 Runtime 主线全部写完。剩下只有 `906_AI_Integration.js`——按 Blueprint BP-3 刻意保留 Tier 3，不展开。
 
@@ -355,8 +379,9 @@ COMPLIANCE_DUE_SOON / COMPLIANCE_OVERDUE / COMPLIANCE_COMPLETED
 
 ## 9. Project State — 对应 `908_Project_State.js`
 
-- Status：**Architecture Freeze**（采纳评审建议的表述）——Governance 层（Architecture / Data Ownership / Module Boundary / File Map / Sheet Schema / Event Model / ADR-000-003）内容稳定，往后除非有新证据或真实数据暴露问题，不再主动扩充设计。重心转向工程质量（测试覆盖、Contract Test、已知限制的透明度），跟 UEF Blueprint Change Policy（§0.9）的精神一致——不因为"讨论起来合理"就继续加，只有第二个项目的独立证据或真实需求才动。**v0.7：Freeze 本身写了例外条款，ADR-003（§2.5）是目前唯一在跑过的例外，已批准并实作完成（2026-08-17）——不是重新打开整层设计，ADR-000/001/002 与 Freeze 其余范围维持不变。Freeze 对下一阶段（Real Data Pilot：Drive OCR、Operator Console、批次汇入）继续有效——Steven 明确列了这次不做的清单：Document Repository、新的 Compliance Event types、Decision OS、其他未来抽象、为了"以后可能需要"而加的 Infrastructure，只有真实数据跑出来的证据才能再开例外**
-- **核心 Runtime 现状**（用 `901_System_Architecture.js` 的 `computeComplianceOsEngineeringMetrics_()` 算，不是手动维护的数字）：12 个模块，11 个 Tested，1 个 Designed（`906_AI_Integration.js`，按 Blueprint BP-3 刻意保留 Tier 3，不是缺测试）。22 个 .js 文件（含 900/901 本身）的 GAS 合并模拟 2026-08-17 重跑，持续通过
-- **已知限制**（占位、等确认才能变真的，都不影响继续开发）：PDF→文字抽取方式（**Drive OCR 是下一步要接成真的实作**，跑真实历史 PDF；LLM API 保留占位，不因为 Adapter 已经在那里就先选供应商——只有真实数据证明 Drive OCR 不够准才根据实际 failure evidence 决定要不要启用、选哪家）、Personal AI Core EventBus 真实调用方式、Rider OS 的 RIDER_WEEKLY_ESTIMATE_READY 发布能力（现在明确不等它——ADR-003 之后 Rider OS 完全是可选项）、Compliance Calendar 的通知去重策略（连续多天 Due_Soon 会不会重复吵）
-- **历史变更摘要**（v0.1→v0.7 完整细节见各版本自身，这里只列大方向）：v0.1-v0.3 定下 Compliance OS 的定位、Data Ownership、Parser/Reconciliation/Event 设计，三轮外部评审逐步收敛（Document Repository 不抽离、通用 Compliance 事件不加具名类型、Official Truth Principle）；v0.4 用真实 Grab Statement 修正了收入结构假设；v0.5 对照 UEF v1.5/Blueprint v1.2 原文修正了引用错误与 Tier 判断，新增 ADR-000；v0.6 起进入实作阶段——`900_Constitution.js`/`901_System_Architecture.js` 落成 Compliance OS 自己的 UEF/Blueprint，核心链路（Import→Parse→Reconciliation→VerifiedIncome→ComplianceCalendar）全部写完测试，含一次实测抓到的真实 GAS 撞名 bug（详见 `901` 的 verificationHistory）；v0.7（**已批准并实作，2026-08-17**）：Steven 要求 v1 不依赖 Rider OS 独立运行，触发 ADR-003——Reconciliation 从 Verified Income 的前提条件改成可选、非阻断的事后注解（对账状态查询时从 Reconciliation_Log 现算，Verified_Income schema 不变），核心链路简化为 Import→Parse→VerifiedIncome→（可选）Reconciliation→ComplianceCalendar；110/130/140 + 对应测试已实作并通过全套回归；PDF 抽取方式定案为 Drive OCR 先做真的、LLM API 按证据决定；下一阶段 Real Data Pilot 优先，Finance OS 暂缓
-- Next（**Steven 2026-08-17 定的优先序**）：Real Data Pilot 优先，Finance OS 暂缓——(1) 先把 Drive OCR 接成真的实作，直接批次跑 2026-01 至今的真实 Grab Weekly Statement，配 Operator Console（HTMLService，Drive 直读 + `drive_file_id` 去重 + 批次汇入）；(2) 目的是找真实数据暴露的 bug（Parser failure / OCR 失败 / 去重失败 / 周界月界 / schema mismatch / 缺欄位 / 金额解析错误 / 重试与幂等），当作下一轮 Architecture 决策的证据；(3) Compliance OS 用真实数据稳定运行一段时间、真实 bug 修完之后，才开始 Finance OS，作为验证「Constitution + Architecture + Adapter + NN_Tests + Contract Tests」这套模式是否真的可复用的第二个 Domain OS——不是现在
+- Status：**Architecture Freeze**（采纳评审建议的表述）——Governance 层（Architecture / Data Ownership / Module Boundary / File Map / Sheet Schema / Event Model / ADR-000-003）内容稳定，往后除非有新证据或真实数据暴露问题，不再主动扩充设计。重心转向工程质量（测试覆盖、Contract Test、已知限制的透明度），跟 UEF Blueprint Change Policy（§0.9）的精神一致——不因为"讨论起来合理"就继续加，只有第二个项目的独立证据或真实需求才动。**v0.7：Freeze 本身写了例外条款，ADR-003（§2.5）是目前唯一在跑过的例外，已批准并实作完成（2026-08-17）——不是重新打开整层设计，ADR-000/001/002 与 Freeze 其余范围维持不变。v0.8（Real Data Pilot，见 §2.6）是同一个例外的延续执行，不是第二个例外——Steven 明确列了这次不做的清单：Document Repository、新的 Compliance Event types、Decision OS、其他未来抽象、为了"以后可能需要"而加的 Infrastructure，都没有加。Freeze 继续有效，只有真实数据跑出来的证据才能再开例外**
+- **核心 Runtime 现状**（用 `901_System_Architecture.js` 的 `computeComplianceOsEngineeringMetrics_()` 算，不是手动维护的数字，这行数字是真的跑了这个函数核对过的）：16 个模块，15 个 Tested，1 个 Designed（`906_AI_Integration.js`，按 Blueprint BP-3 刻意保留 Tier 3，不是缺测试）。28 个 .js 文件（含 900/901 本身）的 GAS 合并模拟 2026-08-18 重跑，12 组 `runAllXTests()`、共 229 项断言，持续通过
+- **已知限制**（占位、等确认才能变真的，都不影响继续开发）：PDF→文字抽取方式（Drive OCR **已实作完成**，真的调用 Drive API 那步待真实 GAS 环境用真实 PDF 验证；LLM API 保留占位，只有真实数据证明 Drive OCR 不够准才根据实际 failure evidence 决定要不要启用、选哪家）、Personal AI Core EventBus 真实调用方式、Rider OS 的 RIDER_WEEKLY_ESTIMATE_READY 发布能力（ADR-003 之后 Rider OS 完全是可选项，不等它）、Compliance Calendar 的通知去重策略（连续多天 Due_Soon 会不会重复吵）、Operator Console 真实 Drive 环境的行为（folder 扫描、批次汇入节流、真的部署成 Web App）——Node 环境测不到，都在人工验证清单里
+- **已退役**：`compliance-os-console.jsx`（v0.8，被 170_OperatorConsole.js/.html 取代——旧版是把 121/130/160 的逻辑在浏览器端重新写一份，跟真正的 GAS 模块是两份独立代码；新版直接呼叫真正的后端函数，逻辑只有一份）
+- **历史变更摘要**（v0.1→v0.7 完整细节见各版本自身，这里只列大方向）：v0.1-v0.3 定下 Compliance OS 的定位、Data Ownership、Parser/Reconciliation/Event 设计，三轮外部评审逐步收敛（Document Repository 不抽离、通用 Compliance 事件不加具名类型、Official Truth Principle）；v0.4 用真实 Grab Statement 修正了收入结构假设；v0.5 对照 UEF v1.5/Blueprint v1.2 原文修正了引用错误与 Tier 判断，新增 ADR-000；v0.6 起进入实作阶段——`900_Constitution.js`/`901_System_Architecture.js` 落成 Compliance OS 自己的 UEF/Blueprint，核心链路（Import→Parse→Reconciliation→VerifiedIncome→ComplianceCalendar）全部写完测试，含一次实测抓到的真实 GAS 撞名 bug（详见 `901` 的 verificationHistory）；v0.7（**已批准并实作，2026-08-17**）：Steven 要求 v1 不依赖 Rider OS 独立运行，触发 ADR-003——Reconciliation 从 Verified Income 的前提条件改成可选、非阻断的事后注解（对账状态查询时从 Reconciliation_Log 现算，Verified_Income schema 不变），核心链路简化为 Import→Parse→VerifiedIncome→（可选）Reconciliation→ComplianceCalendar；110/130/140 + 对应测试已实作并通过全套回归；PDF 抽取方式定案为 Drive OCR 先做真的、LLM API 按证据决定；下一阶段 Real Data Pilot 优先，Finance OS 暂缓；v0.8（**已实作，2026-08-17～18**）：Real Data Pilot 执行完成——新增 117_SheetReader.js（读取唯一出口）、110 拆出 runImportPipeline_（批次/重试共用、不丢例外）、140 新增发布幂等检查（existingIncomeIds + CMP-P13）、170_OperatorConsole.js/.html/171（真 HTMLService Console，取代 compliance-os-console.jsx）；appsscript.json 加 Drive Advanced Service + webapp 设定；12 组 runAllXTests()、229 项断言通过
+- Next：Real Data Pilot 的代码面已经做完——Drive OCR 真实实作、Operator Console（HTMLService，Drive 直读 + `drive_file_id` 去重 + 批次汇入 + Retry）、发布幂等检查都已实作并通过 Node 回归。**真正剩下的是 Steven 拿 2026-01 至今的真实 Grab Weekly Statement 在真实 GAS 环境跑一次**——这是 Node 环境完全验证不到的部分（见 111/113/118/171 各自的人工验证清单），目的是找真实数据暴露的 bug（Parser failure / OCR 失败 / 去重失败 / 周界月界 / schema mismatch / 缺欄位 / 金额解析错误 / 重试与幂等），当作下一轮 Architecture 决策的证据。Compliance OS 用真实数据稳定运行一段时间、真实 bug 修完之后，才开始 Finance OS，作为验证「Constitution + Architecture + Adapter + NN_Tests + Contract Tests」这套模式是否真的可复用的第二个 Domain OS——不是现在

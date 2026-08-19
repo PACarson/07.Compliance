@@ -113,6 +113,12 @@ var COMPLIANCE_OS_CONSTITUTION = {
       statement:
         'Verified Income 的发布只取决于官方文件是否解析成功并通过现有验证逻辑；Rider OS 对账（或未来任何其他交叉验证来源）只能在事后为已发布的记录附加状态注解（reconciliation_status：Not_Performed / Matched / Discrepancy_Flagged），永远不能决定该记录发不发布或延迟发布，Discrepancy_Flagged 也不得撤销或阻断已经 Verified 的官方收入。跟 CMP-P5（陈述值优先于计算值）是同一种「检查用来标注、不用来否决」的模式，只是这次的检查来源在 Compliance OS 外部（Rider OS）而不是内部重新计算。',
       adr: 'ADR-003'
+    },
+    {
+      id: 'CMP-P13',
+      name: '发布类操作必须幂等——同一个身份只能被公开写入一次',
+      statement:
+        '任何「公开发布一笔真相记录」的操作（目前是 Verified Income，income_id 当身份），重复触发（使用者重复点击、批次汇入重跑、Retry 单一文件）必须侦测到已经存在就跳过，不能因为操作重复执行就产生第二笔记录。这不是靠呼叫方自己小心，是发布函数本身在写入前检查一次（Operator Console 的 Real Data Pilot 阶段，consoleBatchImport_/consoleRetryFile_ 都可能对同一份文件重复触发）。目前只有 Verified Income 一个实例，还没到能推广成生态规则的证据门槛（BP-2/UEF §0.9），先记在这里；如果未来其他 Domain OS 也出现「批次/重试可能重复触发同一次发布」的场景，这条可以是候选。'
     }
   ],
 

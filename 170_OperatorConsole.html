@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Compliance OS — Operator Console</title>
+  <style>
+    :root {
+      --ink: #16211f;
+      --ink-soft: #4a5854;
+      --paper: #f6f4ee;
+      --paper-raised: #ffffff;
+      --rule: #d9d3c4;
+      --verified: #0f5c4f;
+      --verified-bg: #e3efe9;
+      --flagged: #8a5a12;
+      --flagged-bg: #f4ead6;
+      --failed: #8c2f26;
+      --failed-bg: #f6e5e1;
+      --pending: #6b665c;
+      --pending-bg: #eae6da;
+      --mono: ui-monospace, "SF Mono", "Cascadia Code", Consolas, "Liberation Mono", monospace;
+      --sans: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: var(--sans);
+      font-size: 14px;
+      line-height: 1.5;
+      padding: 28px 20px 80px;
+    }
+    .wrap { max-width: 880px; margin: 0 auto; }
+
+    header.masthead {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      border-bottom: 2px solid var(--ink);
+      padding-bottom: 12px;
+      margin-bottom: 24px;
+    }
+    header.masthead h1 {
+      font-size: 19px;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+      margin: 0;
+    }
+    header.masthead .subtitle {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--ink-soft);
+    }
+
+    section { margin-bottom: 28px; }
+    h2 {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--ink-soft);
+      margin: 0 0 10px;
+      font-weight: 600;
+    }
+
+    /* ---- Dashboard: dashed border = Projection (EP4: Fact vs Projection) ---- */
+    .dash-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 10px;
+    }
+    .dash-card {
+      background: var(--paper-raised);
+      border: 1.5px dashed var(--rule);
+      border-radius: 3px;
+      padding: 12px 14px;
+    }
+    .dash-card .label {
+      font-size: 11px;
+      color: var(--ink-soft);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .dash-card .value {
+      font-family: var(--mono);
+      font-size: 20px;
+      font-weight: 600;
+      margin-top: 2px;
+    }
+    .dash-card .value.currency::before { content: "RM "; font-size: 13px; color: var(--ink-soft); }
+    .dash-note {
+      font-size: 11px;
+      color: var(--ink-soft);
+      margin-top: 8px;
+      font-style: italic;
+    }
+
+    /* ---- Import panel ---- */
+    .panel {
+      background: var(--paper-raised);
+      border: 1px solid var(--rule);
+      border-radius: 4px;
+      padding: 16px;
+    }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    input[type=text] {
+      font-family: var(--mono);
+      font-size: 13px;
+      padding: 8px 10px;
+      border: 1px solid var(--rule);
+      border-radius: 3px;
+      background: var(--paper);
+      color: var(--ink);
+      flex: 1;
+      min-width: 220px;
+    }
+    input[type=text]:focus, button:focus, textarea:focus, summary:focus {
+      outline: 2px solid var(--verified);
+      outline-offset: 1px;
+    }
+    button {
+      font-family: var(--sans);
+      font-size: 13px;
+      font-weight: 600;
+      padding: 8px 16px;
+      border-radius: 3px;
+      border: 1px solid var(--ink);
+      background: var(--ink);
+      color: var(--paper);
+      cursor: pointer;
+    }
+    button.secondary {
+      background: transparent;
+      color: var(--ink);
+    }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    button.small { padding: 4px 10px; font-size: 12px; }
+    .hint { font-size: 12px; color: var(--ink-soft); margin-top: 6px; }
+
+    /* ---- Results list ---- */
+    ul.file-list { list-style: none; margin: 12px 0 0; padding: 0; }
+    ul.file-list li {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 4px;
+      border-bottom: 1px solid var(--rule);
+      font-size: 13px;
+    }
+    ul.file-list li:last-child { border-bottom: none; }
+    .file-name { font-family: var(--mono); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .file-detail { font-size: 11px; color: var(--ink-soft); }
+
+    /* Verified = stamp（实心、粗体、微旋转，像盖章）；其他都是浅底徽章 */
+    .badge {
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 700;
+      padding: 2px 8px;
+      border-radius: 2px;
+      white-space: nowrap;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+    .badge.stamp {
+      background: var(--verified-bg);
+      color: var(--verified);
+      border: 1.5px solid var(--verified);
+      transform: rotate(-1.5deg);
+      display: inline-block;
+    }
+    .badge.flagged { background: var(--flagged-bg); color: var(--flagged); border: 1px solid var(--flagged); }
+    .badge.failed { background: var(--failed-bg); color: var(--failed); border: 1px solid var(--failed); }
+    .badge.pending { background: var(--pending-bg); color: var(--pending); border: 1px dashed var(--pending); }
+
+    .recon-note {
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--ink-soft);
+      border: 1px dashed var(--rule);
+      padding: 1px 6px;
+      border-radius: 2px;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 28px 10px;
+      color: var(--ink-soft);
+      font-size: 13px;
+      border: 1.5px dashed var(--rule);
+      border-radius: 4px;
+    }
+
+    details.fallback {
+      border-top: 1px dashed var(--rule);
+      padding-top: 14px;
+      margin-top: 32px;
+    }
+    details.fallback summary {
+      cursor: pointer;
+      font-size: 12px;
+      color: var(--ink-soft);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      font-weight: 600;
+    }
+    details.fallback .panel { margin-top: 12px; }
+    textarea {
+      width: 100%;
+      min-height: 110px;
+      font-family: var(--mono);
+      font-size: 12px;
+      padding: 10px;
+      border: 1px solid var(--rule);
+      border-radius: 3px;
+      background: var(--paper);
+      color: var(--ink);
+      resize: vertical;
+    }
+
+    .toast {
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: var(--ink);
+      color: var(--paper);
+      padding: 10px 18px;
+      border-radius: 4px;
+      font-size: 13px;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.2);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s ease;
+    }
+    .toast.show { opacity: 1; }
+
+    .spinner {
+      display: inline-block;
+      width: 12px; height: 12px;
+      border: 2px solid rgba(255,255,255,0.35);
+      border-top-color: currentColor;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      vertical-align: -2px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    @media (prefers-reduced-motion: reduce) {
+      .spinner { animation: none; }
+      .toast { transition: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="masthead">
+      <h1>Compliance OS — Operator Console</h1>
+      <span class="subtitle">ADR-003 · Real Data Pilot</span>
+    </header>
+
+    <section>
+      <h2>Verified Income — 现况</h2>
+      <div id="dashboard" class="dash-grid">
+        <div class="dash-card"><div class="label">载入中</div><div class="value">—</div></div>
+      </div>
+      <div class="dash-note">虚线卡片 = Projection（即时算，不是存好的汇总表）；下方清单里的实心图章 = Verified 的官方记录本身</div>
+    </section>
+
+    <section>
+      <h2>从 Google Drive 汇入</h2>
+      <div class="panel">
+        <div class="row">
+          <input id="folderIdInput" type="text" placeholder="Drive Folder ID（网址列 folders/ 后面那一串）">
+          <button id="scanBtn" class="secondary">扫描资料夹</button>
+          <button id="importBtn">批次汇入未处理的文件</button>
+        </div>
+        <div class="hint">扫描只列出还没汇入的 PDF（用 drive_file_id 去重，不用重新下载已经处理过的文件）。批次汇入会自动重建下面的 Monthly/YTD。</div>
+      </div>
+
+      <div id="scanResults"></div>
+      <div id="importResults"></div>
+    </section>
+
+    <details class="fallback">
+      <summary>Debug / Fallback — 手动贴 Statement 文字</summary>
+      <div class="panel">
+        <div class="hint" style="margin-top:0">不是主要流程——只在 Drive 汇入卡住、需要单独测一份文字的时候用。</div>
+        <textarea id="manualText" placeholder="贴上 Grab Weekly Statement 的纯文字内容…"></textarea>
+        <div class="row" style="margin-top:10px">
+          <button id="manualBtn" class="secondary">手动汇入这份文字</button>
+        </div>
+        <div id="manualResult"></div>
+      </div>
+    </details>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script>
+    var state = { scan: null, lastFolderId: '' };
+
+    function showToast(msg) {
+      var t = document.getElementById('toast');
+      t.textContent = msg;
+      t.classList.add('show');
+      setTimeout(function () { t.classList.remove('show'); }, 2600);
+    }
+
+    function money(n) {
+      if (typeof n !== 'number') return '—';
+      return n.toLocaleString('en-MY', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+
+    function stageBadge(stage) {
+      if (stage === 'Verified' || stage === 'Already_Verified') {
+        return '<span class="badge stamp">Verified</span>' + (stage === 'Already_Verified' ? '<span class="file-detail">已存在，未重复发布</span>' : '');
+      }
+      if (stage === 'Skipped_Duplicate') return '<span class="badge pending">重复，已跳过</span>';
+      if (stage === 'Extraction_Failed') return '<span class="badge failed">抽取失败</span>';
+      if (stage === 'Parse_Failed') return '<span class="badge failed">解析失败</span>';
+      if (stage === 'Verify_Failed') return '<span class="badge failed">发布失败</span>';
+      return '<span class="badge failed">' + stage + '</span>';
+    }
+
+    function reconBadge(reconciliationStatus) {
+      if (!reconciliationStatus) return '';
+      var label = { Not_Performed: '未对账', Matched: '对账一致', Discrepancy_Flagged: '对账有差异' }[reconciliationStatus] || reconciliationStatus;
+      return '<span class="recon-note">' + label + '</span>';
+    }
+
+    function renderDashboard(d) {
+      var el = document.getElementById('dashboard');
+      var currentYm = new Date().toISOString().slice(0, 7);
+      var currentMonth = (d.monthlySummaries || []).find(function (m) { return m.year_month === currentYm; });
+      el.innerHTML = [
+        card('YTD 总收入', d.ytd ? money(d.ytd.net) : '0.00', true),
+        card('本月收入', currentMonth ? money(currentMonth.net) : '0.00', true),
+        card('累计 Verified 笔数', d.totalVerifiedCount != null ? String(d.totalVerifiedCount) : '0', false),
+        card('涵盖月份数', d.monthlySummaries ? String(d.monthlySummaries.length) : '0', false)
+      ].join('');
+    }
+    function card(label, value, isCurrency) {
+      return '<div class="dash-card"><div class="label">' + label + '</div><div class="value' + (isCurrency ? ' currency' : '') + '">' + value + '</div></div>';
+    }
+
+    function renderScanResults(scan) {
+      var el = document.getElementById('scanResults');
+      if (!scan.files.length) {
+        el.innerHTML = '<div class="empty-state">这个资料夹里没有找到 PDF。</div>';
+        return;
+      }
+      var todo = scan.files.filter(function (f) { return !f.alreadyImported; });
+      var done = scan.files.length - todo.length;
+      var items = scan.files.map(function (f) {
+        var badge = f.alreadyImported
+          ? '<span class="badge pending">已汇入</span>'
+          : '<span class="badge flagged">待处理</span>';
+        return '<li><span class="file-name">' + escapeHtml(f.name) + '</span>' + badge + '</li>';
+      }).join('');
+      el.innerHTML = '<h2 style="margin-top:16px">扫描结果 — ' + scan.files.length + ' 份 PDF，' + todo.length + ' 份待处理，' + done + ' 份已汇入</h2>' +
+        '<ul class="file-list">' + items + '</ul>';
+    }
+
+    function renderImportResults(batch) {
+      var el = document.getElementById('importResults');
+      if (!batch.results.length) {
+        el.innerHTML = '<div class="empty-state">扫描到 ' + batch.scannedCount + ' 份 PDF，全部都已经汇入过，没有新的要处理。</div>';
+        renderDashboard(batch.rebuild);
+        return;
+      }
+      var items = batch.results.map(function (r) {
+        var retryBtn = (r.stage.indexOf('Failed') !== -1 || r.stage === 'Unexpected_Error')
+          ? '<button class="small secondary" onclick="retryOne(\'' + r.fileId + '\', \'' + escapeJs(r.fileName) + '\')">Retry</button>'
+          : '';
+        var detail = r.error ? '<div class="file-detail">' + escapeHtml(r.error) + '</div>' : (r.incomeId ? '<div class="file-detail">' + r.incomeId + ' · RM ' + money(r.net) + '</div>' : '');
+        return '<li>' +
+          '<div style="flex:1;min-width:0">' +
+            '<span class="file-name">' + escapeHtml(r.fileName) + '</span>' + detail +
+          '</div>' +
+          stageBadge(r.stage) + reconBadge(r.reconciliationStatus) + retryBtn +
+        '</li>';
+      }).join('');
+      el.innerHTML = '<h2 style="margin-top:16px">汇入结果</h2><ul class="file-list" id="importList">' + items + '</ul>';
+      renderDashboard(batch.rebuild);
+    }
+
+    function escapeHtml(s) {
+      var d = document.createElement('div');
+      d.textContent = s == null ? '' : String(s);
+      return d.innerHTML;
+    }
+    function escapeJs(s) { return String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
+
+    function setBusy(btn, busy, busyLabel) {
+      if (busy) {
+        btn.dataset.originalLabel = btn.textContent;
+        btn.innerHTML = '<span class="spinner"></span> ' + busyLabel;
+        btn.disabled = true;
+      } else {
+        btn.textContent = btn.dataset.originalLabel || btn.textContent;
+        btn.disabled = false;
+      }
+    }
+
+    function loadDashboard() {
+      google.script.run.withSuccessHandler(renderDashboard).withFailureHandler(function (err) {
+        showToast('读取现况失败：' + err.message);
+      }).consoleGetDashboard_();
+    }
+
+    document.getElementById('scanBtn').addEventListener('click', function () {
+      var btn = this;
+      var folderId = document.getElementById('folderIdInput').value.trim();
+      if (!folderId) { showToast('请先填 Drive Folder ID'); return; }
+      setBusy(btn, true, '扫描中…');
+      google.script.run
+        .withSuccessHandler(function (scan) {
+          setBusy(btn, false);
+          state.scan = scan;
+          google.script.run.consoleSaveLastFolderId_(folderId);
+          renderScanResults(scan);
+        })
+        .withFailureHandler(function (err) {
+          setBusy(btn, false);
+          showToast('扫描失败：' + err.message);
+        })
+        .consoleScanFolder_(folderId);
+    });
+
+    document.getElementById('importBtn').addEventListener('click', function () {
+      var btn = this;
+      var folderId = document.getElementById('folderIdInput').value.trim();
+      if (!folderId) { showToast('请先填 Drive Folder ID'); return; }
+      setBusy(btn, true, '汇入中，文件数量多的话会需要一点时间…');
+      google.script.run
+        .withSuccessHandler(function (batch) {
+          setBusy(btn, false);
+          renderImportResults(batch);
+          showToast('批次汇入完成：' + batch.attemptedCount + ' 份处理完毕');
+        })
+        .withFailureHandler(function (err) {
+          setBusy(btn, false);
+          showToast('批次汇入失败：' + err.message);
+        })
+        .consoleBatchImport_(folderId);
+    });
+
+    function retryOne(fileId, fileName) {
+      showToast('重试中：' + fileName);
+      google.script.run
+        .withSuccessHandler(function (result) {
+          showToast(result.stage === 'Verified' ? '重试成功：' + fileName : '重试后仍是：' + result.stage);
+          renderDashboard(result.rebuild);
+          // 只更新这一笔在清单里的显示，不用整批重新渲染
+          if (state.scan) {
+            var f = state.scan.files.find(function (x) { return x.id === fileId; });
+            if (f && result.stage === 'Verified') f.alreadyImported = true;
+          }
+        })
+        .withFailureHandler(function (err) { showToast('重试失败：' + err.message); })
+        .consoleRetryFile_(fileId, fileName);
+    }
+
+    document.getElementById('manualBtn').addEventListener('click', function () {
+      var btn = this;
+      var text = document.getElementById('manualText').value;
+      if (!text.trim()) { showToast('请先贴上 Statement 文字'); return; }
+      setBusy(btn, true, '处理中…');
+      google.script.run
+        .withSuccessHandler(function (result) {
+          setBusy(btn, false);
+          var el = document.getElementById('manualResult');
+          el.innerHTML = '<div style="margin-top:10px">' + stageBadge(result.stage) + ' ' + (result.error ? escapeHtml(result.error) : (result.incomeId || '')) + '</div>';
+          renderDashboard(result.rebuild);
+        })
+        .withFailureHandler(function (err) {
+          setBusy(btn, false);
+          showToast('手动汇入失败：' + err.message);
+        })
+        .consoleManualImport_(text);
+    });
+
+    // 页面载入：读上次用过的 Folder ID + 现况 Dashboard
+    google.script.run.withSuccessHandler(function (id) {
+      if (id) { document.getElementById('folderIdInput').value = id; state.lastFolderId = id; }
+    }).consoleGetLastFolderId_();
+    loadDashboard();
+  </script>
+</body>
+</html>

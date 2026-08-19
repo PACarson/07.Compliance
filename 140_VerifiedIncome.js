@@ -123,19 +123,30 @@ function writeVerifiedIncome_(truthWriter, record) {
 
 /**
  * 编排：解析成功就发布（ADR-003）——不等、也不需要 Reconciliation 结果。
+ *
+ * existingIncomeIds 是可选的（不给就是原本的行为，既有呼叫方/测试不用改）：
+ * Operator Console 的批次汇入 / 重试会传这个，避免同一个 income_id 被写进
+ * Verified_Income 两次——「已导入文件不能因为重复点击而重复产生 Verified
+ * Income」这个要求，最自然的位置就是发布本身检查一次，不是靠上层每个
+ * 呼叫方各自小心。已经存在就跳过，不当错误处理（这是预期会发生的正常
+ * 情况，尤其是 Retry 场景）。
  * @param {string} week
  * @param {Object} parsedStatement
  * @param {Object} truthWriter
  * @param {string} eventId
  * @param {Date} [now]
- * @return {{record: Object, event: Object}}
+ * @param {string[]} [existingIncomeIds]
+ * @return {{record: Object, event: (Object|null), skipped: boolean}}
  */
-function verifyAndPublishIncome_(week, parsedStatement, truthWriter, eventId, now) {
+function verifyAndPublishIncome_(week, parsedStatement, truthWriter, eventId, now, existingIncomeIds) {
   const record = buildVerifiedIncomeRecord_(week, parsedStatement, now);
+  if (existingIncomeIds && existingIncomeIds.indexOf(record.income_id) !== -1) {
+    return { record, event: null, skipped: true };
+  }
   writeVerifiedIncome_(truthWriter, record);
   const event = buildIncomeVerifiedEvent_(record, eventId);
   EventPublisher.publish('INCOME_VERIFIED', event);
-  return { record, event };
+  return { record, event, skipped: false };
 }
 
 if (typeof module !== 'undefined') {
