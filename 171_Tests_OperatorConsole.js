@@ -1,7 +1,8 @@
 if (typeof require === 'function') {
   var {
     buildConsoleDeps_, consoleScanFolder_, consoleImportOneDriveFile_, consoleBatchImport_,
-    consoleRetryFile_, consoleManualImport_, consoleRebuildProjections_
+    consoleRetryFile_, consoleManualImport_, consoleRebuildProjections_, consoleGetDashboard_,
+    consoleGetDashboard, consoleGetLastFolderId, consoleScanFolder, consoleManualImport
   } = require('./170_OperatorConsole.js');
   var { createTruthWriter_ } = require('./115_TruthWriter.js');
   var { createSheetReader_ } = require('./117_SheetReader.js');
@@ -105,6 +106,25 @@ function runAllOperatorConsoleTests() {
   assertEqual_('重建·totalVerifiedCount 是 2', rebuild6.totalVerifiedCount, 2, results);
   assertEqual_('重建·YTD 涵盖两笔的总和', rebuild6.ytd.net, 2500, results);
 
+  // ============ 公开 wrapper 函数：转发是否正确 ============
+  // 不测「google.script.run 真的能不能连到公开函数」——那是 GAS 平台行为，
+  // Node 测不了，见文件最后的人工清单。这里只测「给一样的 fake deps，
+  // 公开版本（consoleXxx）产出的结果跟私有版本（consoleXxx_）一模一样」
+  // ——两边各自灌一份独立、起始状态相同的 fake deps，比对回传值。
+  const deps7a = fakeConsoleDeps_([{ id: 'f1', name: 'a.pdf' }]);
+  const deps7b = fakeConsoleDeps_([{ id: 'f1', name: 'a.pdf' }]);
+  assertEqual_('consoleScanFolder 转发结果跟 consoleScanFolder_ 一致', consoleScanFolder('folder1', deps7a), consoleScanFolder_('folder1', deps7b), results);
+
+  const deps8a = fakeConsoleDeps_([]);
+  const deps8b = fakeConsoleDeps_([]);
+  assertEqual_('consoleManualImport 转发结果跟 consoleManualImport_ 一致', consoleManualImport(TEST_FIXTURE_GRAB_WEEKLY_STATEMENT, deps8a), consoleManualImport_(TEST_FIXTURE_GRAB_WEEKLY_STATEMENT, deps8b), results);
+
+  const deps9a = fakeConsoleDeps_([]);
+  const deps9b = fakeConsoleDeps_([]);
+  assertEqual_('consoleGetDashboard 转发结果跟 consoleGetDashboard_ 一致', consoleGetDashboard(deps9a), consoleGetDashboard_(deps9b), results);
+
+  assertEqual_('consoleGetLastFolderId 公开版本可呼叫、不抛错（Node 下 PropertiesService 不存在，两版本都回 null）', consoleGetLastFolderId(), null, results);
+
   const allPass = results.every((r) => r.pass);
   results.forEach((r) => {
     console.log(`${r.pass ? 'PASS' : 'FAIL'} ${r.name}` + (r.pass ? '' : ` (got ${JSON.stringify(r.actual)}, expected ${JSON.stringify(r.expected)})`));
@@ -123,7 +143,15 @@ if (typeof module !== 'undefined') {
 
 /**
  * ============ 人工验证清单 ============
- * [ ] 真实 GAS 环境：部署成 Web App，doGet 真的能打开 170_OperatorConsole.html
+ * [x] 真实 GAS 环境：部署成 Web App，doGet 真的能打开 170_OperatorConsole.html
+ *     （2026-08-20 Steven 已确认：Drive 扫描 + 汇入在真实 GAS 跑通）
+ * [ ] 公开 wrapper 改名后重新部署，170_OperatorConsole.html 七个
+ *     google.script.run 呼叫（consoleGetDashboard/consoleScanFolder/
+ *     consoleBatchImport/consoleRetryFile/consoleManualImport/
+ *     consoleSaveLastFolderId/consoleGetLastFolderId）都要跟公开函数名
+ *     对上，不能还留着带下划线的旧名字——两边有一个没改对，google.script.run
+ *     一样叫不到
+ * [ ] "手动贴 statement" 重新测一次——上次只确认了 Drive 汇入这条路径
  * [ ] 真实 Drive Folder 扫描：确认 alreadyImported 判定正确，且真的没有
  *     重复下载/hash 已经汇入过的文件（省下的 API 配额是这层去重存在的
  *     意义）

@@ -408,7 +408,7 @@
     function loadDashboard() {
       google.script.run.withSuccessHandler(renderDashboard).withFailureHandler(function (err) {
         showToast('读取现况失败：' + err.message);
-      }).consoleGetDashboard_();
+      }).consoleGetDashboard();
     }
 
     document.getElementById('scanBtn').addEventListener('click', function () {
@@ -420,14 +420,14 @@
         .withSuccessHandler(function (scan) {
           setBusy(btn, false);
           state.scan = scan;
-          google.script.run.consoleSaveLastFolderId_(folderId);
+          google.script.run.consoleSaveLastFolderId(folderId);
           renderScanResults(scan);
         })
         .withFailureHandler(function (err) {
           setBusy(btn, false);
           showToast('扫描失败：' + err.message);
         })
-        .consoleScanFolder_(folderId);
+        .consoleScanFolder(folderId);
     });
 
     document.getElementById('importBtn').addEventListener('click', function () {
@@ -445,7 +445,7 @@
           setBusy(btn, false);
           showToast('批次汇入失败：' + err.message);
         })
-        .consoleBatchImport_(folderId);
+        .consoleBatchImport(folderId);
     });
 
     function retryOne(fileId, fileName) {
@@ -461,7 +461,7 @@
           }
         })
         .withFailureHandler(function (err) { showToast('重试失败：' + err.message); })
-        .consoleRetryFile_(fileId, fileName);
+        .consoleRetryFile(fileId, fileName);
     }
 
     document.getElementById('manualBtn').addEventListener('click', function () {
@@ -480,13 +480,13 @@
           setBusy(btn, false);
           showToast('手动汇入失败：' + err.message);
         })
-        .consoleManualImport_(text);
+        .consoleManualImport(text);
     });
 
     // 页面载入：读上次用过的 Folder ID + 现况 Dashboard
     google.script.run.withSuccessHandler(function (id) {
       if (id) { document.getElementById('folderIdInput').value = id; state.lastFolderId = id; }
-    }).consoleGetLastFolderId_();
+    }).consoleGetLastFolderId();
     loadDashboard();
   </script>
 </body>

@@ -260,6 +260,54 @@ function doGet(e) {
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
 
+/**
+ * ================= 公开给 HTMLService 前端调用的接口 =================
+ * google.script.run 看不到、也叫不动结尾带下划线的函数——Apps Script 官方
+ * 文档：私有函数（结尾下划线）对客户端不可见，不能被 google.script.run
+ * 呼叫。上面每一个 consoleXxx_ 都是这个专案的私有函数惯例（刻意隐藏于
+ * IDE 运行下拉菜单），所以都需要在这里补一个不带下划线的公开薄壳，纯
+ * 转发、不重复任何逻辑——170_OperatorConsole.html 实际呼叫的是这一层。
+ *
+ * deps 参数照实作函数原本的签名转发，不在这里默认成 buildConsoleDeps_()
+ * ——单元测试照样能注入 fake deps；HTML 前端呼叫时本来就不会带这个参数，
+ * 等同 undefined，跟原本行为完全一样，各 consoleXxx_ 内部自己处理
+ * `deps || buildConsoleDeps_()`。
+ *
+ * 之后这个文件如果再新增一个要给前端呼叫的 consoleXxx_，记得在这里补一个
+ * 对应的公开版本。这一层刻意手写、不用循环动态生成——google.script.run
+ * 认的是编译期看得到的具名 function 声明，不是运行时动态挂上去的属性，
+ * 用循环生成在这个平台上有没有效我没有把握，这个环节已经在你那边卡过一次
+ * 真实的坑，没必要在这里赌一个我没法验证的写法。
+ */
+
+function consoleGetDashboard(deps) {
+  return consoleGetDashboard_(deps);
+}
+
+function consoleGetLastFolderId() {
+  return consoleGetLastFolderId_();
+}
+
+function consoleSaveLastFolderId(folderId) {
+  return consoleSaveLastFolderId_(folderId);
+}
+
+function consoleScanFolder(folderId, deps) {
+  return consoleScanFolder_(folderId, deps);
+}
+
+function consoleBatchImport(folderId, deps) {
+  return consoleBatchImport_(folderId, deps);
+}
+
+function consoleRetryFile(fileId, fileName, deps) {
+  return consoleRetryFile_(fileId, fileName, deps);
+}
+
+function consoleManualImport(pastedText, deps) {
+  return consoleManualImport_(pastedText, deps);
+}
+
 if (typeof module !== 'undefined') {
   module.exports = {
     realFolderScanner_,
@@ -271,6 +319,13 @@ if (typeof module !== 'undefined') {
     consoleRetryFile_,
     consoleManualImport_,
     consoleRebuildProjections_,
-    consoleGetDashboard_
+    consoleGetDashboard_,
+    consoleGetDashboard,
+    consoleGetLastFolderId,
+    consoleSaveLastFolderId,
+    consoleScanFolder,
+    consoleBatchImport,
+    consoleRetryFile,
+    consoleManualImport
   };
 }
