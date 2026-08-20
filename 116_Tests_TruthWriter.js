@@ -53,6 +53,10 @@ if (typeof module !== 'undefined') {
 
 /**
  * ============ 人工验证清单 ============
+ * [ ] Script Properties 已设定 SPREADSHEET_ID（gasSheetAccessor_ 2026-08-20
+ *     改用 SpreadsheetApp.openById() 取代 getActive()——这个项目是 standalone
+ *     script、没有绑定容器，getActive() 在任何情境下都拿不到 Spreadsheet；
+ *     不设这个 Script Property，appendRow/getAllRows 会直接抛错）
  * [ ] 真实 GAS 环境下确认 LockService.getScriptLock().waitLock(10000) 在
  *     并发写入时真的会排队而不是互相覆盖
  * [ ] 确认目标 Sheet 建立时相关栏位已经设成 plain-text('@') 格式

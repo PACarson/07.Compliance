@@ -48,15 +48,37 @@ function createTruthWriter_(sheetAccessor, lockProvider) {
   return { appendValidatedRow };
 }
 
+/**
+ * 找到 TruthWriter/SheetReader 要连的那份 Spreadsheet。
+ *
+ * 这个项目是 standalone script（.clasp.json 没有 parentId，没有绑定任何
+ * Spreadsheet 容器）——SpreadsheetApp.getActive() 在这里不管什么情境都只会
+ * 拿到 null："active" 指的是绑定脚本的 Sheet UI session，Web App 请求/
+ * time-based trigger/API 执行都没有这个 session，不是偶发、是必然拿不到。
+ *
+ * 改用 openById + Script Property 存 ID，跟 170_OperatorConsole.js 的
+ * CONSOLE_LAST_FOLDER_ID、123_RiderOSAdapter.js 的 PropertiesService 缓存
+ * 同一个模式——要连哪份表明确指定，不猜"现在碰巧开着哪份"（CMP-P10）。
+ *
+ * @return {GoogleAppsScript.Spreadsheet.Spreadsheet}
+ */
+function getTargetSpreadsheet_() {
+  const id = PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID');
+  if (!id) {
+    throw new Error('getTargetSpreadsheet_: Script Properties 里没有设定 "SPREADSHEET_ID"——standalone script 没有 SpreadsheetApp.getActive() 可用，需要明确指定要连哪份表（Apps Script 编辑器 → Project Settings → Script Properties，加一笔 SPREADSHEET_ID = 该 Spreadsheet 网址 /d/ 后面那一串）');
+  }
+  return SpreadsheetApp.openById(id);
+}
+
 function gasSheetAccessor_() {
   return {
     appendRow(sheetName, rowArray) {
-      const sheet = SpreadsheetApp.getActive().getSheetByName(sheetName);
+      const sheet = getTargetSpreadsheet_().getSheetByName(sheetName);
       if (!sheet) throw new Error(`找不到 Sheet："${sheetName}"——需要先建表（含 plain-text 格式设置）`);
       sheet.appendRow(rowArray);
     },
     getAllRows(sheetName) {
-      const sheet = SpreadsheetApp.getActive().getSheetByName(sheetName);
+      const sheet = getTargetSpreadsheet_().getSheetByName(sheetName);
       if (!sheet) throw new Error(`找不到 Sheet："${sheetName}"——需要先建表`);
       const lastRow = sheet.getLastRow();
       if (lastRow < 2) return []; // 只有表头或整张表是空的
@@ -86,5 +108,5 @@ var TruthWriter = (typeof SpreadsheetApp !== 'undefined' && typeof LockService !
   : null;
 
 if (typeof module !== 'undefined') {
-  module.exports = { createTruthWriter_, gasSheetAccessor_, TruthWriter };
+  module.exports = { createTruthWriter_, gasSheetAccessor_, getTargetSpreadsheet_, TruthWriter };
 }

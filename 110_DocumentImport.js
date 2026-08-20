@@ -16,6 +16,14 @@
 
 if (typeof require === 'function') {
   var { ParserRegistry } = require('./120_DocumentParsing.js');
+  // 只是要它的自我注册副作用（ParserRegistry.register(new GrabWeeklyParser())），
+  // 不解构任何东西——这个文件真的会调用 ParserRegistry.getParserFor_()
+  // （经 120），所以由这里保证 registry 有内容，而不是靠每个呼叫方
+  // （170/171 之前就漏掉了）各自记得另外 require 一次具体 Parser。
+  // GAS 环境这行不影响任何事——全部檔案本来就一起载入同一个 global scope，
+  // 121 底部的 register() 本来就一定会跑；这行只是补 Node 环境下的
+  // require 顺序依赖，两边行为不会分岔。
+  require('./121_GrabWeeklyParser.js');
   var { runReconciliationForWeek_ } = require('./130_Reconciliation.js');
   var { verifyAndPublishIncome_ } = require('./140_VerifiedIncome.js');
   var { DocumentTextExtractor } = require('./112_DocumentTextExtractor.js');
