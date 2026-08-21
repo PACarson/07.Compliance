@@ -2,7 +2,7 @@
  * 113_Tests_DocumentTextExtractor.js
  */
 if (typeof require === 'function') {
-  var { createDocumentTextExtractor_ } = require('./112_DocumentTextExtractor.js');
+  var { createDocumentTextExtractor_, selectExtractorProvider_ } = require('./112_DocumentTextExtractor.js');
   var { assertEqual_ } = require('./105_TestUtils.js');
 }
 
@@ -26,6 +26,23 @@ function runAllDocumentTextExtractorTests() {
   assertEqual_('可以整个替换底层实现', result2, 'other implementation', results);
   assertEqual_('document 参数有正确传下去', capturedDocument.fileId, 'abc', results);
 
+  // ============ selectExtractorProvider_：provider 选择 ============
+  const fakeLLM = { extract() { return { mode: 'structured', candidate: {}, evidence: {} }; } };
+  const llmProvider = selectExtractorProvider_('llm', fakeLLM);
+  assertEqual_('provider=llm（注入假 deps）：回传的就是那个假 extractor', llmProvider, fakeLLM, results);
+
+  const defaultProvider = selectExtractorProvider_(undefined, fakeLLM);
+  assertEqual_('不给 providerName：默认是 llm', defaultProvider, fakeLLM, results);
+
+  const ocrProvider = selectExtractorProvider_('ocr');
+  let ocrThrew = false;
+  try { ocrProvider.extract({ fileId: 'x' }); } catch (err) { ocrThrew = true; }
+  assertEqual_('provider=ocr：明确抛错（fallback 槽位还没接实作，不假装能用）', ocrThrew, true, results);
+
+  let unknownProviderThrew = false;
+  try { selectExtractorProvider_('carrier-pigeon'); } catch (err) { unknownProviderThrew = true; }
+  assertEqual_('不认得的 provider 名字：直接抛错，不 fallback 到别的（CMP-P10）', unknownProviderThrew, true, results);
+
   const allPass = results.every((r) => r.pass);
   results.forEach((r) => {
     console.log(`${r.pass ? 'PASS' : 'FAIL'} ${r.name}` + (r.pass ? '' : ` (got ${JSON.stringify(r.actual)}, expected ${JSON.stringify(r.expected)})`));
@@ -44,7 +61,12 @@ if (typeof module !== 'undefined') {
 
 /**
  * ============ 人工验证清单 ============
- * [ ] 确认要用哪种真实抽取方式（Drive OCR？Gemini/OpenAI/Claude 哪一个？）
- * [ ] 真实实现确认后，写一个新的 xxxExtractor_() 工厂函数换掉
- *     placeholderExtractor_()，其他文件完全不用碰
+ * [x] 确认要用哪种真实抽取方式——2026-08-21 Steven 决定：LLM-based
+ *     extraction（provider='llm'，默认 Gemini），Drive OCR 保留为
+ *     fallback/diagnostic 槽位，暂不实作
+ * [ ] Script Properties 设定 GEMINI_API_KEY / EXTRACTION_EVIDENCE_FOLDER_ID
+ *     （见 128_Tests_LLMExtractor.js 人工清单）
+ * [ ] 真实 GAS 环境：DocumentTextExtractor.extract() 对一份真的 Drive PDF
+ *     跑一次，确认回传 mode='structured' 且 candidate 通过
+ *     125_ExtractionValidation.js 的验证
  */

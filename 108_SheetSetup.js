@@ -54,7 +54,7 @@ function buildSheetSchemas_() {
     {
       name: 'Verified_Income',
       columns: VERIFIED_INCOME_COLUMNS,
-      textColumns: ['income_id', 'period', 'currency', 'source', 'origin_platform', 'status', 'verified_at']
+      textColumns: ['income_id', 'period', 'currency', 'source', 'origin_platform', 'status', 'verified_at', 'source_document_id', 'extractor_id']
       // net_delivery_income/incentive/tip/other_payments/total_deductions/net/amount
       // 刻意不列——留给 Sheets 当数字
     },

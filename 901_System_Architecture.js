@@ -61,6 +61,16 @@ var COMPLIANCE_OS_ARCHITECTURE = {
       date: '2026-08-18',
       method: 'Real Data Pilot 第二步：Operator Console 整套（SheetReader 新模块、110 重构出 runImportPipeline_、140 新增发布幂等检查、170 Console 后端 + HTML 前端），Node vm 模拟合并执行全部 28 个 .js 文件',
       result: '通过，没有撞名或加载顺序问题；12 组 runAllXTests() 全部通过，共 229 项断言。既有测试（Reconciliation/VerifiedIncome/DocumentImport）全部照旧通过，确认 runImportPipeline_ 重构、幂等检查都是可加行为、没有破坏既有契约。真的调用 DriveApp（folder 扫描、批次汇入、Retry）跟真的打开 doGet 部署页面，Node 环境验证不到，是这次份量最重的人工验证清单（见 171 文件底部）'
+    },
+    {
+      date: '2026-08-20',
+      method: 'Web Console 首次真实 GAS 调用：Steven 发现两个 Real Data Pilot 阶段没测到的真实 bug——(1) gasSheetAccessor_ 用 SpreadsheetApp.getActive()，standalone script 永远拿不到东西，改用 openById+Script Property；(2) google.script.run 叫不到结尾带下划线的私有函数（官方文件明载），170 全部 consoleXxx_ 都要补一层不带下划线的公开 wrapper。新增 108_SheetSetup.js（一次建好五张表的表头+plain-text 格式）',
+      result: '两个都是真实环境才会踩到、Node 测试结构上测不到的问题（前者是 GAS 独有的「standalone script 没有 active spreadsheet」语意，后者是 google.script.run 的私有函数可见性规则）。修完后 Steven 确认 Drive 扫描+批次汇入在真实 GAS 跑通'
+    },
+    {
+      date: '2026-08-21',
+      method: 'LLM-based Extraction 正式实作：Steven 决定放弃 Drive OCR、改用 LLM extraction + deterministic validation（PDF → LLM Extraction → Structured Candidate → Schema/Period/Arithmetic Validation → normalize → Verified Income）。新增 125_ExtractionValidation.js（三层验证，纯逻辑）、127_LLMExtractor.js（Gemini generateContent provider，PDF inline_data + responseSchema 结构化输出）；112_DocumentTextExtractor.js 改成 provider factory（llm 默认、ocr 保留未实作的 fallback 槽位）；110 的 runImportPipeline_ 按 extractor 回传的 envelope.mode 分流（text→原本 regex parser 不变；structured→先过验证才能 normalize 成 parsedStatement，没过就是 Extraction_Failed/Needs_Review，candidate 跟证据原样保留不丢弃）；140 新增 source_document_id/extractor_id 两个可追溯栏位（additive，MonthlyProjection 等既有消费者不受影响）',
+      result: '**发现文件本身跟实际代码不一致**：这份文件（下面 112 的模块条目）先前记着 driveOcrExtractor_/realDriveOcrService_「已经真的实作」（2026-08-17 那次变更），但这次拿到的 07.Compliance-main.zip 里 112_DocumentTextExtractor.js 实际内容只有 placeholderExtractor_ 占位、没有任何 Drive OCR 代码——appsscript.json 的 Drive Advanced Service（v2）manifest 变更确实在，但对应的实作代码不在这份 zip 里。原因不明（可能治理文件在代码真正落地前就先更新了，或中途被回退过），Steven 没有另外提起，这里如实记录、不假装没发生。下面 112 条目已经改成描述这次实际验证过的真实状态（LLM extraction），不是延续先前那笔可能有误的记录。Node vm 模拟合并执行全部 32 个 .js 文件（含 195_Tests_GasLoadSimulation.js 本身，新增；PropertiesService 存在但完全没设定任何 Script Property 的状态下模拟载入），过程中额外抓到两个新问题：108_SheetSetup.js 的 SHEET_SCHEMAS_ 原本顶层就求值、字母序排在 110/130/140/150 前面会读到 undefined（改成惰性函数）；112 的 DocumentTextExtractor 原本顶层就急着建构 realLLMExtractor_()，Script Properties 没设定好时会让整个专案载入失败（改成惰性，延后到第一次真的 extract() 呼叫）。16 组 runAllXTests() 全部通过，真的调用 Gemini API、真的看到 evidence 档案写进 Drive，只能等 Steven 设定好 Script Properties（GEMINI_API_KEY/EXTRACTION_EVIDENCE_FOLDER_ID）后在真实 GAS 验证'
     }
   ],
 
@@ -68,9 +78,10 @@ var COMPLIANCE_OS_ARCHITECTURE = {
     'Google Drive（指定 Folder）',
     'Operator Console（HTMLService，扫描未汇入 PDF + 批次汇入 + Retry——见 170_OperatorConsole.js/.html）',
     'Document Import Engine',
-    'Document Parsing Engine',
+    'LLM Extraction（127_LLMExtractor.js，Structured Candidate）→ Extraction Validation（125_ExtractionValidation.js，schema/period/arithmetic）',
+    'Document Parsing Engine（regex 路径：手动贴文字 / 未来的 OCR fallback，两条路径汇流成同一个 parsedStatement 形状）',
     'Structured Statement Data',
-    'Compliance OS Truth Layer（Verified Income 在此发布——ADR-003，不等 Reconciliation）',
+    'Compliance OS Truth Layer（Verified Income 在此发布——ADR-003，不等 Reconciliation；LLM 只是 Extraction Engine，不是 Truth Engine，Extraction Validation 才是进这层前的强制关卡）',
     'Event Bus',
     '→ Finance OS (Verified Income) / Reminder OS (Compliance Calendar)'
   ],
@@ -101,7 +112,7 @@ var COMPLIANCE_OS_ARCHITECTURE = {
       name: 'TruthWriter（UCR6 Sheet 写入唯一出口）',
       file: '115_TruthWriter.js',
       status: 'Tested',
-      note: '栏位校验 + 加锁写入，5 项测试通过。Sheet 本身的建立/plain-text 格式设置不在它的职责内，还没写'
+      note: '栏位校验 + 加锁写入，5 项测试通过。Sheet 本身的建立/plain-text 格式设置不在它的职责内——2026-08-20 由 108_SheetSetup.js 补上，不是这个文件自己做'
     },
     {
       name: 'SheetReader（新增，Sheet 读取唯一出口，TruthWriter 的对称读取层）',
@@ -125,13 +136,25 @@ var COMPLIANCE_OS_ARCHITECTURE = {
       name: 'Document Import Engine',
       file: '110_DocumentImport.js / 111_Tests_DocumentImport.js',
       status: 'Tested',
-      note: '去重、document_id 生成、真实 SHA-256、Documents 写入都是真实实作。Sheet 存 drive_file_id（权威引用）+ drive_path（人类可读缓存，明确不是真相来源）而不是存 URL；新增建议文件名/目录路径的纯函数（{SOURCE}_{TYPE}_{PERIOD}.pdf，Compliance OS/{source}/{year}/{标签}）。ADR-003（v0.7）后再一次重构（Real Data Pilot）：拆出共用核心 runImportPipeline_()——不丢例外，结构化回传每一步的 stage（Skipped_Duplicate/Extraction_Failed/Parse_Failed/Verify_Failed/Verified/Already_Verified），Operator Console 的批次汇入靠这个才能一个文件失败不中断整批；processGrabStatement_() 变成薄封装，维持既有「失败就 throw」的契约不变（UCR5：序列只有一份，不是两份平行逻辑）。skipImport 参数支援 Retry：文件已经有 Documents 记录时跳过重新 import，不会被 file_hash 去重挡住。46 项测试通过'
+      note: '去重、document_id 生成、真实 SHA-256、Documents 写入都是真实实作。Sheet 存 drive_file_id（权威引用）+ drive_path（人类可读缓存，明确不是真相来源）而不是存 URL；新增建议文件名/目录路径的纯函数（{SOURCE}_{TYPE}_{PERIOD}.pdf，Compliance OS/{source}/{year}/{标签}）。ADR-003（v0.7）后再一次重构（Real Data Pilot）：拆出共用核心 runImportPipeline_()——不丢例外，结构化回传每一步的 stage（Skipped_Duplicate/Extraction_Failed/Parse_Failed/Verify_Failed/Verified/Already_Verified），Operator Console 的批次汇入靠这个才能一个文件失败不中断整批；processGrabStatement_() 变成薄封装，维持既有「失败就 throw」的契约不变（UCR5：序列只有一份，不是两份平行逻辑）。skipImport 参数支援 Retry：文件已经有 Documents 记录时跳过重新 import，不会被 file_hash 去重挡住，2026-08-21 修正原本 Retry 时 document_id 固定回传 null 的缺口（呼叫方现在会把查到的既有 document_id 一并带上，Verified_Income 的 source_document_id 才追溯得回去）。2026-08-21 新增：extraction 回传的 envelope 依 mode 分流——text（regex parser，行为不变）／structured（LLM candidate，先过 125_ExtractionValidation.js 才能 normalize 成 parsedStatement，没过是新增的 Needs_Review 阶段，不是 Extraction_Failed，candidate 跟证据原样保留）。57 项测试通过'
     },
     {
-      name: 'DocumentTextExtractor（PDF→文字 Adapter）',
+      name: 'DocumentTextExtractor（PDF→文字/结构化候选 Adapter）',
       file: '112_DocumentTextExtractor.js',
       status: 'Tested',
-      note: 'Real Data Pilot（v0.7）：driveOcrExtractor_ 是真的实作了——Drive API v2 的 Files.copy(convert+ocr) 转成 Google Doc 读文字，读完把暂存 Doc 丢进垃圾桶；低层 Drive 操作透过 driveService 注入，Node 环境测编排逻辑（清暂存档时机、空结果处理），真的调 DriveApp/Drive/DocumentApp 那步只能在真实 GAS 验证。LLM API 继续占位（UCR7），GAS 环境自动接 Drive OCR、Node 环境退回 placeholderExtractor_；appsscript.json 新增 Drive Advanced Service（v2）。15 项测试通过'
+      note: '2026-08-21 更新：provider factory，selectExtractorProvider_ 选 \'llm\'（默认，接 127_LLMExtractor.js）或 \'ocr\'（明确保留但还没实作的 fallback/diagnostic 槽位）。⚠️ 这份文件先前（2026-08-17）记着 driveOcrExtractor_/realDriveOcrService_ 已经实作——重新读这次 zip 里的实际代码后发现只有 placeholderExtractor_ 占位，没有对应实作，appsscript.json 的 Drive Advanced Service manifest 变更倒是真的在，但代码不在。已改成描述现在验证过的真实状态，不确定先前记录为何脱节，如实标注。真实 GAS 环境下 DocumentTextExtractor 的建构是惰性的（lazyLLMExtractor_）——不惰性的话，Script Properties 没设定 GEMINI_API_KEY 时会让整个专案在载入阶段就失败，牵连所有其他函式。7 项测试通过'
+    },
+    {
+      name: 'ExtractionValidation（新增，LLM candidate 进 Verified Income 前的强制关卡）',
+      file: '125_ExtractionValidation.js / 126_Tests_ExtractionValidation.js',
+      status: 'Tested',
+      note: '「LLM 是 Extraction Engine，不是 Truth Engine」这个边界的具体实现——纯逻辑、不碰任何 GAS 服务。三层检查：schema（形状/必要栏位/类型）→ period（只信拆开的年/月/日整数，UCR4；week 永远由这里的代码从 period_start_parts 重新算，从不采用 candidate 自己给的任何 week 值）→ arithmetic（summary/income_breakdown 彼此的数学关系，±0.01 容差）。schema 没过是 Extraction_Failed，period/arithmetic 没过是 Needs_Review（candidate 跟错误原样保留，不丢弃）。含明确的 hallucination 负向测试（数字各自看起来合理但兜不起来，必须被拒绝）。24 项测试通过'
+    },
+    {
+      name: 'LLMExtractor（新增，DocumentTextExtractor 的 provider=\'llm\' 具体实现）',
+      file: '127_LLMExtractor.js / 128_Tests_LLMExtractor.js',
+      status: 'Tested',
+      note: 'Provider 选 Gemini generateContent（PDF inline_data + responseSchema 结构化输出）——不是较新的 interactions API，理由：请求/回应形状目前比较有把握（多个独立来源互相印证），换 provider 只需要改这个文件的 buildXxxRequestBody_/parseXxxResponse_，其他文件不用动。model/API key 从 Script Properties 读，不写死。证据留存：不管这次 candidate 有没有通过验证都会把 raw response/candidate/prompt 写成 Drive 里的 JSON 档，档名带 document_id+extraction version。真的调用 Gemini API/DriveApp 那几行（realLLMExtractorDeps_）Node 环境测不到，纯函数（request 组装/response 解析/证据记录）跟编排逻辑（假 driveService/httpClient）都有测。23 项测试通过'
     },
     {
       name: 'Reconciliation Engine（ADR-003：独立、可选、非阻断的旁支，对 140_VerifiedIncome.js 零依赖）',
@@ -143,7 +166,7 @@ var COMPLIANCE_OS_ARCHITECTURE = {
       name: 'Verified Income 发布',
       file: '140_VerifiedIncome.js',
       status: 'Tested',
-      note: 'ADR-003（v0.7，Steven 已签字）：buildVerifiedIncomeRecord_/verifyAndPublishIncome_ 不再需要 reconciliationResult——net/amount 直接来自 parsedStatement.summary.weekly_net（陈述值，CMP-P5），解析成功即可发布，不等对账。Real Data Pilot 再加一层：verifyAndPublishIncome_ 新增可选的 existingIncomeIds 参数，发布前检查这个 income_id 是不是已经存在，存在就跳过（skipped: true），不重复写——「已导入文件不能因为重复点击而重复产生 Verified Income」这个要求落在发布本身，不是靠上层各自小心；不传这个参数时行为完全不变（既有呼叫方不用改）。EventBus 发布仍是 EventPublisher 占位实现，真实调用方式还没确认；21 项测试通过'
+      note: 'ADR-003（v0.7，Steven 已签字）：buildVerifiedIncomeRecord_/verifyAndPublishIncome_ 不再需要 reconciliationResult——net/amount 直接来自 parsedStatement.summary.weekly_net（陈述值，CMP-P5），解析成功即可发布，不等对账。Real Data Pilot 再加一层：verifyAndPublishIncome_ 新增可选的 existingIncomeIds 参数，发布前检查这个 income_id 是不是已经存在，存在就跳过（skipped: true），不重复写——「已导入文件不能因为重复点击而重复产生 Verified Income」这个要求落在发布本身，不是靠上层各自小心；不传这个参数时行为完全不变（既有呼叫方不用改）。2026-08-21 新增 source_document_id/extractor_id 两个可追溯栏位（additive，接在既有栏位后面，MonthlyProjection 等既有消费者不受影响）——extractor_id 直接读 parsedStatement._parser_id，GrabWeeklyParser 的 regex 路径、LLMExtractor 经验证 normalize 出来的路径都会在这个欄位留下自己的身份。EventBus 发布仍是 EventPublisher 占位实现，真实调用方式还没确认；21 项测试通过'
     },
     {
       name: 'Compliance Calendar',
@@ -161,13 +184,25 @@ var COMPLIANCE_OS_ARCHITECTURE = {
       name: 'Operator Console（Real Data Pilot，v0.7，取代 compliance-os-console.jsx）',
       file: '170_OperatorConsole.js / .html / 171_Tests_OperatorConsole.js',
       status: 'Tested',
-      note: '真正的 HTMLService 页面（doGet 入口），前端用 google.script.run 直接呼叫下面这些真实的 GAS 函数——逻辑只有一份（UCR5），不是浏览器端重新实现一次 121/130/160 的平行副本（那是旧 .jsx 的做法，已退役）。consoleScanFolder_ 用 drive_file_id 对照 Documents 现有记录去重（CMP-P11 第一次真的拿来当去重键，不只是存着，且不用先下载/算 hash）；consoleBatchImport_ 逐一处理未汇入文件，靠 110 的 runImportPipeline_ 让单一文件失败不中断整批，文件之间加节流（Drive.Files.copy 紧密循环连续调用曾有零星失败报告，见 113 的记录）；consoleRetryFile_ 用 skipImport 跳过重复 import；consoleManualImport_ 是 Debug/Fallback（不是主要流程，Steven 明确要求）；consoleRebuildProjections_ 批次结束自动重建 Monthly/YTD（160 本来就是即时算，这里没有新架构，只是编排）。低层 Drive 操作透过 folderScanner 注入，Node 环境测编排逻辑，真的调 DriveApp 那几行只能在真实 GAS 验证（见 171 人工验证清单）。appsscript.json 新增 webapp 部署设定（access: MYSELF）。22 项测试通过'
+      note: '真正的 HTMLService 页面（doGet 入口），前端用 google.script.run 直接呼叫下面这些真实的 GAS 函数——逻辑只有一份（UCR5），不是浏览器端重新实现一次 121/130/160 的平行副本（那是旧 .jsx 的做法，已退役）。consoleScanFolder_ 用 drive_file_id 对照 Documents 现有记录去重（CMP-P11 第一次真的拿来当去重键，不只是存着，且不用先下载/算 hash）；consoleBatchImport_ 逐一处理未汇入文件，靠 110 的 runImportPipeline_ 让单一文件失败不中断整批；consoleRetryFile_ 用 skipImport 跳过重复 import，2026-08-21 起会把既有 document_id 一并带上（见 110 条目）；consoleManualImport_ 是 Debug/Fallback（不是主要流程，Steven 明确要求）；consoleRebuildProjections_ 批次结束自动重建 Monthly/YTD（160 本来就是即时算，这里没有新架构，只是编排）。⚠️ 2026-08-20 发现：google.script.run 叫不到结尾带下划线的私有函数（Apps Script 官方文件明载）——这是这次 Real Data Pilot 真正卡住的根因，不是先前假设的 GAS 环境细节问题。补上一层不带下划线的公开 wrapper（consoleGetDashboard/consoleScanFolder/consoleBatchImport/consoleRetryFile/consoleManualImport/consoleSaveLastFolderId/consoleGetLastFolderId），170_OperatorConsole.html 的七个呼叫点也同步改名，实作细节全部留在原本的 _ 版本不变。低层 Drive 操作透过 folderScanner 注入，Node 环境测编排逻辑，真的调 DriveApp 那几行只能在真实 GAS 验证（见 171 人工验证清单）。appsscript.json 新增 webapp 部署设定（access: MYSELF）。29 项测试通过'
     },
     {
       name: 'Utils（生产代码共用工具，新增）',
       file: '106_Utils.js',
       status: 'Tested',
       note: '把原本在 130/160 各自重复宣告的 round2_() 收成一份——function 重复宣告不会像 const 那样直接崩溃，但一样是脆弱模式，跟 105_TestUtils.js 同样的理由清理掉'
+    },
+    {
+      name: 'SheetSetup（新增，一次建好五张表的表头+plain-text 格式）',
+      file: '108_SheetSetup.js / 109_Tests_SheetSetup.js',
+      status: 'Tested',
+      note: '回应 115_TruthWriter.js 原本留的「建表/迁移是另一个还没写的关注点（ensureSheetSchema_ 风格）」。栏位定义直接引用各自来源文件的 *_COLUMNS 常数（单一事实来源，不复制）；ID/日期字符串栏位强制 plain-text 格式，防止 Sheets 静默转成日期序数值。手动执行入口 setupComplianceOsSheets()（不带下划线，跟 runAllXTests() 系列同惯例，要出现在编辑器下拉菜单）。⚠️ SHEET_SCHEMAS_ 原本写成文件顶层就求值的阵列，字母序排在 110/130/140/150（定义各 *_COLUMNS 常数的文件）前面会读到 undefined——改成惰性函数 buildSheetSchemas_()。13 项测试通过'
+    },
+    {
+      name: 'GAS Load Simulation（新增，整个专案照 GAS 载入方式跑一次）',
+      file: '195_Tests_GasLoadSimulation.js',
+      status: 'Tested',
+      note: '跟其他 NN_Tests 不同维度：不测某个模块的行为，测「把所有正式代码档案按文件名字母序串起来，在干净的 VM context 里跑一次载入（不呼叫任何函式）会不会出事」——Node 的 require 是显式指定顺序，测不出 GAS 单一共享 scope 的载入模型本身的问题。这次新增 LLM extraction 时连续抓到两个这类问题（108 的顶层求值、112 的顶层急着建构 realLLMExtractor_）后才正式补上，PropertiesService 刻意模拟成「存在但没有任何 Script Property」（风险最高的真实状态）。另外附带检查有没有重复宣告的顶层 function 名字（不会报错，但会静默互相覆盖）。2 项测试通过'
     },
     {
       name: 'Contract Tests（新增测试类别，采纳评审建议）',
@@ -200,7 +235,7 @@ var COMPLIANCE_OS_ARCHITECTURE = {
       projection: 'Verified_Income（Blueprint Tier 2）',
       query: 'Finance/Reminder 读取（Blueprint Tier 1）'
     },
-    intelligence: '全部 Tier 3，按 BP-3 预留不展开',
+    intelligence: '2026-08-21 前：全部 Tier 3，按 BP-3 预留不展开。2026-08-21 起：LLM Extraction（127_LLMExtractor.js）是第一个真的落地的 Intelligence 能力——但边界明确（LLM 是 Extraction Engine 不是 Truth Engine），deterministic validation（125_ExtractionValidation.js）才是真正的 acceptance gate，不是 LLM 自己的 confidence。差异解释（906）仍然是 Tier 3 预留，不受影响',
     integration: {
       bridge: 'CoreBridge（比现有生态 Tier 2 的「共用 Sheet 非正式桥接」更结构化的事件契约）',
       importExport: 'Document Import Engine + Operator Console——生态级 Tier 3（目前唯一的具体实现），Real Data Pilot（v0.7）之前只是「以后会是第一个」，现在是真的第一个跑 Drive 扫描 + 批次汇入的实现',

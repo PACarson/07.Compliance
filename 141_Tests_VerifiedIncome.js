@@ -33,6 +33,12 @@ function runAllVerifiedIncomeTests() {
   assertEqual_('incentive 细项来自 parsedStatement', record.incentive, 557.10, results);
   assertEqual_('status 就是 Verified——解析成功即发布', record.status, 'Verified', results);
 
+  // ============ 2026-08-21 新增：source_document_id / extractor_id 追溯栏位 ============
+  const recordWithSource = buildVerifiedIncomeRecord_(week, parsedStatement, fixedNow, 'CMP-DOC-20260728-Grab-WeeklyStatement-1');
+  assertEqual_('传了 sourceDocumentId：record.source_document_id 有记录', recordWithSource.source_document_id, 'CMP-DOC-20260728-Grab-WeeklyStatement-1', results);
+  assertEqual_('extractor_id 直接读 parsedStatement._parser_id（这里是 GrabWeeklyParser）', recordWithSource.extractor_id, 'GrabWeeklyParser', results);
+  assertEqual_('不传 sourceDocumentId（既有呼叫方不用改）：source_document_id 是 null，不是 undefined 或抛错', record.source_document_id, null, results);
+
   let threwOnMissingWeeklyNet = false;
   try { buildVerifiedIncomeRecord_(week, { document_meta: parsedStatement.document_meta, income_breakdown: parsedStatement.income_breakdown, summary: {} }, fixedNow); }
   catch (e) { threwOnMissingWeeklyNet = true; }

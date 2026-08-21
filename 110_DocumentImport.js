@@ -27,6 +27,7 @@ if (typeof require === 'function') {
   var { runReconciliationForWeek_ } = require('./130_Reconciliation.js');
   var { verifyAndPublishIncome_ } = require('./140_VerifiedIncome.js');
   var { DocumentTextExtractor } = require('./112_DocumentTextExtractor.js');
+  var { validateExtractionCandidate_, normalizeExtractionCandidate_ } = require('./125_ExtractionValidation.js');
 }
 
 var DOCUMENTS_COLUMNS = [
@@ -117,53 +118,101 @@ function importDocument_(input, deps) {
 }
 
 /**
- * 共用核心序列：Import → Extract → Parse → Verify（ADR-003：解析成功即发布）
- * → Reconciliation（非阻断）。不管每一步成功或失败都回传结构化结果，不丢
- * 例外——单次直接调用（processGrabStatement_）或批次汇入（Operator Console）
- * 自己决定要不要把失败转成 throw。这样序列本身只有一份，不会因为要支援
- * 批次重试就复制一份逻辑出来（UCR5）。
+ * 共用核心序列：Import → Extract → Parse/Validate → Verify（ADR-003：解析
+ * 成功即发布）→ Reconciliation（非阻断）。不管每一步成功或失败都回传结构化
+ * 结果，不丢例外——单次直接调用（processGrabStatement_）或批次汇入
+ * （Operator Console）自己决定要不要把失败转成 throw。这样序列本身只有
+ * 一份，不会因为要支援批次重试就复制一份逻辑出来（UCR5）。
  *
  * importInput.skipImport = true 时跳过 importDocument_（Retry 用——文件的
  * Documents 记录已经存在，不需要、也不应该再重复检查一次 file_hash 去重，
- * 直接从抽取开始）。
+ * 直接从抽取开始）；这时候 importInput.existingDocumentId 应该由呼叫方带上
+ * 既有的 document_id（2026-08-21 修正：以前这里固定回传 document_id: null，
+ * Retry 时证据/Verified_Income 就没有 source_document_id 可以追溯——呼叫方
+ * 明明已经查过 Documents 表才知道要不要 skipImport，只是没有把查到的
+ * document_id 一并带过来）。
+ *
+ * DocumentTextExtractor.extract() 现在回传一个 envelope（见
+ * 112_DocumentTextExtractor.js），根据 mode 分两条路：
+ *   mode='text'（OCR fallback、或呼叫方直接给 extractedText，例如手动贴
+ *     文字）—— 走原本的 regex parser（ParserRegistry），行为、含义跟
+ *     2026-08-21 之前完全一样。
+ *   mode='structured'（LLM extraction，目前的默认路径）—— candidate 先经过
+ *     125_ExtractionValidation.js 的三层检查（schema/period/arithmetic），
+ *     没过就回传 Extraction_Failed 或 Needs_Review，candidate 本身跟错误
+ *     内容都留在回传结果里（不是丢掉）；过了才 normalize 成 parsedStatement，
+ *     进入原本就有的 Verify/Reconciliation（这两步完全不知道、也不需要知道
+ *     upstream 是哪条路径产出的 parsedStatement）。
+ *
  * deps.existingIncomeIds 会原样传给 verifyAndPublishIncome_ 做发布前的幂等
  * 检查（见 140_VerifiedIncome.js）。
- * @param {Object} importInput 见 importDocument_，另外可选 fileId/skipImport
+ * @param {Object} importInput 见 importDocument_，另外可选 fileId/skipImport/existingDocumentId
  * @param {string} [extractedText]
  * @param {{truthWriter: Object, riderOSAdapter: Object, now: Date, existingIncomeIds: (string[]|undefined)}} deps
- * @return {{stage: string, importResult: Object, parsedStatement: (Object|undefined), verifyResult: (Object|undefined), reconciliationResult: (Object|undefined), error: (string|undefined)}}
+ * @return {{stage: string, importResult: Object, parsedStatement: (Object|undefined), verifyResult: (Object|undefined), reconciliationResult: (Object|undefined), candidate: (Object|undefined), validationErrors: (string[]|undefined), evidence: (Object|null|undefined), error: (string|undefined)}}
  */
 function runImportPipeline_(importInput, extractedText, deps) {
   const importResult = importInput.skipImport
-    ? { status: 'Already_Imported', document_id: null, record: null }
+    ? { status: 'Already_Imported', document_id: importInput.existingDocumentId || null, record: null }
     : importDocument_(importInput, deps);
 
   if (importResult.status === 'Duplicate_Skipped') {
     return { stage: 'Skipped_Duplicate', importResult };
   }
 
-  let text;
+  const documentId = importResult.document_id;
+
+  let envelope;
   try {
-    text = extractedText || DocumentTextExtractor.extract({ fileId: importInput.driveFileId, mimeType: 'application/pdf' });
+    if (extractedText) {
+      // 呼叫方已经有文字（手动贴 statement，或未来任何直接喂文字的路径）——
+      // 一律当 text 模式，不去问 DocumentTextExtractor，走原本的 regex parser。
+      envelope = { mode: 'text', text: extractedText, evidence: null };
+    } else {
+      envelope = DocumentTextExtractor.extract({ fileId: importInput.driveFileId, mimeType: 'application/pdf', documentId });
+    }
   } catch (err) {
     return { stage: 'Extraction_Failed', importResult, error: err.message };
   }
 
   let parsedStatement;
-  try {
-    const parser = ParserRegistry.getParserFor({ source: importInput.source, document_type: importInput.documentType });
-    parsedStatement = parser.parse({ source: importInput.source, document_type: importInput.documentType }, text);
-  } catch (err) {
-    return { stage: 'Parse_Failed', importResult, error: err.message };
+  const extractionEvidence = envelope.evidence || null;
+
+  if (envelope.mode === 'structured') {
+    const validation = validateExtractionCandidate_(envelope.candidate);
+    if (!validation.valid) {
+      // Extraction_Failed（连形状都不对）或 Needs_Review（形状对、数字或期间
+      // 站不住）——两种都不是「丢掉重来」，candidate 跟验证错误原样回传，
+      // 证据档案已经在 112/127 那层写进 Drive 了，这里只是不让它继续往下走。
+      return {
+        stage: validation.stage,
+        importResult,
+        candidate: envelope.candidate,
+        validationErrors: validation.errors,
+        evidence: extractionEvidence
+      };
+    }
+    parsedStatement = normalizeExtractionCandidate_(
+      envelope.candidate, validation, extractionEvidence.extractorId, extractionEvidence.extractionVersion
+    );
+  } else {
+    try {
+      const parser = ParserRegistry.getParserFor({ source: importInput.source, document_type: importInput.documentType });
+      parsedStatement = parser.parse({ source: importInput.source, document_type: importInput.documentType }, envelope.text);
+    } catch (err) {
+      return { stage: 'Parse_Failed', importResult, error: err.message };
+    }
   }
 
   const week = parsedStatement.document_meta.week;
   let verifyResult;
   try {
     const eventId = `CMP-EVT-${week}-${deps.now.getTime()}`;
-    verifyResult = verifyAndPublishIncome_(week, parsedStatement, deps.truthWriter, eventId, deps.now, deps.existingIncomeIds);
+    verifyResult = verifyAndPublishIncome_(
+      week, parsedStatement, deps.truthWriter, eventId, deps.now, deps.existingIncomeIds, documentId
+    );
   } catch (err) {
-    return { stage: 'Verify_Failed', importResult, parsedStatement, error: err.message };
+    return { stage: 'Verify_Failed', importResult, parsedStatement, evidence: extractionEvidence, error: err.message };
   }
 
   // Reconciliation：独立、可选、非阻断——就算这里丢错，也不能让呼叫方以为
@@ -187,7 +236,7 @@ function runImportPipeline_(importInput, extractedText, deps) {
 
   return {
     stage: verifyResult.skipped ? 'Already_Verified' : 'Verified',
-    importResult, parsedStatement, verifyResult, reconciliationResult
+    importResult, parsedStatement, verifyResult, reconciliationResult, evidence: extractionEvidence
   };
 }
 
@@ -203,8 +252,8 @@ function runImportPipeline_(importInput, extractedText, deps) {
  */
 function processGrabStatement_(importInput, extractedText, deps) {
   const result = runImportPipeline_(importInput, extractedText, deps);
-  if (result.stage === 'Extraction_Failed' || result.stage === 'Parse_Failed' || result.stage === 'Verify_Failed') {
-    throw new Error(`[${result.stage}] ${result.error}`);
+  if (result.stage === 'Extraction_Failed' || result.stage === 'Parse_Failed' || result.stage === 'Verify_Failed' || result.stage === 'Needs_Review') {
+    throw new Error(`[${result.stage}] ${result.error || (result.validationErrors && result.validationErrors.join('; '))}`);
   }
   return result;
 }

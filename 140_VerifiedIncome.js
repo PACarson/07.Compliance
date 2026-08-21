@@ -19,20 +19,31 @@ var VERIFIED_INCOME_COLUMNS = [
   'income_id', 'period', 'currency',
   'net_delivery_income', 'incentive', 'tip', 'other_payments',
   'total_deductions', 'net', 'amount',
-  'source', 'origin_platform', 'status', 'verified_at'
+  'source', 'origin_platform', 'status', 'verified_at',
+  'source_document_id', 'extractor_id'
 ];
 
 /**
- * 把 GrabWeeklyParser（或未来其他 Parser）的输出组成 Verified_Income 的一行。
+ * 把 GrabWeeklyParser（或 LLMExtractor，经 125_ExtractionValidation.js 验证
+ * 通过后 normalize 出来的同一个形状）的输出组成 Verified_Income 的一行。
  * ADR-003：只要求解析成功（parsedStatement.income_breakdown 存在）——net/amount
  * 直接来自 parsedStatement.summary.weekly_net（陈述值本身，CMP-P5），不再经过
  * Reconciliation。Rider OS 对账完全不参与这个函数。
+ *
+ * source_document_id/extractor_id（2026-08-21 新增，追溯用）：extractor_id
+ * 直接读 parsedStatement._parser_id——不管这份 parsedStatement 是
+ * GrabWeeklyParser 正则解析出来的还是 LLMExtractor 经验证/normalize 出来的，
+ * 两条路径都会在 _parser_id 上留下自己的身份，这里不用另外判断走的是哪条
+ * 路径。sourceDocumentId 是呼叫方（runImportPipeline_）传进来的，因为
+ * 「这笔 Verified Income 对应哪一笔 Documents 记录」是编排层的事实，不是
+ * parsedStatement 自己知道的东西。
  * @param {string} week
- * @param {Object} parsedStatement GrabWeeklyParser 输出
+ * @param {Object} parsedStatement GrabWeeklyParser 或 LLMExtractor 输出
  * @param {Date} [now]
+ * @param {string} [sourceDocumentId]
  * @return {Object}
  */
-function buildVerifiedIncomeRecord_(week, parsedStatement, now) {
+function buildVerifiedIncomeRecord_(week, parsedStatement, now, sourceDocumentId) {
   const nowDate = now || new Date();
   if (!(nowDate instanceof Date) || isNaN(nowDate.getTime())) {
     throw new Error('buildVerifiedIncomeRecord_: now 必须是合法的 Date 对象'); // UCR4
@@ -59,7 +70,9 @@ function buildVerifiedIncomeRecord_(week, parsedStatement, now) {
     source: 'Compliance OS', // CMP-P2：固定这个，不是 origin_platform
     origin_platform: parsedStatement.document_meta.source,
     status: 'Verified',
-    verified_at: nowDate.toISOString()
+    verified_at: nowDate.toISOString(),
+    source_document_id: sourceDocumentId || null,
+    extractor_id: parsedStatement._parser_id || null
   };
 }
 
@@ -80,7 +93,9 @@ function buildIncomeVerifiedEvent_(verifiedIncomeRecord, eventId) {
     source: verifiedIncomeRecord.source,
     origin_platform: verifiedIncomeRecord.origin_platform,
     status: verifiedIncomeRecord.status,
-    verified_at: verifiedIncomeRecord.verified_at
+    verified_at: verifiedIncomeRecord.verified_at,
+    source_document_id: verifiedIncomeRecord.source_document_id,
+    extractor_id: verifiedIncomeRecord.extractor_id
   };
 }
 
@@ -136,10 +151,11 @@ function writeVerifiedIncome_(truthWriter, record) {
  * @param {string} eventId
  * @param {Date} [now]
  * @param {string[]} [existingIncomeIds]
+ * @param {string} [sourceDocumentId] 对应的 Documents.document_id，追溯用（2026-08-21 新增）
  * @return {{record: Object, event: (Object|null), skipped: boolean}}
  */
-function verifyAndPublishIncome_(week, parsedStatement, truthWriter, eventId, now, existingIncomeIds) {
-  const record = buildVerifiedIncomeRecord_(week, parsedStatement, now);
+function verifyAndPublishIncome_(week, parsedStatement, truthWriter, eventId, now, existingIncomeIds, sourceDocumentId) {
+  const record = buildVerifiedIncomeRecord_(week, parsedStatement, now, sourceDocumentId);
   if (existingIncomeIds && existingIncomeIds.indexOf(record.income_id) !== -1) {
     return { record, event: null, skipped: true };
   }

@@ -8,7 +8,7 @@ if (typeof require === 'function') {
   var { createSheetReader_ } = require('./117_SheetReader.js');
   var { createRiderOSAdapter_ } = require('./123_RiderOSAdapter.js');
   require('./130_Reconciliation.js');
-  require('./140_VerifiedIncome.js');
+  var { VERIFIED_INCOME_COLUMNS } = require('./140_VerifiedIncome.js');
   require('./112_DocumentTextExtractor.js');
   var { assertEqual_, fakeStore_, fakeSheetAccessor_, fakeLockProvider_, TEST_FIXTURE_GRAB_WEEKLY_STATEMENT } = require('./105_TestUtils.js');
 }
@@ -72,6 +72,30 @@ function runAllOperatorConsoleTests() {
   assertEqual_('consoleRetryFile_·Documents 没有被重复写入', deps3b._accessor.getWritten('Documents').length, 1, results);
   assertEqual_('consoleRetryFile_·有带 rebuild', typeof retryFnResult.rebuild, 'object', results);
 
+  // ---- Retry 时既有 document_id 有正确带到 Verified_Income（2026-08-21 修正：
+  // 以前 consoleImportOneDriveFile_ 查过 Documents 表却没把找到的 document_id
+  // 传给 runImportPipeline_，Retry 出来的 source_document_id 永远是 null）----
+  const { DocumentTextExtractor: dte3c } = require('./112_DocumentTextExtractor.js');
+  const originalExtract3c_ = dte3c.extract;
+  const validCandidate3c_ = {
+    document_meta: { source: 'Grab', document_type: 'Weekly Statement', currency: 'MYR', period_start_parts: { year: 2026, month: 7, day: 20 }, period_end_parts: { year: 2026, month: 7, day: 26 } },
+    summary: { total_income: 500, total_deductions: 50, weekly_net: 450 },
+    income_breakdown: { net_delivery_income: 300, incentive: 100, tip: 80, other_payments: 20 },
+    extraction_notes: ''
+  };
+  dte3c.extract = function () {
+    return { mode: 'structured', candidate: validCandidate3c_, evidence: { extractorId: 'LLMExtractor:test', extractionVersion: '2026-08-21T00:00:00.000Z', evidenceFileId: 'ev-x' } };
+  };
+  try {
+    const deps3c = fakeConsoleDeps_([]);
+    deps3c._accessor.appendRow('Documents', ['CMP-DOC-retry-trace', 'Grab', 'Weekly Statement', 'Income', 'Pending', 'existing-hash-3', 'f12', 'retry3.pdf', 'Imported']);
+    const retryTraceResult = consoleImportOneDriveFile_('f12', 'retry3.pdf', deps3c, true);
+    assertEqual_('Retry+structured·stage 是 Verified', retryTraceResult.stage, 'Verified', results);
+    assertEqual_('Retry+structured·source_document_id 对到既有那笔 Documents（不是 null）', deps3c._accessor.getWritten('Verified_Income')[0][VERIFIED_INCOME_COLUMNS.indexOf('source_document_id')], 'CMP-DOC-retry-trace', results);
+  } finally {
+    dte3c.extract = originalExtract3c_;
+  }
+
   // ============ consoleBatchImport_：只处理未汇入的，一个失败不影响其他，结束会重建 ============
   const deps4 = fakeConsoleDeps_([{ id: 'f1', name: 'a.pdf' }, { id: 'f2', name: 'b.pdf' }, { id: 'f3', name: 'c.pdf' }]);
   deps4._accessor.appendRow('Documents', ['CMP-DOC-old2', 'Grab', 'Weekly Statement', 'Income', '2026-W29', 'oldhash2', 'f3', 'path', 'Imported']);
@@ -99,8 +123,8 @@ function runAllOperatorConsoleTests() {
 
   // ============ consoleRebuildProjections_：跨月聚合 + YTD ============
   const deps6 = fakeConsoleDeps_([]);
-  deps6._accessor.appendRow('Verified_Income', ['CMP-INCOME-2026-W26', '2026-W26', 'MYR', 1000, 100, 50, 0, -50, 1100, 1100, 'Compliance OS', 'Grab', 'Verified', '2026-07-01T00:00:00Z']);
-  deps6._accessor.appendRow('Verified_Income', ['CMP-INCOME-2026-W30', '2026-W30', 'MYR', 1200, 200, 60, 0, -60, 1400, 1400, 'Compliance OS', 'Grab', 'Verified', '2026-07-28T00:00:00Z']);
+  deps6._accessor.appendRow('Verified_Income', ['CMP-INCOME-2026-W26', '2026-W26', 'MYR', 1000, 100, 50, 0, -50, 1100, 1100, 'Compliance OS', 'Grab', 'Verified', '2026-07-01T00:00:00Z', 'CMP-DOC-fixture-1', 'GrabWeeklyParser']);
+  deps6._accessor.appendRow('Verified_Income', ['CMP-INCOME-2026-W30', '2026-W30', 'MYR', 1200, 200, 60, 0, -60, 1400, 1400, 'Compliance OS', 'Grab', 'Verified', '2026-07-28T00:00:00Z', 'CMP-DOC-fixture-2', 'GrabWeeklyParser']);
   const rebuild6 = consoleRebuildProjections_(deps6);
   assertEqual_('重建·两笔分属不同月份，monthlySummaries 有两笔', rebuild6.monthlySummaries.length, 2, results);
   assertEqual_('重建·totalVerifiedCount 是 2', rebuild6.totalVerifiedCount, 2, results);

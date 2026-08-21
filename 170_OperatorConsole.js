@@ -99,7 +99,11 @@ function consoleScanFolder_(folderId, deps) {
  *
  * isRetry 且这个 drive_file_id 已经有 Documents 记录时，跳过重新 import
  * （不会被 file_hash 去重挡住——那是给「真的没看过的新文件」用的检查，
- * 不是给「同一个文件再试一次」用的）。
+ * 不是给「同一个文件再试一次」用的），并且把找到的既有 document_id 一并
+ * 带上（2026-08-21 修正：以前这里没带，Retry 出来的 Verified_Income/
+ * 证据档就没有 source_document_id 可以追溯回是哪一笔 Documents 记录——
+ * documentsRows 本来就已经查过了，只是漏了把找到的那一行的 document_id
+ * 传给 runImportPipeline_）。
  * @param {string} fileId
  * @param {string} fileName
  * @param {Object} deps
@@ -109,12 +113,15 @@ function consoleScanFolder_(folderId, deps) {
 function consoleImportOneDriveFile_(fileId, fileName, deps, isRetry) {
   try {
     const documentsRows = deps.sheetReader.readAll('Documents', DOCUMENTS_COLUMNS);
-    const alreadyHasDocRow = documentsRows.some((doc) => doc.drive_file_id === fileId);
+    const existingDocRow = documentsRows.find((doc) => doc.drive_file_id === fileId);
     const existingIncomeIds = deps.sheetReader.readAll('Verified_Income', VERIFIED_INCOME_COLUMNS).map((v) => v.income_id);
 
     let importInput;
-    if (isRetry && alreadyHasDocRow) {
-      importInput = { skipImport: true, source: 'Grab', documentType: 'Weekly Statement', driveFileId: fileId };
+    if (isRetry && existingDocRow) {
+      importInput = {
+        skipImport: true, existingDocumentId: existingDocRow.document_id,
+        source: 'Grab', documentType: 'Weekly Statement', driveFileId: fileId
+      };
     } else {
       const fileHash = deps.folderScanner.getFileHash(fileId);
       const existingHashes = documentsRows.map((doc) => doc.file_hash);
@@ -134,10 +141,18 @@ function consoleImportOneDriveFile_(fileId, fileName, deps, isRetry) {
   }
 }
 
-/** 把 runImportPipeline_ 的原始结果转成前端好显示的精简形状。 */
+/**
+ * 把 runImportPipeline_ 的原始结果转成前端好显示的精简形状。
+ * Needs_Review（2026-08-21 新增，LLM candidate 验证没过但形状是对的）要把
+ * candidate 跟 validationErrors 一并带上——前端要能显示「LLM 抽出了这些
+ * 数字，但哪里跟哪里对不上」，不是只显示一个笼统的失败讯息。
+ */
 function summarizeConsoleResult_(result, fileId, fileName) {
   const base = { fileId, fileName, stage: result.stage };
   if (result.error) base.error = result.error;
+  if (result.validationErrors) base.validationErrors = result.validationErrors;
+  if (result.candidate) base.candidate = result.candidate;
+  if (result.evidence) base.evidenceFileId = result.evidence.evidenceFileId;
   if (result.verifyResult && result.verifyResult.record) {
     base.incomeId = result.verifyResult.record.income_id;
     base.period = result.verifyResult.record.period;

@@ -224,6 +224,99 @@ function runAllDocumentImportTests() {
   assertEqual_('Already_Verified·stage', alreadyVerifiedResult.stage, 'Already_Verified', results);
   assertEqual_('Already_Verified·没有真的再写一次 Verified_Income', accessor10.getWritten('Verified_Income').length, 0, results);
 
+  // ============ mode='structured'（LLM 路径）============
+  // DocumentTextExtractor 是 110 require 进来、跟真正呼叫方共用同一个物件
+  // 实例（模组快取）——直接把它的 .extract 换掉再还原，不用改
+  // runImportPipeline_ 的签名多开一个注入口，改动范围维持最小。
+  const { DocumentTextExtractor } = require('./112_DocumentTextExtractor.js');
+  const originalExtract_ = DocumentTextExtractor.extract;
+  function withMockedExtractor_(envelope, fn) {
+    DocumentTextExtractor.extract = function () { return envelope; };
+    try { fn(); } finally { DocumentTextExtractor.extract = originalExtract_; }
+  }
+
+  const validCandidateForPipeline_ = {
+    document_meta: {
+      source: 'Grab', document_type: 'Weekly Statement', currency: 'MYR',
+      period_start_parts: { year: 2026, month: 7, day: 20 },
+      period_end_parts: { year: 2026, month: 7, day: 26 }
+    },
+    summary: { total_income: 500, total_deductions: 50, weekly_net: 450 },
+    income_breakdown: { net_delivery_income: 300, incentive: 100, tip: 80, other_payments: 20 },
+    extraction_notes: ''
+  };
+
+  // ---- structured + 合法 candidate：走到 Verified，source_document_id/extractor_id 有记录 ----
+  withMockedExtractor_(
+    { mode: 'structured', candidate: validCandidateForPipeline_, evidence: { extractorId: 'LLMExtractor:test-model', extractionVersion: '2026-08-21T00:00:00.000Z', evidenceFileId: 'ev-1' } },
+    () => {
+      const accessorLlm = fakeSheetAccessor_();
+      const depsLlm = { truthWriter: createTruthWriter_(accessorLlm, fakeLockProvider_()), riderOSAdapter: createRiderOSAdapter_(fakeStore_()), now: fixedNow };
+      const llmResult = runImportPipeline_(
+        { fileHash: 'llm-ok', source: 'Grab', documentType: 'Weekly Statement', documentClass: 'Income', period: 'Pending', driveFileId: '1LlmOk', existingHashes: [] },
+        undefined, depsLlm
+      );
+      assertEqual_('structured+合法·stage 是 Verified', llmResult.stage, 'Verified', results);
+      assertEqual_('structured+合法·week 从 period_start_parts 算出（不是 candidate 自己给的）', llmResult.parsedStatement.document_meta.week, '2026-W30', results);
+      assertEqual_('structured+合法·extractor_id 记录到 Verified_Income', llmResult.verifyResult.record.extractor_id, 'LLMExtractor:test-model', results);
+      assertEqual_('structured+合法·source_document_id 记录到 Verified_Income（不是 null）', typeof llmResult.verifyResult.record.source_document_id, 'string', results);
+      assertEqual_('structured+合法·evidence 有跟着回传', llmResult.evidence.evidenceFileId, 'ev-1', results);
+    }
+  );
+
+  // ---- structured + hallucination（数字兜不起来）：Needs_Review，绝对不能进 Verified_Income ----
+  // 这是明确要求的负向测试：candidate 每个数字单独看都像真的，但四则运算对不上
+  const hallucinatedCandidate_ = Object.assign({}, validCandidateForPipeline_, {
+    summary: { total_income: 999, total_deductions: 50, weekly_net: 450 } // 999 跟 300+100+80+20=500 对不上
+  });
+  withMockedExtractor_(
+    { mode: 'structured', candidate: hallucinatedCandidate_, evidence: { extractorId: 'LLMExtractor:test-model', extractionVersion: '2026-08-21T00:01:00.000Z', evidenceFileId: 'ev-2' } },
+    () => {
+      const accessorHallu = fakeSheetAccessor_();
+      const depsHallu = { truthWriter: createTruthWriter_(accessorHallu, fakeLockProvider_()), riderOSAdapter: createRiderOSAdapter_(fakeStore_()), now: fixedNow };
+      const halluResult = runImportPipeline_(
+        { fileHash: 'llm-hallu', source: 'Grab', documentType: 'Weekly Statement', documentClass: 'Income', period: 'Pending', driveFileId: '1LlmHallu', existingHashes: [] },
+        undefined, depsHallu
+      );
+      assertEqual_('hallucination·stage 是 Needs_Review，不是 Verified', halluResult.stage, 'Needs_Review', results);
+      assertEqual_('hallucination·Verified_Income 完全没写（LLM 不是 Truth Engine）', accessorHallu.getWritten('Verified_Income').length, 0, results);
+      assertEqual_('hallucination·candidate 原样保留在回传里（不是丢掉，方便人工查）', halluResult.candidate, hallucinatedCandidate_, results);
+      assertEqual_('hallucination·validationErrors 有说明哪里对不上', halluResult.validationErrors.length > 0, true, results);
+      assertEqual_('hallucination·evidence 还是有跟着回传（证据不因为被拒绝就消失）', halluResult.evidence.evidenceFileId, 'ev-2', results);
+      // Documents 记录本身应该还是先写好了——只是这次抽取没能变成 Verified Income
+      assertEqual_('hallucination·Documents 记录本身还是先写好了', accessorHallu.getWritten('Documents').length, 1, results);
+    }
+  );
+
+  // ---- structured + schema 都不对：Extraction_Failed（不是 Needs_Review） ----
+  withMockedExtractor_(
+    { mode: 'structured', candidate: { document_meta: {} }, evidence: null },
+    () => {
+      const accessorBadSchema = fakeSheetAccessor_();
+      const depsBadSchema = { truthWriter: createTruthWriter_(accessorBadSchema, fakeLockProvider_()), riderOSAdapter: createRiderOSAdapter_(fakeStore_()), now: fixedNow };
+      const badSchemaResult = runImportPipeline_(
+        { fileHash: 'llm-badschema', source: 'Grab', documentType: 'Weekly Statement', documentClass: 'Income', period: 'Pending', driveFileId: '1BadSchema', existingHashes: [] },
+        undefined, depsBadSchema
+      );
+      assertEqual_('schema 都不对·stage 是 Extraction_Failed（连形状都不对，没什么好 review）', badSchemaResult.stage, 'Extraction_Failed', results);
+      assertEqual_('schema 都不对·Verified_Income 完全没写', accessorBadSchema.getWritten('Verified_Income').length, 0, results);
+    }
+  );
+
+  // ---- Retry 且带 existingDocumentId：应该原样出现在 importResult.document_id 上
+  // （2026-08-21 修正前，这里固定是 null——Retry 时证据/Verified_Income 就没有
+  // source_document_id 可以追溯，170_OperatorConsole.js 那边现在会把查到的既有
+  // document_id 传进来，这里测的是 110 自己有没有正确使用它）----
+  const accessor11 = fakeSheetAccessor_();
+  const deps11 = { truthWriter: createTruthWriter_(accessor11, fakeLockProvider_()), riderOSAdapter: createRiderOSAdapter_(fakeStore_()), now: fixedNow };
+  const retryWithIdResult = runImportPipeline_(
+    { skipImport: true, existingDocumentId: 'CMP-DOC-existing-123', source: 'Grab', documentType: 'Weekly Statement', driveFileId: '1RetryWithId' },
+    TEST_FIXTURE_GRAB_WEEKLY_STATEMENT,
+    deps11
+  );
+  assertEqual_('Retry+existingDocumentId·importResult.document_id 正确带上（不再固定是 null）', retryWithIdResult.importResult.document_id, 'CMP-DOC-existing-123', results);
+  assertEqual_('Retry+existingDocumentId·Verified_Income 的 source_document_id 对得上', retryWithIdResult.verifyResult.record.source_document_id, 'CMP-DOC-existing-123', results);
+
   const allPass = results.every((r) => r.pass);
   results.forEach((r) => {
     console.log(`${r.pass ? 'PASS' : 'FAIL'} ${r.name}` + (r.pass ? '' : ` (got ${JSON.stringify(r.actual)}, expected ${JSON.stringify(r.expected)})`));
@@ -245,8 +338,17 @@ if (typeof module !== 'undefined') {
  * [ ] computeFileHash_() 需要真实 GAS 的 Utilities 服务，Node 环境测不了
  * [ ] drive_path 是缓存不是真相来源——如果 Drive 里手动搬动过文件，这个
  *     栏位可能过期；真的需要准确路径时应该查 Drive，不是只信这个栏位
- * [ ] DocumentTextExtractor 接上真实实现（Drive OCR / LLM API）后，确认
- *     processGrabStatement_() 不再需要手动传 extractedText 也能跑通
+ * [x] DocumentTextExtractor 接上真实实现——2026-08-21 决定 LLM-based
+ *     extraction（127_LLMExtractor.js），mode='structured' 已经在
+ *     runImportPipeline_ 里正确处理
+ * [ ] 真实 GAS 环境：对一份真的 Grab Weekly Statement PDF 走一次完整
+ *     Console → consoleBatchImport → LLM extraction → validation → Verified
+ *     全链路，确认数字真的对
+ * [ ] 用两个已经存在、状态是 Extraction_Failed 的真实 Documents（2026-08-21
+ *     那次 consoleBatchImport 留下的）执行 consoleRetryFile，确认
+ *     Extraction_Failed → Retry → LLM extraction → Validation → Verified
+ *     整条 lifecycle 走得通，且 Verified_Income 的 source_document_id
+ *     对得上原本那笔 Documents 记录（不是 null）
  * [ ] existingHashes 目前是外部传入——等有读 Sheet 的工具后，要确认真的会
  *     去读 Documents 表全部现有的 file_hash
  * [ ] ADR-003：真实环境下让 riderOSAdapter.getWeeklyEstimate 丢一个未预期的
