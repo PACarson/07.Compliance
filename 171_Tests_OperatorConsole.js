@@ -128,18 +128,27 @@ function runAllOperatorConsoleTests() {
   // W26=2026-06-22~06-28（完全在 6 月），W30=2026-07-20~07-26（完全在 7 月，
   // 跟已确认的真实样本一致）——两笔各自完全落在不同月份，不受这次跨月
   // 归属改版影响，rebuild6 的断言维持原本的预期。
-  deps6._accessor.appendRow('Verified_Income', ['CMP-INCOME-2026-W26', '2026-W26', '2026-06-22', '2026-06-28', 'MYR', 1000, 100, 50, 0, -50, 1100, 1100, 'Compliance OS', 'Grab', 'Verified', '2026-07-01T00:00:00Z', 'CMP-DOC-fixture-1', 'GrabWeeklyParser']);
-  deps6._accessor.appendRow('Verified_Income', ['CMP-INCOME-2026-W30', '2026-W30', '2026-07-20', '2026-07-26', 'MYR', 1200, 200, 60, 0, -60, 1400, 1400, 'Compliance OS', 'Grab', 'Verified', '2026-07-28T00:00:00Z', 'CMP-DOC-fixture-2', 'GrabWeeklyParser']);
+  deps6._accessor.appendRow('Verified_Income', ['CMP-INCOME-2026-W26', '2026-W26', 'MYR', 1000, 100, 50, 0, -50, 1100, 1100, 'Compliance OS', 'Grab', 'Verified', '2026-07-01T00:00:00Z', 'CMP-DOC-fixture-1', 'GrabWeeklyParser', '2026-06-22', '2026-06-28']);
+  deps6._accessor.appendRow('Verified_Income', ['CMP-INCOME-2026-W30', '2026-W30', 'MYR', 1200, 200, 60, 0, -60, 1400, 1400, 'Compliance OS', 'Grab', 'Verified', '2026-07-28T00:00:00Z', 'CMP-DOC-fixture-2', 'GrabWeeklyParser', '2026-07-20', '2026-07-26']);
   const rebuild6 = consoleRebuildProjections_(deps6);
   assertEqual_('重建·两笔分属不同月份，monthlySummaries 有两笔', rebuild6.monthlySummaries.length, 2, results);
   assertEqual_('重建·totalVerifiedCount 是 2', rebuild6.totalVerifiedCount, 2, results);
   assertEqual_('重建·YTD 涵盖两笔的总和', rebuild6.ytd.net, 2500, results);
   assertEqual_('重建·每个月度摘要都附上 compliance_projection（SOCSO 固定 49.40）', rebuild6.monthlySummaries.every((m) => m.compliance_projection && m.compliance_projection.socso.amount === 49.40), true, results);
+  assertEqual_('重建·两笔都是干净资料，invalidPeriodIncomeIds 是空阵列', rebuild6.invalidPeriodIncomeIds, [], results);
+
+  // ---- 2026-08-22 真实事故复现：Verified_Income 混进一笔栏位错位的坏资料，Console 层级要能明确列出来 ----
+  const depsBadRow = fakeConsoleDeps_([]);
+  depsBadRow._accessor.appendRow('Verified_Income', ['CMP-INCOME-2026-W42', '2026-W42', 'MYR', 1000, 100, 50, 0, -50, 1100, 1100, 'Compliance OS', 'Grab', 'Verified', '2026-10-19T00:00:00Z', null, 'GrabWeeklyParser', '2026-10-12', '2026-10-18']);
+  depsBadRow._accessor.appendRow('Verified_Income', ['CMP-INCOME-BAD-ROW', '2026-W41', 'MYR', 1200, 0, 0, 0, 0, 1200, 1200, 'Compliance OS', 'Grab', 'Verified', '2026-10-12T00:00:00Z', null, 'GrabWeeklyParser', 'MYR', 1200]);
+  const rebuildWithBadRow = consoleRebuildProjections_(depsBadRow);
+  assertEqual_('重建·栏位错位的坏资料被明确列在 invalidPeriodIncomeIds，不是悄悄消失', rebuildWithBadRow.invalidPeriodIncomeIds, ['CMP-INCOME-BAD-ROW'], results);
+  assertEqual_('重建·坏资料不影响好资料继续正常汇总（W42 完全落在 10 月内，2026-10-12 Mon → 2026-10-18 Sun）', rebuildWithBadRow.monthlySummaries.some((m) => m._computed_from.indexOf('CMP-INCOME-2026-W42') !== -1), true, results);
 
   // ============ consoleGetIncomeDetail_：Drill Down 到原始 Documents/drive_file_id（需求 §7/§8）============
   const deps10 = fakeConsoleDeps_([]);
   deps10._accessor.appendRow('Documents', ['CMP-DOC-detail-1', 'Grab', 'Weekly Statement', 'Income', 'Pending', 'hash-detail-1', 'drive-file-xyz', 'path/to/file.pdf', 'Imported']);
-  deps10._accessor.appendRow('Verified_Income', ['CMP-INCOME-2026-W33', '2026-W33', '2026-08-10', '2026-08-16', 'MYR', 1000, 100, 50, 0, -50, 1100, 1100, 'Compliance OS', 'Grab', 'Verified', '2026-08-17T00:00:00Z', 'CMP-DOC-detail-1', 'GrabWeeklyParser']);
+  deps10._accessor.appendRow('Verified_Income', ['CMP-INCOME-2026-W33', '2026-W33', 'MYR', 1000, 100, 50, 0, -50, 1100, 1100, 'Compliance OS', 'Grab', 'Verified', '2026-08-17T00:00:00Z', 'CMP-DOC-detail-1', 'GrabWeeklyParser', '2026-08-10', '2026-08-16']);
   const detail = consoleGetIncomeDetail_('CMP-INCOME-2026-W33', deps10);
   assertEqual_('Drill Down·income 找得到', detail.income.income_id, 'CMP-INCOME-2026-W33', results);
   assertEqual_('Drill Down·顺藤摸到对应的 Documents 记录·drive_file_id', detail.document.driveFileId, 'drive-file-xyz', results);
@@ -168,9 +177,9 @@ function runAllOperatorConsoleTests() {
   assertEqual_('consoleGetLastFolderId 公开版本可呼叫、不抛错（Node 下 PropertiesService 不存在，两版本都回 null）', consoleGetLastFolderId(), null, results);
 
   const deps11a = fakeConsoleDeps_([]);
-  deps11a._accessor.appendRow('Verified_Income', ['CMP-INCOME-2026-W33', '2026-W33', '2026-08-10', '2026-08-16', 'MYR', 1000, 100, 50, 0, -50, 1100, 1100, 'Compliance OS', 'Grab', 'Verified', '2026-08-17T00:00:00Z', null, 'GrabWeeklyParser']);
+  deps11a._accessor.appendRow('Verified_Income', ['CMP-INCOME-2026-W33', '2026-W33', 'MYR', 1000, 100, 50, 0, -50, 1100, 1100, 'Compliance OS', 'Grab', 'Verified', '2026-08-17T00:00:00Z', null, 'GrabWeeklyParser', '2026-08-10', '2026-08-16']);
   const deps11b = fakeConsoleDeps_([]);
-  deps11b._accessor.appendRow('Verified_Income', ['CMP-INCOME-2026-W33', '2026-W33', '2026-08-10', '2026-08-16', 'MYR', 1000, 100, 50, 0, -50, 1100, 1100, 'Compliance OS', 'Grab', 'Verified', '2026-08-17T00:00:00Z', null, 'GrabWeeklyParser']);
+  deps11b._accessor.appendRow('Verified_Income', ['CMP-INCOME-2026-W33', '2026-W33', 'MYR', 1000, 100, 50, 0, -50, 1100, 1100, 'Compliance OS', 'Grab', 'Verified', '2026-08-17T00:00:00Z', null, 'GrabWeeklyParser', '2026-08-10', '2026-08-16']);
   assertEqual_('consoleGetIncomeDetail 转发结果跟 consoleGetIncomeDetail_ 一致', consoleGetIncomeDetail('CMP-INCOME-2026-W33', deps11a), consoleGetIncomeDetail_('CMP-INCOME-2026-W33', deps11b), results);
 
   const allPass = results.every((r) => r.pass);

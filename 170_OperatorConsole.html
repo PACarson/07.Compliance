@@ -299,6 +299,7 @@
 
     <section>
       <h2>月度总览</h2>
+      <div id="dataQualityBanner"></div>
       <div id="monthlyNav"></div>
       <div id="monthlyDetail"></div>
     </section>
@@ -378,6 +379,7 @@
       ].join('');
 
       state.monthlySummaries = d.monthlySummaries || [];
+      renderDataQualityBanner(d.invalidPeriodIncomeIds || []);
       // 保持目前选中的月份（例如刚汇入完重建），除非它已经不存在；否则预设选最新月份
       if (!state.selectedMonth || !state.monthlySummaries.some(function (m) { return m.year_month === state.selectedMonth; })) {
         var sorted = state.monthlySummaries.slice().sort(function (a, b) { return a.year_month < b.year_month ? 1 : -1; });
@@ -388,6 +390,17 @@
     }
     function card(label, value, isCurrency) {
       return '<div class="dash-card"><div class="label">' + label + '</div><div class="value' + (isCurrency ? ' currency' : '') + '">' + value + '</div></div>';
+    }
+
+    function renderDataQualityBanner(invalidPeriodIncomeIds) {
+      var el = document.getElementById('dataQualityBanner');
+      if (!invalidPeriodIncomeIds.length) { el.innerHTML = ''; return; }
+      el.innerHTML =
+        '<div class="alloc-warning" style="border-color:var(--failed);background:var(--failed-bg);color:var(--failed)">' +
+          '<strong>⚠ ' + invalidPeriodIncomeIds.length + ' 笔 Verified Income 读不出合法的期间（period_start/period_end），已从所有月度汇总中排除：</strong>' +
+          '<div class="file-detail" style="margin-top:4px">' + invalidPeriodIncomeIds.map(escapeHtml).join('、') + '</div>' +
+          '<div class="file-detail" style="margin-top:4px">通常是 Sheet 里残留了改版前的旧资料、或栏位被手动改动过——去 Verified_Income 分页核对这几笔的栏位是否对齐，不是系统会自动猜的东西。</div>' +
+        '</div>';
     }
 
     function renderMonthlyNav(summaries, selectedMonth) {

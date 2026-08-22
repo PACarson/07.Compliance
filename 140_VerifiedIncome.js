@@ -15,12 +15,25 @@
  * 说：依赖没确认就不要猜签名）。
  */
 
+/**
+ * 2026-08-22 教训（真实 GAS 部署撞到）：period_start/period_end 第一次
+ * 加进来的时候插在 period 后面（第 3、4 栏）——这个专案是只增不改
+ * （UCR6），Sheet 里已经有改版前写入的旧资料，插在中间会让所有旧资料
+ * 的栏位全部错位一格：旧资料原本第 3 栏是 currency（例如 "MYR"）会被
+ * 新代码读成 period_start，直接导致 Monthly Projection 抛「不是合法的
+ * ISO 日期」，整个 Dashboard 崩溃。source_document_id/extractor_id 当初
+ * 是安全的，因为它们加在最后面——现在把 period_start/period_end 也搬到
+ * 最后面，比照同一个规矩：往一份只增表加新栏位，永远加在尾巴，不要插
+ * 在中间，旧资料读到新栏位就是空值（走 Missing_Period），不会污染其他
+ * 栏位。
+ */
 var VERIFIED_INCOME_COLUMNS = [
-  'income_id', 'period', 'period_start', 'period_end', 'currency',
+  'income_id', 'period', 'currency',
   'net_delivery_income', 'incentive', 'tip', 'other_payments',
   'total_deductions', 'net', 'amount',
   'source', 'origin_platform', 'status', 'verified_at',
-  'source_document_id', 'extractor_id'
+  'source_document_id', 'extractor_id',
+  'period_start', 'period_end'
 ];
 
 /**

@@ -75,6 +75,33 @@ function runAllMonthlyProjectionTests() {
   assertEqual_('Missing_Period 归属·status', missingAllocation.status, 'Missing_Period', results);
 
   // ============================================================
+  // 2026-08-22 真实 GAS 崩溃复现：Sheets 自动转换出的原生 Date 物件、
+  // 栏位错位读到的非日期字符串——都不该让 computeMonthlyAllocation_ 抛错
+  // ============================================================
+  const dateObjectAllocation = computeMonthlyAllocation_({
+    income_id: 'DATEOBJ', period_start: new Date(2026, 6, 20), period_end: new Date(2026, 6, 26) // 月份 0-index：6=7月
+  });
+  assertEqual_('原生 Date 物件·不抛错，正确识别成 Full', dateObjectAllocation.status, 'Full', results);
+  assertEqual_('原生 Date 物件·yearMonth 算对（用 getFullYear/getMonth，不是字符串硬凑）', dateObjectAllocation.yearMonth, '2026-07', results);
+
+  const garbagePeriodAllocation = computeMonthlyAllocation_({ income_id: 'GARBAGE', period_start: 'MYR', period_end: 1200 });
+  assertEqual_('栏位错位读到的垃圾值（模拟旧 16 栏资料被新 schema 读串位）·不抛错，归 Missing_Period（不是让 yearMonthFromIsoDate_ 的例外往外逃逸）', garbagePeriodAllocation.status, 'Missing_Period', results);
+
+  let threwOnMixedBadRecord = false;
+  let julyWithRealCrashScenario;
+  try {
+    julyWithRealCrashScenario = computeMonthlyIncomeSummary_([
+      sampleVerifiedIncome_('CMP-INCOME-2026-W28', '2026-W28', '2026-07-06', '2026-07-12', 1200),
+      { income_id: 'CMP-INCOME-BAD-ROW', period: '2026-W29', period_start: 'MYR', period_end: 1200, status: 'Verified', net: 999 } // 模拟真实撞到的那笔坏资料
+    ], '2026-07');
+  } catch (e) { threwOnMixedBadRecord = true; }
+  results.push({ name: '整批汇总里混一笔栏位错位的坏资料·不会让好资料一起崩（2026-08-22 真实事故复现）', pass: !threwOnMixedBadRecord });
+  if (julyWithRealCrashScenario) {
+    assertEqual_('好的那笔（W28）正常算进 net', julyWithRealCrashScenario.net, 1200, results);
+    assertEqual_('坏的那笔没有偷偷被算进去', julyWithRealCrashScenario.week_count, 1, results);
+  }
+
+  // ============================================================
   // dedupeByIncomeId_ / findInvalidPeriodIncomeIds_——独立小工具
   // ============================================================
   const dupInput = [

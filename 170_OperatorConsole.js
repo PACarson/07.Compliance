@@ -32,7 +32,7 @@
 if (typeof require === 'function') {
   var { DOCUMENTS_COLUMNS, computeFileHash_, runImportPipeline_ } = require('./110_DocumentImport.js');
   var { VERIFIED_INCOME_COLUMNS } = require('./140_VerifiedIncome.js');
-  var { computeMonthlyIncomeSummary_, computeYearToDateIncomeSummary_, computeMonthlyAllocation_, computeComplianceProjection_ } = require('./160_MonthlyProjection.js');
+  var { computeMonthlyIncomeSummary_, computeYearToDateIncomeSummary_, computeMonthlyAllocation_, computeComplianceProjection_, findInvalidPeriodIncomeIds_ } = require('./160_MonthlyProjection.js');
 }
 
 /** 真的去调用 Drive API 的那一层——只能在真实 GAS 环境跑，Node 测不了。 */
@@ -260,7 +260,12 @@ function consoleRebuildProjections_(deps) {
   });
   const currentYear = deps.now.getFullYear();
   const ytd = computeYearToDateIncomeSummary_(verifiedIncomeRecords, currentYear);
-  return { monthlySummaries, ytd, totalVerifiedCount: verifiedIncomeRecords.length };
+  // 2026-08-22：跟 Needs_Allocation（跨月、待人工判断分月）不是同一件事——
+  // 这里是「period 本身就读不出来／不合法」，通常代表 Sheet 里有栏位错位
+  // 或残留旧资料，Steven 该去清资料，不是等系统帮他猜。明确列出来，不要
+  // 让它们悄悄消失在 Missing_Period 分类里只有 160 自己知道。
+  const invalidPeriodIncomeIds = findInvalidPeriodIncomeIds_(verifiedIncomeRecords);
+  return { monthlySummaries, ytd, totalVerifiedCount: verifiedIncomeRecords.length, invalidPeriodIncomeIds };
 }
 
 /** 页面载入时呼叫一次，显示目前已有的状态（不用先跑一次批次汇入）。 */

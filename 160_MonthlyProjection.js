@@ -35,7 +35,7 @@
  */
 
 if (typeof require === 'function') {
-  var { round2_ } = require('./106_Utils.js');
+  var { round2_, normalizeIsoDateString_ } = require('./106_Utils.js');
 }
 
 function isoWeekToThursdayParts_(isoWeekStr) {
@@ -99,7 +99,13 @@ function computeStatementMonths_(periodStartIso, periodEndIso) {
 
 /**
  * 单笔 Verified_Income 记录该怎么被 Monthly Projection 归属——纯函数，只吃
- * 已经存在的 period_start/period_end（不重新解析 PDF、不猜）。
+ * 已经存在的 period_start/period_end（不重新解析 PDF、不猜）。这是整个
+ * Monthly Projection 唯一允许「坏资料走到这里也绝对不抛错」的边界——
+ * 2026-08-22 真实 GAS 部署时，Sheet 里一笔旧栏位错位的资料（把货币代码
+ * 读成了 period_start）让 computeStatementMonths_ 直接抛错，导致整个
+ * Dashboard 崩溃。现在改成：先用 normalizeIsoDateString_ 做防御性正规化，
+ * 正规化不出乾净日期就直接归类 Missing_Period，绝不让例外往外逃逸——
+ * 一笔坏资料不该拖垮其他几十笔正常记录的汇总。
  *
  *   status='Full'：整份 Statement 落在同一个月，全额归属那个月。
  *   status='Needs_Allocation'：Statement 横跨 2 个月，目前没有可靠的逐日
@@ -107,19 +113,22 @@ function computeStatementMonths_(periodStartIso, periodEndIso) {
  *     两个月份都列出来，金额不会被算进任一个月的 net，只出现在
  *     needs_allocation 清单里供人工判断。以后如果拿到逐日数据（Option A），
  *     这里是唯一需要改的地方。
- *   status='Missing_Period'：record 本身没有 period_start/period_end（理论上
- *     不该发生——buildVerifiedIncomeRecord_ 已经在写入前挡了——这里是防御性
- *     判断，万一读到旧资料或外部资料源，仍要有明确、可测试的行为，不是
- *     抛例外中断整批汇总）。
+ *   status='Missing_Period'：period_start/period_end 缺失，或格式无法安全
+ *     判定（包含 Sheets 自动转换出来的原生 Date 物件、栏位错位读到的
+ *     非日期字符串等）——理论上不该发生（buildVerifiedIncomeRecord_ 已经
+ *     在写入前挡了），这里是防御性判断，万一读到旧资料或外部资料源，
+ *     仍要有明确、可测试的行为，不是抛例外中断整批汇总。
  * @param {Object} verifiedIncomeRecord 需要 income_id/period_start/period_end
  * @return {{status: string, months: string[], yearMonth: (string|undefined), incomeId: string}}
  */
 function computeMonthlyAllocation_(verifiedIncomeRecord) {
   const incomeId = verifiedIncomeRecord.income_id;
-  if (!verifiedIncomeRecord.period_start || !verifiedIncomeRecord.period_end) {
+  const periodStart = normalizeIsoDateString_(verifiedIncomeRecord.period_start);
+  const periodEnd = normalizeIsoDateString_(verifiedIncomeRecord.period_end);
+  if (!periodStart || !periodEnd) {
     return { status: 'Missing_Period', months: [], incomeId };
   }
-  const months = computeStatementMonths_(verifiedIncomeRecord.period_start, verifiedIncomeRecord.period_end);
+  const months = computeStatementMonths_(periodStart, periodEnd);
   if (months.length === 1) {
     return { status: 'Full', months, yearMonth: months[0], incomeId };
   }
