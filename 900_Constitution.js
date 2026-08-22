@@ -14,8 +14,20 @@
 
 var COMPLIANCE_OS_CONSTITUTION = {
   domain: 'Compliance OS',
-  constitutionVersion: '1.0',
+  constitutionVersion: '1.1',
   governedBy: { uef: 'v1.5', blueprint: 'v1.2' },
+
+  /**
+   * 变更记录——只记「这份文件本身」的变更，不是 901 那份记录代码/测试状态的
+   * changelog（两份文件职责不同，901 的 changelog 不应该跟着搬过来）。
+   */
+  changelog: [
+    {
+      date: '2026-08-21',
+      change: 'CMP-CR5 补完整（原本只写了 IDE 下拉选单那个理由，漏了 google.script.run 看不到带下划线后缀函数这件——2026-08-20 真实 GAS 环境踩过）；新增 CMP-P14（AI/LLM 产生的候选事实必须先过独立于该 AI 本身的 deterministic validation 才能变成 Truth）。两条都是「真实运行暴露出 Constitution 层没说完整/没覆盖到的东西」，不是重新设计——900/901 其余内容不动，Architecture Freeze 维持',
+      approvedBy: 'Steven'
+    }
+  ],
 
   /** Domain Ownership（对应 UEF Domain Ownership 检查 / ADR-000） */
   scope: {
@@ -119,6 +131,12 @@ var COMPLIANCE_OS_CONSTITUTION = {
       name: '发布类操作必须幂等——同一个身份只能被公开写入一次',
       statement:
         '任何「公开发布一笔真相记录」的操作（目前是 Verified Income，income_id 当身份），重复触发（使用者重复点击、批次汇入重跑、Retry 单一文件）必须侦测到已经存在就跳过，不能因为操作重复执行就产生第二笔记录。这不是靠呼叫方自己小心，是发布函数本身在写入前检查一次（Operator Console 的 Real Data Pilot 阶段，consoleBatchImport_/consoleRetryFile_ 都可能对同一份文件重复触发）。目前只有 Verified Income 一个实例，还没到能推广成生态规则的证据门槛（BP-2/UEF §0.9），先记在这里；如果未来其他 Domain OS 也出现「批次/重试可能重复触发同一次发布」的场景，这条可以是候选。'
+    },
+    {
+      id: 'CMP-P14',
+      name: 'AI/LLM 产生的候选事实，永远不能自己授权自己成为 Truth',
+      statement:
+        '任何由 AI/LLM 产生的候选事实——不限于 LLM Extraction，未来的 AI 分类、AI 对账差异解释、AI 文件判读、AI 生成的合规建议等都受这条约束——在成为任何 Verified 记录之前，必须先通过一层独立于该 AI/LLM 本身的 deterministic validation（例如 schema、期间、金额一致性）。「独立」是这条的关键：验证逻辑不能由产生候选的同一个 AI/provider 执行或背书——不能是另一个 AI 说「我检查过了，没问题」就算数，必须是不带任何概率性判断的确定性代码。AI 自己回传的 confidence 或其他不确定性讯号只能记录成 metadata，不能取代这层验证、也不能成为发布与否的判断依据。\n\n这条不要求人工审核每一笔 AI 产生的候选——那会让自动化失去意义，也不是这条的目的。正确的形状是：AI Candidate → Deterministic Validation → 通过就自动发布成 Verified，没通过就自动落到明确的失败状态（CMP-P10「异常要显性」在「候选是 AI 产生的」这个情境下的具体延伸）。人只需要处理验证没通过、被明确标注出来的那一小部分，不是每一笔都要看。\n\n906_AI_Integration.js 是 Compliance OS 第一次真的有 AI/LLM 组件进入 Truth-producing 主线（127_LLMExtractor.js），2026-08-21 用真实数据验证过 AI Candidate → Deterministic Validation → Verified 这条链路，也验证过验证没通过时正确落到 Needs_Review、不会被静默接受。'
     }
   ],
 
@@ -149,7 +167,7 @@ var COMPLIANCE_OS_CONSTITUTION = {
     {
       id: 'CMP-CR5',
       statement:
-        '私有函数命名用 GAS 平台惯例的后缀下划线 functionName_()，不是 UEF 原文字面的前缀——因为后缀下划线在 Apps Script 里有隐藏于「选取要执行的函数」下拉选单的实际平台好处。这是 Language Convention Override（见治理文档）在 Compliance OS 里的具体声明。'
+        '私有函数命名用 GAS 平台惯例的后缀下划线 functionName_()，不是 UEF 原文字面的前缀——这是 Language Convention Override（见治理文档）在 Compliance OS 里的具体声明，理由是两个独立的平台事实：(1) 后缀下划线在 Apps Script 编辑器里会隐藏于「选取要执行的函数」下拉选单；(2) google.script.run 看不到、也叫不动带这个后缀的函数（Apps Script 官方文件明载，不是这个专案自己的假设或某次 bug 的临时补丁）。第二点的直接后果：任何要给 HTMLService 前端（google.script.run）当入口呼叫的 server 函数，一律不能把 xxx_() 直接暴露出去，必须额外提供一个不带下划线的公开函数当薄壳，内部呼叫真正的 xxx_() 实作——内部逻辑永远留在 _ 版本里（继续享有隐藏于下拉选单、可以放心重构的好处），公开层只做参数原样转发，不重复任何逻辑。2026-08-20 在真实 GAS 环境证实过：漏掉这层公开 wrapper，前端会卡在「呼叫中」不会有任何回应，不是快速报错，容易被误判成别的问题。'
     }
   ],
 
