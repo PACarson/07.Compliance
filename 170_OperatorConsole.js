@@ -32,7 +32,7 @@
 if (typeof require === 'function') {
   var { DOCUMENTS_COLUMNS, computeFileHash_, runImportPipeline_ } = require('./110_DocumentImport.js');
   var { VERIFIED_INCOME_COLUMNS } = require('./140_VerifiedIncome.js');
-  var { computeMonthlyIncomeSummary_, computeYearToDateIncomeSummary_, isoWeekToYearMonth_ } = require('./160_MonthlyProjection.js');
+  var { computeMonthlyIncomeSummary_, computeYearToDateIncomeSummary_, computeMonthlyAllocation_, computeComplianceProjection_ } = require('./160_MonthlyProjection.js');
 }
 
 /** 真的去调用 Drive API 的那一层——只能在真实 GAS 环境跑，Node 测不了。 */
@@ -242,8 +242,22 @@ function consoleManualImport_(pastedText, deps) {
  */
 function consoleRebuildProjections_(deps) {
   const verifiedIncomeRecords = deps.sheetReader.readAll('Verified_Income', VERIFIED_INCOME_COLUMNS);
-  const months = Array.from(new Set(verifiedIncomeRecords.map((r) => isoWeekToYearMonth_(r.period)))).sort();
-  const monthlySummaries = months.map((ym) => computeMonthlyIncomeSummary_(verifiedIncomeRecords, ym));
+  // 2026-08-22：改用 computeMonthlyAllocation_ 列出每笔记录实际触及的全部月份
+  // （1 或 2 个），不是只取"该周星期四所在月份"——不然一个月如果只有横跨
+  // 该月的 Needs_Allocation 记录、没有任何完全落在该月的记录，旧写法会让
+  // 这个月完全不出现在 months 里，连它的 needs_allocation 提示都看不到。
+  const months = Array.from(new Set(
+    verifiedIncomeRecords
+      .filter((r) => r.status === 'Verified')
+      .reduce((acc, r) => acc.concat(computeMonthlyAllocation_(r).months), [])
+  )).sort();
+  // 2026-08-22：每个月度摘要都附上 compliance_projection（SOCSO/EPF/Tax）——
+  // 需求 §5 的 Monthly Console UI 把这两块放在同一个月份视图里，这里一起
+  // 附上，前端不用为了 Compliance Projection 另外发一次请求。
+  const monthlySummaries = months.map((ym) => {
+    const summary = computeMonthlyIncomeSummary_(verifiedIncomeRecords, ym);
+    return Object.assign({}, summary, { compliance_projection: computeComplianceProjection_(ym, summary) });
+  });
   const currentYear = deps.now.getFullYear();
   const ytd = computeYearToDateIncomeSummary_(verifiedIncomeRecords, currentYear);
   return { monthlySummaries, ytd, totalVerifiedCount: verifiedIncomeRecords.length };
@@ -252,6 +266,30 @@ function consoleRebuildProjections_(deps) {
 /** 页面载入时呼叫一次，显示目前已有的状态（不用先跑一次批次汇入）。 */
 function consoleGetDashboard_(deps) {
   return consoleRebuildProjections_(deps || buildConsoleDeps_());
+}
+
+/**
+ * 单笔 Verified_Income 的完整细节 + 它对应的 Documents 记录——Console 的
+ * Drill Down 用（需求 §7）：从月度汇总的一个数字，一路往回追到原始 PDF。
+ * 不复制/搬动 PDF（需求 §8）——只回传 drive_file_id，前端自己组 Drive 的
+ * 标准检视网址，不为了给一个连结额外调 Drive API。
+ * @param {string} incomeId
+ * @param {Object} [deps]
+ * @return {{income: (Object|null), document: (Object|null)}}
+ */
+function consoleGetIncomeDetail_(incomeId, deps) {
+  const d = deps || buildConsoleDeps_();
+  const income = d.sheetReader.readAll('Verified_Income', VERIFIED_INCOME_COLUMNS).find((r) => r.income_id === incomeId) || null;
+  if (!income) return { income: null, document: null };
+
+  const doc = income.source_document_id
+    ? (d.sheetReader.readAll('Documents', DOCUMENTS_COLUMNS).find((r) => r.document_id === income.source_document_id) || null)
+    : null;
+
+  return {
+    income,
+    document: doc ? { documentId: doc.document_id, driveFileId: doc.drive_file_id, drivePath: doc.drive_path, status: doc.status } : null
+  };
 }
 
 /** 记住上次用过的 Folder ID，下次打开 Console 不用重新贴。真的很小的一个
@@ -323,6 +361,10 @@ function consoleManualImport(pastedText, deps) {
   return consoleManualImport_(pastedText, deps);
 }
 
+function consoleGetIncomeDetail(incomeId, deps) {
+  return consoleGetIncomeDetail_(incomeId, deps);
+}
+
 if (typeof module !== 'undefined') {
   module.exports = {
     realFolderScanner_,
@@ -335,12 +377,14 @@ if (typeof module !== 'undefined') {
     consoleManualImport_,
     consoleRebuildProjections_,
     consoleGetDashboard_,
+    consoleGetIncomeDetail_,
     consoleGetDashboard,
     consoleGetLastFolderId,
     consoleSaveLastFolderId,
     consoleScanFolder,
     consoleBatchImport,
     consoleRetryFile,
-    consoleManualImport
+    consoleManualImport,
+    consoleGetIncomeDetail
   };
 }

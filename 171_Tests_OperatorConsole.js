@@ -2,7 +2,8 @@ if (typeof require === 'function') {
   var {
     buildConsoleDeps_, consoleScanFolder_, consoleImportOneDriveFile_, consoleBatchImport_,
     consoleRetryFile_, consoleManualImport_, consoleRebuildProjections_, consoleGetDashboard_,
-    consoleGetDashboard, consoleGetLastFolderId, consoleScanFolder, consoleManualImport
+    consoleGetIncomeDetail_, consoleGetDashboard, consoleGetLastFolderId, consoleScanFolder,
+    consoleManualImport, consoleGetIncomeDetail
   } = require('./170_OperatorConsole.js');
   var { createTruthWriter_ } = require('./115_TruthWriter.js');
   var { createSheetReader_ } = require('./117_SheetReader.js');
@@ -123,12 +124,29 @@ function runAllOperatorConsoleTests() {
 
   // ============ consoleRebuildProjections_：跨月聚合 + YTD ============
   const deps6 = fakeConsoleDeps_([]);
-  deps6._accessor.appendRow('Verified_Income', ['CMP-INCOME-2026-W26', '2026-W26', 'MYR', 1000, 100, 50, 0, -50, 1100, 1100, 'Compliance OS', 'Grab', 'Verified', '2026-07-01T00:00:00Z', 'CMP-DOC-fixture-1', 'GrabWeeklyParser']);
-  deps6._accessor.appendRow('Verified_Income', ['CMP-INCOME-2026-W30', '2026-W30', 'MYR', 1200, 200, 60, 0, -60, 1400, 1400, 'Compliance OS', 'Grab', 'Verified', '2026-07-28T00:00:00Z', 'CMP-DOC-fixture-2', 'GrabWeeklyParser']);
+  // period_start/period_end（2026-08-22 起 VERIFIED_INCOME_COLUMNS 新增栏位）：
+  // W26=2026-06-22~06-28（完全在 6 月），W30=2026-07-20~07-26（完全在 7 月，
+  // 跟已确认的真实样本一致）——两笔各自完全落在不同月份，不受这次跨月
+  // 归属改版影响，rebuild6 的断言维持原本的预期。
+  deps6._accessor.appendRow('Verified_Income', ['CMP-INCOME-2026-W26', '2026-W26', '2026-06-22', '2026-06-28', 'MYR', 1000, 100, 50, 0, -50, 1100, 1100, 'Compliance OS', 'Grab', 'Verified', '2026-07-01T00:00:00Z', 'CMP-DOC-fixture-1', 'GrabWeeklyParser']);
+  deps6._accessor.appendRow('Verified_Income', ['CMP-INCOME-2026-W30', '2026-W30', '2026-07-20', '2026-07-26', 'MYR', 1200, 200, 60, 0, -60, 1400, 1400, 'Compliance OS', 'Grab', 'Verified', '2026-07-28T00:00:00Z', 'CMP-DOC-fixture-2', 'GrabWeeklyParser']);
   const rebuild6 = consoleRebuildProjections_(deps6);
   assertEqual_('重建·两笔分属不同月份，monthlySummaries 有两笔', rebuild6.monthlySummaries.length, 2, results);
   assertEqual_('重建·totalVerifiedCount 是 2', rebuild6.totalVerifiedCount, 2, results);
   assertEqual_('重建·YTD 涵盖两笔的总和', rebuild6.ytd.net, 2500, results);
+  assertEqual_('重建·每个月度摘要都附上 compliance_projection（SOCSO 固定 49.40）', rebuild6.monthlySummaries.every((m) => m.compliance_projection && m.compliance_projection.socso.amount === 49.40), true, results);
+
+  // ============ consoleGetIncomeDetail_：Drill Down 到原始 Documents/drive_file_id（需求 §7/§8）============
+  const deps10 = fakeConsoleDeps_([]);
+  deps10._accessor.appendRow('Documents', ['CMP-DOC-detail-1', 'Grab', 'Weekly Statement', 'Income', 'Pending', 'hash-detail-1', 'drive-file-xyz', 'path/to/file.pdf', 'Imported']);
+  deps10._accessor.appendRow('Verified_Income', ['CMP-INCOME-2026-W33', '2026-W33', '2026-08-10', '2026-08-16', 'MYR', 1000, 100, 50, 0, -50, 1100, 1100, 'Compliance OS', 'Grab', 'Verified', '2026-08-17T00:00:00Z', 'CMP-DOC-detail-1', 'GrabWeeklyParser']);
+  const detail = consoleGetIncomeDetail_('CMP-INCOME-2026-W33', deps10);
+  assertEqual_('Drill Down·income 找得到', detail.income.income_id, 'CMP-INCOME-2026-W33', results);
+  assertEqual_('Drill Down·顺藤摸到对应的 Documents 记录·drive_file_id', detail.document.driveFileId, 'drive-file-xyz', results);
+  assertEqual_('Drill Down·不复制/回传 PDF 本身，只回传引用（需求 §8）', typeof detail.document.driveFileId, 'string', results);
+
+  const missingDetail = consoleGetIncomeDetail_('CMP-INCOME-NOT-EXIST', deps10);
+  assertEqual_('Drill Down·查不到的 income_id 不抛错，回传 null（不是让前端崩溃）', missingDetail, { income: null, document: null }, results);
 
   // ============ 公开 wrapper 函数：转发是否正确 ============
   // 不测「google.script.run 真的能不能连到公开函数」——那是 GAS 平台行为，
@@ -148,6 +166,12 @@ function runAllOperatorConsoleTests() {
   assertEqual_('consoleGetDashboard 转发结果跟 consoleGetDashboard_ 一致', consoleGetDashboard(deps9a), consoleGetDashboard_(deps9b), results);
 
   assertEqual_('consoleGetLastFolderId 公开版本可呼叫、不抛错（Node 下 PropertiesService 不存在，两版本都回 null）', consoleGetLastFolderId(), null, results);
+
+  const deps11a = fakeConsoleDeps_([]);
+  deps11a._accessor.appendRow('Verified_Income', ['CMP-INCOME-2026-W33', '2026-W33', '2026-08-10', '2026-08-16', 'MYR', 1000, 100, 50, 0, -50, 1100, 1100, 'Compliance OS', 'Grab', 'Verified', '2026-08-17T00:00:00Z', null, 'GrabWeeklyParser']);
+  const deps11b = fakeConsoleDeps_([]);
+  deps11b._accessor.appendRow('Verified_Income', ['CMP-INCOME-2026-W33', '2026-W33', '2026-08-10', '2026-08-16', 'MYR', 1000, 100, 50, 0, -50, 1100, 1100, 'Compliance OS', 'Grab', 'Verified', '2026-08-17T00:00:00Z', null, 'GrabWeeklyParser']);
+  assertEqual_('consoleGetIncomeDetail 转发结果跟 consoleGetIncomeDetail_ 一致', consoleGetIncomeDetail('CMP-INCOME-2026-W33', deps11a), consoleGetIncomeDetail_('CMP-INCOME-2026-W33', deps11b), results);
 
   const allPass = results.every((r) => r.pass);
   results.forEach((r) => {
@@ -184,4 +208,9 @@ if (typeof module !== 'undefined') {
  * [ ] 批次汇入中途手动中断（例如关掉页面），确认已经成功的文件不会在
  *     下次扫描时被重复处理，未完成的文件用 Retry 能继续
  * [ ] appsscript.json 的 webapp 存取权限设定符合预期（只有 Steven 自己能开）
+ * [ ] 2026-08-22 新增·月度总览 UI：真实 GAS 部署后点年份/月份 pill 能正确
+ *     切换，「追溯来源」按钮能叫到 consoleGetIncomeDetail 并显示 Drive 连结，
+ *     连结真的能打开对应的原始 PDF（不是打开别份文件）
+ * [ ] 找一个真实存在的跨月 Statement（回填历史资料后应该会有），确认
+ *     Needs_Allocation 警示区块真的会出现，且两个月份的 pill 都有 ⚠ 标记
  */

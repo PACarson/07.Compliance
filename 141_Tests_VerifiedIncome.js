@@ -27,6 +27,9 @@ function runAllVerifiedIncomeTests() {
   // 自己的 summary.weekly_net（陈述值，CMP-P5），不经过任何对账步骤。
   const record = buildVerifiedIncomeRecord_(week, parsedStatement, fixedNow);
   assertEqual_('income_id', record.income_id, 'CMP-INCOME-2026-W30', results);
+  // ============ 2026-08-22 新增：period_start/period_end（Monthly Projection 依赖）============
+  assertEqual_('period_start 来自 parsedStatement.document_meta（陈述值，非派生）', record.period_start, '2026-07-20', results);
+  assertEqual_('period_end 来自 parsedStatement.document_meta（陈述值，非派生）', record.period_end, '2026-07-26', results);
   assertEqual_('source 固定 Compliance OS（CMP-P2）', record.source, 'Compliance OS', results);
   assertEqual_('origin_platform 是 Grab（内部用）', record.origin_platform, 'Grab', results);
   assertEqual_('net 直接来自 parsedStatement.summary.weekly_net（不经过 Reconciliation）', record.net, 1734.10, results);
@@ -43,6 +46,13 @@ function runAllVerifiedIncomeTests() {
   try { buildVerifiedIncomeRecord_(week, { document_meta: parsedStatement.document_meta, income_breakdown: parsedStatement.income_breakdown, summary: {} }, fixedNow); }
   catch (e) { threwOnMissingWeeklyNet = true; }
   results.push({ name: 'summary.weekly_net 缺失时抛错', pass: threwOnMissingWeeklyNet });
+
+  let threwOnMissingPeriodStart = false;
+  try {
+    const badMeta = Object.assign({}, parsedStatement.document_meta, { period_start: undefined });
+    buildVerifiedIncomeRecord_(week, Object.assign({}, parsedStatement, { document_meta: badMeta }), fixedNow);
+  } catch (e) { threwOnMissingPeriodStart = true; }
+  results.push({ name: 'document_meta.period_start 缺失时抛错（不静默放行给 Monthly Projection）', pass: threwOnMissingPeriodStart });
 
   let threwOnBadDate = false;
   try { buildVerifiedIncomeRecord_(week, parsedStatement, new Date('not-a-date')); }

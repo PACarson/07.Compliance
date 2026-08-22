@@ -16,7 +16,7 @@
  */
 
 var VERIFIED_INCOME_COLUMNS = [
-  'income_id', 'period', 'currency',
+  'income_id', 'period', 'period_start', 'period_end', 'currency',
   'net_delivery_income', 'incentive', 'tip', 'other_payments',
   'total_deductions', 'net', 'amount',
   'source', 'origin_platform', 'status', 'verified_at',
@@ -37,6 +37,18 @@ var VERIFIED_INCOME_COLUMNS = [
  * 路径。sourceDocumentId 是呼叫方（runImportPipeline_）传进来的，因为
  * 「这笔 Verified Income 对应哪一笔 Documents 记录」是编排层的事实，不是
  * parsedStatement 自己知道的东西。
+ *
+ * period_start/period_end（2026-08-22 新增，Monthly Projection 依赖）：
+ * GrabWeeklyParser 跟 normalizeExtractionCandidate_ 两条路径本来就都已经算出
+ * document_meta.period_start/period_end（CMP-P5 陈述值，week 反而是从
+ * period_start 派生出来的），只是过去在这里没有被存下来——之前 Verified_Income
+ * 只留了 period（ISO 周），跨月的 Statement 因此没有可靠的方式知道它实际
+ * 横跨哪两个月，160_MonthlyProjection.js 只能用「该周星期四所在月份」这种
+ * 简化猜测（人工验证清单已经把这个简化标成需要 Steven 确认的项目）。现在
+ * 直接存下 PDF 上印的起讫日期本身，160 才能对每笔 Verified_Income 做出
+ * Full-in-month 或 Needs_Allocation 的判断，不必再用间接猜的。缺失时直接
+ * 拒绝——这个栏位对下游月度归属是必要输入，静默放行等于让 Monthly
+ * Projection 在看不见的地方算错。
  * @param {string} week
  * @param {Object} parsedStatement GrabWeeklyParser 或 LLMExtractor 输出
  * @param {Date} [now]
@@ -54,11 +66,16 @@ function buildVerifiedIncomeRecord_(week, parsedStatement, now, sourceDocumentId
   if (!parsedStatement.summary || typeof parsedStatement.summary.weekly_net !== 'number') {
     throw new Error('buildVerifiedIncomeRecord_: parsedStatement.summary.weekly_net 缺失或不是数字');
   }
+  if (!parsedStatement.document_meta || !parsedStatement.document_meta.period_start || !parsedStatement.document_meta.period_end) {
+    throw new Error('buildVerifiedIncomeRecord_: parsedStatement.document_meta.period_start/period_end 缺失——Monthly Projection 依赖这两个栏位处理跨月 Statement，不能静默放行');
+  }
 
   const b = parsedStatement.income_breakdown;
   return {
     income_id: `CMP-INCOME-${week}`,
     period: week,
+    period_start: parsedStatement.document_meta.period_start,
+    period_end: parsedStatement.document_meta.period_end,
     currency: parsedStatement.document_meta.currency,
     net_delivery_income: b.net_delivery_income.amount,
     incentive: b.incentive.amount,
@@ -82,6 +99,8 @@ function buildIncomeVerifiedEvent_(verifiedIncomeRecord, eventId) {
     event_id: eventId,
     income_id: verifiedIncomeRecord.income_id,
     period: verifiedIncomeRecord.period,
+    period_start: verifiedIncomeRecord.period_start,
+    period_end: verifiedIncomeRecord.period_end,
     net_delivery_income: verifiedIncomeRecord.net_delivery_income,
     incentive: verifiedIncomeRecord.incentive,
     tip: verifiedIncomeRecord.tip,

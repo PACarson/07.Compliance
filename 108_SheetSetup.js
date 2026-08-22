@@ -54,7 +54,10 @@ function buildSheetSchemas_() {
     {
       name: 'Verified_Income',
       columns: VERIFIED_INCOME_COLUMNS,
-      textColumns: ['income_id', 'period', 'currency', 'source', 'origin_platform', 'status', 'verified_at', 'source_document_id', 'extractor_id']
+      textColumns: ['income_id', 'period', 'period_start', 'period_end', 'currency', 'source', 'origin_platform', 'status', 'verified_at', 'source_document_id', 'extractor_id']
+      // period_start/period_end 是 "YYYY-MM-DD" 字符串（2026-08-22 新增）——
+      // 跟 verified_at 同一个理由，一定要留在 textColumns，不然 Sheets 会把
+      // 这种看起来像日期的字符串静默转成日期序列值
       // net_delivery_income/incentive/tip/other_payments/total_deductions/net/amount
       // 刻意不列——留给 Sheets 当数字
     },

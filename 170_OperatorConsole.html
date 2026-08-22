@@ -252,6 +252,34 @@
       .spinner { animation: none; }
       .toast { transition: none; }
     }
+
+    /* ---- 月度总览：年份/月份导览 + 月度细节 + Compliance Projection ---- */
+    .year-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+    .year-row:last-child { margin-bottom: 0; }
+    .year-label { font-family: var(--mono); font-size: 12px; color: var(--ink-soft); width: 40px; flex-shrink: 0; }
+    .month-pill {
+      font-family: var(--sans);
+      font-size: 12px;
+      font-weight: 600;
+      padding: 5px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--rule);
+      background: var(--paper-raised);
+      color: var(--ink-soft);
+      cursor: pointer;
+    }
+    .month-pill.active { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+    .alloc-warning {
+      margin-top: 12px;
+      padding: 10px 14px;
+      border: 1.5px dashed var(--flagged);
+      background: var(--flagged-bg);
+      color: var(--flagged);
+      border-radius: 4px;
+      font-size: 12px;
+    }
+    .alloc-warning ul { margin-top: 6px; }
+    .compliance-value.not-configured { font-size: 12px; color: var(--ink-soft); font-style: italic; }
   </style>
 </head>
 <body>
@@ -267,6 +295,12 @@
         <div class="dash-card"><div class="label">载入中</div><div class="value">—</div></div>
       </div>
       <div class="dash-note">虚线卡片 = Projection（即时算，不是存好的汇总表）；下方清单里的实心图章 = Verified 的官方记录本身</div>
+    </section>
+
+    <section>
+      <h2>月度总览</h2>
+      <div id="monthlyNav"></div>
+      <div id="monthlyDetail"></div>
     </section>
 
     <section>
@@ -300,7 +334,8 @@
   <div id="toast" class="toast"></div>
 
   <script>
-    var state = { scan: null, lastFolderId: '' };
+    var state = { scan: null, lastFolderId: '', monthlySummaries: [], selectedMonth: null };
+    var MONTH_NAMES = ['', '一月', '二月', '三月', '四月', '五月', '六月', '七月', '八月', '九月', '十月', '十一月', '十二月'];
 
     function showToast(msg) {
       var t = document.getElementById('toast');
@@ -341,9 +376,133 @@
         card('累计 Verified 笔数', d.totalVerifiedCount != null ? String(d.totalVerifiedCount) : '0', false),
         card('涵盖月份数', d.monthlySummaries ? String(d.monthlySummaries.length) : '0', false)
       ].join('');
+
+      state.monthlySummaries = d.monthlySummaries || [];
+      // 保持目前选中的月份（例如刚汇入完重建），除非它已经不存在；否则预设选最新月份
+      if (!state.selectedMonth || !state.monthlySummaries.some(function (m) { return m.year_month === state.selectedMonth; })) {
+        var sorted = state.monthlySummaries.slice().sort(function (a, b) { return a.year_month < b.year_month ? 1 : -1; });
+        state.selectedMonth = sorted.length ? sorted[0].year_month : null;
+      }
+      renderMonthlyNav(state.monthlySummaries, state.selectedMonth);
+      renderMonthlyDetail(state.monthlySummaries.find(function (m) { return m.year_month === state.selectedMonth; }) || null);
     }
     function card(label, value, isCurrency) {
       return '<div class="dash-card"><div class="label">' + label + '</div><div class="value' + (isCurrency ? ' currency' : '') + '">' + value + '</div></div>';
+    }
+
+    function renderMonthlyNav(summaries, selectedMonth) {
+      var el = document.getElementById('monthlyNav');
+      if (!summaries.length) {
+        el.innerHTML = '<div class="empty-state">还没有任何月份的 Verified Income——汇入几份 Statement 之后这里会按年份/月份列出来。</div>';
+        return;
+      }
+      var byYear = {};
+      summaries.forEach(function (m) {
+        var y = m.year_month.slice(0, 4);
+        (byYear[y] = byYear[y] || []).push(m);
+      });
+      var years = Object.keys(byYear).sort().reverse();
+      el.innerHTML = years.map(function (y) {
+        var pills = byYear[y].sort(function (a, b) { return a.year_month < b.year_month ? -1 : 1; }).map(function (m) {
+          var monthNum = parseInt(m.year_month.slice(5, 7), 10);
+          var flag = (m.needs_allocation && m.needs_allocation.length) ? ' ⚠' : '';
+          var cls = 'month-pill' + (m.year_month === selectedMonth ? ' active' : '');
+          return '<button class="' + cls + '" onclick="selectMonth(\'' + m.year_month + '\')">' + MONTH_NAMES[monthNum] + flag + '</button>';
+        }).join('');
+        return '<div class="year-row"><span class="year-label">' + y + '</span>' + pills + '</div>';
+      }).join('');
+    }
+
+    function selectMonth(yearMonth) {
+      state.selectedMonth = yearMonth;
+      renderMonthlyNav(state.monthlySummaries, state.selectedMonth);
+      renderMonthlyDetail(state.monthlySummaries.find(function (m) { return m.year_month === yearMonth; }) || null);
+    }
+
+    function renderMonthlyDetail(summary) {
+      var el = document.getElementById('monthlyDetail');
+      if (!summary) { el.innerHTML = ''; return; }
+      var cp = summary.compliance_projection || {};
+      var gross = summary.net_delivery_income + summary.incentive + summary.tip + summary.other_payments;
+
+      var warningsHtml = (summary.needs_allocation && summary.needs_allocation.length)
+        ? '<div class="alloc-warning"><strong>⚠ ' + summary.needs_allocation.length + ' 份 Statement 横跨月份，尚未计入任何月份的 Net Income：</strong>' +
+          '<ul class="file-list">' + summary.needs_allocation.map(function (n) {
+            return '<li><span class="file-name">' + n.income_id + '</span><span class="file-detail">' + n.period_start + ' → ' + n.period_end + '（横跨 ' + n.months.join(' / ') + '）</span></li>';
+          }).join('') + '</ul></div>'
+        : '';
+
+      var statementsHtml = summary._computed_from.length
+        ? '<ul class="file-list">' + summary._computed_from.map(function (id) {
+            return '<li><span class="file-name">' + id + '</span><button class="small secondary" onclick="showIncomeDetail(\'' + id + '\')">追溯来源</button></li>';
+          }).join('') + '</ul>'
+        : '<div class="empty-state">这个月没有完全落在月内、可计入 Net Income 的 Statement。</div>';
+
+      el.innerHTML =
+        '<div class="panel">' +
+          '<h2 style="margin-top:0">' + summary.year_month + ' 月度摘要</h2>' +
+          '<div class="dash-grid">' +
+            card('Statements', String(summary.week_count), false) +
+            card('Gross Income', money(gross), true) +
+            card('Deduction', money(summary.total_deductions), true) +
+            card('Net Income', money(summary.net), true) +
+          '</div>' +
+          warningsHtml +
+          '<h2 style="margin-top:20px">Compliance Projection</h2>' +
+          '<div class="dash-grid">' +
+            complianceCard('SOCSO' + (cp.socso && cp.socso.plan ? '（' + cp.socso.plan + '）' : ''), cp.socso) +
+            complianceCard('EPF', cp.epf) +
+            complianceCard('Tax', cp.tax) +
+          '</div>' +
+          '<div class="dash-note">这一整块都是 Projection，不是官方缴费记录——真正的 SOCSO/EPF/LHDN 缴费记录以后会作为独立的 Official Record 存进来对照</div>' +
+          '<h2 style="margin-top:20px">Included Statements</h2>' +
+          statementsHtml +
+        '</div>' +
+        '<div id="incomeDetailModal"></div>';
+    }
+
+    function complianceCard(label, entry) {
+      if (!entry) return card(label, '—', false);
+      if (entry.status === 'Not_Configured') {
+        return '<div class="dash-card"><div class="label">' + label + '</div><div class="compliance-value not-configured">Not Configured</div></div>';
+      }
+      return card(label, money(entry.amount), true);
+    }
+
+    function showIncomeDetail(incomeId) {
+      var modal = document.getElementById('incomeDetailModal');
+      modal.innerHTML = '<div class="panel" style="margin-top:12px">读取中…</div>';
+      google.script.run
+        .withSuccessHandler(function (detail) {
+          if (!detail || !detail.income) {
+            modal.innerHTML = '<div class="panel" style="margin-top:12px">找不到这笔记录。</div>';
+            return;
+          }
+          var inc = detail.income;
+          var driveLink = detail.document && detail.document.driveFileId
+            ? '<a href="https://drive.google.com/file/d/' + detail.document.driveFileId + '/view" target="_blank" rel="noopener">在 Drive 打开原始 PDF ↗</a>'
+            : '<span class="file-detail">没有对应的 Documents 记录（可能是手动贴上的文字）</span>';
+          modal.innerHTML =
+            '<div class="panel" style="margin-top:12px">' +
+              '<div class="row" style="justify-content:space-between">' +
+                '<strong class="file-name">' + escapeHtml(inc.income_id) + '</strong>' +
+                '<button class="small secondary" onclick="document.getElementById(\'incomeDetailModal\').innerHTML=\'\'">关闭</button>' +
+              '</div>' +
+              '<div class="file-detail" style="margin-top:6px">Statement 期间：' + escapeHtml(inc.period_start) + ' → ' + escapeHtml(inc.period_end) + '（' + escapeHtml(inc.period) + '）</div>' +
+              '<div class="dash-grid" style="margin-top:10px">' +
+                card('Net Delivery', money(inc.net_delivery_income), true) +
+                card('Incentive', money(inc.incentive), true) +
+                card('Tip', money(inc.tip), true) +
+                card('Other', money(inc.other_payments), true) +
+              '</div>' +
+              '<div class="file-detail" style="margin-top:10px">Verified at：' + escapeHtml(inc.verified_at) + ' · Extractor：' + escapeHtml(inc.extractor_id || '—') + '</div>' +
+              '<div style="margin-top:10px">' + driveLink + '</div>' +
+            '</div>';
+        })
+        .withFailureHandler(function (err) {
+          modal.innerHTML = '<div class="panel" style="margin-top:12px">读取失败：' + escapeHtml(err.message) + '</div>';
+        })
+        .consoleGetIncomeDetail(incomeId);
     }
 
     function renderScanResults(scan) {
