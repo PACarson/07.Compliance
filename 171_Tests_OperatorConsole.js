@@ -39,15 +39,23 @@ function fakeConsoleDeps_(files, now) {
 function runAllOperatorConsoleTests() {
   const results = [];
 
-  // ============ consoleScanFolder_：drive_file_id 去重 ============
-  const deps1 = fakeConsoleDeps_([{ id: 'f1', name: 'a.pdf' }, { id: 'f2', name: 'b.pdf' }, { id: 'f3', name: 'c.pdf' }]);
+  // ============ consoleScanFolder_：drive_file_id 去重，且要分清「真的验证完成」vs「卡住待重试」============
+  const deps1 = fakeConsoleDeps_([{ id: 'f1', name: 'a.pdf' }, { id: 'f2', name: 'b.pdf' }, { id: 'f3', name: 'c.pdf' }, { id: 'f4', name: 'd.pdf' }]);
   deps1._accessor.appendRow('Documents', ['CMP-DOC-old', 'Grab', 'Weekly Statement', 'Income', '2026-W29', 'oldhash', 'f2', 'path', 'Imported']);
+  deps1._accessor.appendRow('Verified_Income', ['CMP-INCOME-2026-W29', '2026-W29', 'MYR', 500, 50, 10, 0, 0, 560, 560, 'Compliance OS', 'Grab', 'Verified', '2026-07-22T00:00:00Z', 'CMP-DOC-old', 'GrabWeeklyParser', '2026-07-13', '2026-07-19']);
+  // f4：有 Documents 记录，但故意不给对应的 Verified_Income——模拟上次抽取
+  // /验证半路断掉（审计报告 HIGH-3：以前这种情况会被永久当成「已汇入」）
+  deps1._accessor.appendRow('Documents', ['CMP-DOC-stuck', 'Grab', 'Weekly Statement', 'Income', 'Pending', 'stuckhash', 'f4', 'path', 'Imported']);
   const scan = consoleScanFolder_(null, deps1);
-  assertEqual_('scan·三个文件都列出来', scan.files.length, 3, results);
-  const f2 = scan.files.find((f) => f.id === 'f2');
+  assertEqual_('scan·四个文件都列出来', scan.files.length, 4, results);
   const f1 = scan.files.find((f) => f.id === 'f1');
-  assertEqual_('scan·f2 的 drive_file_id 已经在 Documents 里，标记已汇入', f2.alreadyImported, true, results);
+  const f2 = scan.files.find((f) => f.id === 'f2');
+  const f4 = scan.files.find((f) => f.id === 'f4');
   assertEqual_('scan·f1 是新的，标记未汇入', f1.alreadyImported, false, results);
+  assertEqual_('scan·f1 是全新文件，不需要走 retry 路径', f1.needsRetry, false, results);
+  assertEqual_('scan·f2 有 Documents 记录也有对应 Verified_Income，真的算已汇入', f2.alreadyImported, true, results);
+  assertEqual_('scan·f4 有 Documents 记录但查无对应 Verified_Income——卡住了，不能当已完成（2026-08-23 修正 HIGH-3）', f4.alreadyImported, false, results);
+  assertEqual_('scan·f4 明确标成需要重试（会走 isRetry 路径，不会被 file_hash 挡成 duplicate）', f4.needsRetry, true, results);
 
   // ============ consoleImportOneDriveFile_：新文件（Node 环境 OCR 是占位，预期 Extraction_Failed，但不该整个抛出）============
   const deps2 = fakeConsoleDeps_([]);
@@ -97,14 +105,34 @@ function runAllOperatorConsoleTests() {
     dte3c.extract = originalExtract3c_;
   }
 
-  // ============ consoleBatchImport_：只处理未汇入的，一个失败不影响其他，结束会重建 ============
+  // ============ consoleBatchImport_：真的完成的跳过，卡住的自动重试（不是永久跳过），一个失败不影响其他，结束会重建 ============
   const deps4 = fakeConsoleDeps_([{ id: 'f1', name: 'a.pdf' }, { id: 'f2', name: 'b.pdf' }, { id: 'f3', name: 'c.pdf' }]);
-  deps4._accessor.appendRow('Documents', ['CMP-DOC-old2', 'Grab', 'Weekly Statement', 'Income', '2026-W29', 'oldhash2', 'f3', 'path', 'Imported']);
+  deps4._accessor.appendRow('Documents', ['CMP-DOC-done', 'Grab', 'Weekly Statement', 'Income', '2026-W29', 'donehash', 'f3', 'path', 'Imported']);
+  deps4._accessor.appendRow('Verified_Income', ['CMP-INCOME-2026-W29', '2026-W29', 'MYR', 500, 50, 10, 0, 0, 560, 560, 'Compliance OS', 'Grab', 'Verified', '2026-07-22T00:00:00Z', 'CMP-DOC-done', 'GrabWeeklyParser', '2026-07-13', '2026-07-19']);
+  deps4._accessor.appendRow('Documents', ['CMP-DOC-stuck2', 'Grab', 'Weekly Statement', 'Income', 'Pending', 'stuckhash2', 'f2', 'path', 'Imported']);
+  // f3 真的完成（有对应 Verified_Income）、f2 卡住（没有）、f1 全新——
+  // 预期：只有 f3 跳过，f1 跟 f2 都要处理（f2 走 isRetry，不会被当 duplicate）
   const batchResult = consoleBatchImport_(null, deps4);
   assertEqual_('批次·总共扫到 3 个', batchResult.scannedCount, 3, results);
-  assertEqual_('批次·已汇入 1 个，只处理 2 个', batchResult.attemptedCount, 2, results);
+  assertEqual_('批次·真的完成的 1 个跳过，卡住的+全新的都要处理，共 2 个', batchResult.attemptedCount, 2, results);
   assertEqual_('批次·两个都跑完了（没有因为其中一个失败就中断）', batchResult.results.length, 2, results);
+  assertEqual_('批次·remainingCount 是 0（预算够用，没被时间中断）', batchResult.remainingCount, 0, results);
+  assertEqual_('批次·stoppedEarly 是 false', batchResult.stoppedEarly, false, results);
+  const stuckFileResult = batchResult.results.find((r) => r.fileId === 'f2');
+  assertEqual_('批次·卡住的那笔没有被 file_hash 挡成 duplicate（走的是 isRetry 路径，不是重新登记）', stuckFileResult.stage !== 'Skipped_Duplicate', true, results);
   assertEqual_('批次·重建有回传 monthlySummaries', Array.isArray(batchResult.rebuild.monthlySummaries), true, results);
+
+  // ---- 2026-08-23 新增（审计报告 HIGH-1）：接近时间预算就主动停止，不是被 GAS 硬杀 ----
+  const deps4b = fakeConsoleDeps_([{ id: 'g1', name: 'a.pdf' }, { id: 'g2', name: 'b.pdf' }, { id: 'g3', name: 'c.pdf' }]);
+  let nowMsCallCount = 0;
+  const timeBudgetedResult = consoleBatchImport_(null, Object.assign({}, deps4b, {
+    timeBudgetMs: 1000,
+    nowMs: () => { nowMsCallCount++; return nowMsCallCount <= 2 ? 0 : 999999; } // 第 3 次呼叫（处理第 2 个文件前的检查）直接跳到远超预算
+  }));
+  assertEqual_('时间预算·只处理了 1 个就主动停止', timeBudgetedResult.attemptedCount, 1, results);
+  assertEqual_('时间预算·stoppedEarly 是 true', timeBudgetedResult.stoppedEarly, true, results);
+  assertEqual_('时间预算·remainingCount 反映还有 2 个没处理', timeBudgetedResult.remainingCount, 2, results);
+  assertEqual_('时间预算·重建仍然正常跑（已处理的部分不会被时间预算卡住）', typeof timeBudgetedResult.rebuild, 'object', results);
 
   // ============ consoleManualImport_：Debug/Fallback，直接给文字，不需要真的 DriveApp，可以走到底 ============
   const deps5 = fakeConsoleDeps_([]);
@@ -222,4 +250,14 @@ if (typeof module !== 'undefined') {
  *     连结真的能打开对应的原始 PDF（不是打开别份文件）
  * [ ] 找一个真实存在的跨月 Statement（回填历史资料后应该会有），确认
  *     Needs_Allocation 警示区块真的会出现，且两个月份的 pill 都有 ⚠ 标记
+ * [ ] 2026-08-23 新增·LLM API 429/5xx 重试退避（127_LLMExtractor.js 的
+ *     httpClient.postJson）：UrlFetchApp 是真的 GAS 服务，Node 测不了，
+ *     真实批次汇入时留意 log 有没有出现重试訊息，抓一次真的因为限流触发
+ *     重试的情况确认行为符合预期
+ * [ ] 2026-08-23 新增·批次汇入时间预算：真的拿几十份文件测一次，确认
+ *     6 分钟内没跑完时会 stoppedEarly 而不是被 GAS 直接杀掉报错；重新
+ *     呼叫一次批次汇入确认会接着处理剩下的，不会重复也不会漏
+ * [ ] 2026-08-23 新增·卡住文件自动重试：故意让某份文件的抽取失败一次
+ *     （例如暂时关闭网络或用一份格式很怪的 PDF），确认下次批次汇入会
+ *     自动重新尝试这份文件，不会永久消失在扫描结果里
  */

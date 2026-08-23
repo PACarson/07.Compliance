@@ -77,19 +77,40 @@ function buildConsoleDeps_() {
  * hash，比 file_hash 去重便宜很多；file_hash 仍然留着当第二层防线，见
  * 110_DocumentImport.js 的 isDuplicateHash_（万一同样内容被传成不同的
  * Drive 文件）。
+ *
+ * 2026-08-23 修正（审计报告 HIGH-3）：以前只要 Documents 有这个 drive_file_id
+ * 的记录就一律当「已汇入」——但 importDocument_ 是先写 Documents（status:
+ * 'Imported'）才做抽取，如果抽取半路丢例外（网络、API 限额、格式问题），
+ * Documents 记录已经留下了，状态却永远停在 'Imported'（TruthWriter 只增不改，
+ * 没有办法回头改成 Failed）。旧逻辑会把这种「卡住、其实什么都没算出来」的
+ * 文件跟「真的验证完成」的文件混为一谈，永久排除在未来的批次汇入之外——
+ * 相当于静默漏掉这份收入，且没有任何显性信号。现在改成：有 Documents 记录
+ * 不够，还要看这个 document_id 有没有对应到一笔 Verified_Income
+ * （source_document_id 相符）才算真正完成；有 Documents 记录但查无对应
+ * Verified_Income 的，标成 needsRetry: true，交给 consoleBatchImport_ 用
+ * isRetry 路径重新处理，不会被当成新文件（那会被 file_hash 挡成
+ * duplicate），也不会被永久跳过。
  * @param {string} folderId
  * @param {Object} [deps]
- * @return {{folderId: string, files: Array<{id: string, name: string, alreadyImported: boolean}>}}
+ * @return {{folderId: string, files: Array<{id: string, name: string, alreadyImported: boolean, needsRetry: boolean}>}}
  */
 function consoleScanFolder_(folderId, deps) {
   const d = deps || buildConsoleDeps_();
-  const existingIds = {};
-  d.sheetReader.readAll('Documents', DOCUMENTS_COLUMNS).forEach((doc) => { existingIds[doc.drive_file_id] = true; });
-  const files = d.folderScanner.listPdfFiles(folderId).map((f) => ({
-    id: f.id,
-    name: f.name,
-    alreadyImported: !!existingIds[f.id]
-  }));
+  const documentsByFileId = {};
+  d.sheetReader.readAll('Documents', DOCUMENTS_COLUMNS).forEach((doc) => { documentsByFileId[doc.drive_file_id] = doc; });
+  const verifiedSourceDocIds = {};
+  d.sheetReader.readAll('Verified_Income', VERIFIED_INCOME_COLUMNS).forEach((v) => {
+    if (v.source_document_id) verifiedSourceDocIds[v.source_document_id] = true;
+  });
+
+  const files = d.folderScanner.listPdfFiles(folderId).map((f) => {
+    const existingDoc = documentsByFileId[f.id];
+    if (!existingDoc) {
+      return { id: f.id, name: f.name, alreadyImported: false, needsRetry: false };
+    }
+    const isVerified = !!verifiedSourceDocIds[existingDoc.document_id];
+    return { id: f.id, name: f.name, alreadyImported: isVerified, needsRetry: !isVerified };
+  });
   return { folderId, files };
 }
 
@@ -108,13 +129,19 @@ function consoleScanFolder_(folderId, deps) {
  * @param {string} fileName
  * @param {Object} deps
  * @param {boolean} [isRetry]
+ * @param {Array} [documentsRowsSnapshot] 2026-08-23（审计报告 HIGH-2）：批次
+ *   汇入以前每个文件各自重读一次整张 Documents/Verified_Income——N 个文件
+ *   就是 2N 次全表读取。consoleBatchImport_ 现在批次开始前读一次，把快照
+ *   传进来共用；不传就照原本行为自己读一次（单独重试单一文件时用，不需要
+ *   为了一个文件另外组快照）。
+ * @param {Array} [verifiedIncomeSnapshot]
  * @return {Object}
  */
-function consoleImportOneDriveFile_(fileId, fileName, deps, isRetry) {
+function consoleImportOneDriveFile_(fileId, fileName, deps, isRetry, documentsRowsSnapshot, verifiedIncomeSnapshot) {
   try {
-    const documentsRows = deps.sheetReader.readAll('Documents', DOCUMENTS_COLUMNS);
+    const documentsRows = documentsRowsSnapshot || deps.sheetReader.readAll('Documents', DOCUMENTS_COLUMNS);
     const existingDocRow = documentsRows.find((doc) => doc.drive_file_id === fileId);
-    const existingIncomeIds = deps.sheetReader.readAll('Verified_Income', VERIFIED_INCOME_COLUMNS).map((v) => v.income_id);
+    const existingIncomeIds = (verifiedIncomeSnapshot || deps.sheetReader.readAll('Verified_Income', VERIFIED_INCOME_COLUMNS)).map((v) => v.income_id);
 
     let importInput;
     if (isRetry && existingDocRow) {
@@ -165,30 +192,61 @@ function summarizeConsoleResult_(result, fileId, fileName) {
 }
 
 /**
- * 批次汇入：扫描 → 只处理还没汇入的 → 逐一处理，一个文件失败不影响其他
- * 文件继续跑 → 结束后自动重建 Monthly/YTD。
+ * 批次汇入：扫描 → 处理还没真正完成的（全新的，或卡住待重试的）→ 逐一
+ * 处理，一个文件失败不影响其他文件继续跑 → 结束后自动重建 Monthly/YTD。
+ *
+ * 2026-08-23 修正（审计报告 HIGH-1）：GAS Web App 单次执行有 6 分钟上限，
+ * 一次扫出几十份历史文件（例如整年回填）全部串行处理、每份都真的呼叫一次
+ * LLM API，很容易在批次跑到一半就被 GAS 强制中断——不是「失败」，是直接被
+ * 杀掉，连结构化的失败结果都回不来。现在改成有时间预算：接近上限就主动
+ * 停止，回传 stoppedEarly/remainingCount，而不是被硬杀。已经处理好的不会
+ * 重复（scan 每次重新算，Verified_Income 发布本身也幂等），剩下的只要
+ * 再呼叫一次 consoleBatchImport_ 就会接着处理——不需要额外的进度状态。
  * @param {string} folderId
- * @param {Object} [deps] 不给就用 buildConsoleDeps_()（GAS 环境）；测试传假的
- * @return {{scannedCount: number, attemptedCount: number, results: Array, rebuild: Object}}
+ * @param {Object} [deps] 不给就用 buildConsoleDeps_()（GAS 环境）；测试传假的。
+ *   deps.timeBudgetMs/deps.nowMs 是给测试用的覆盖点（分别是时间预算跟取得
+ *   目前时间的函数），不给就用正式的 4.5 分钟预算跟真的 Date.now()。
+ * @return {{scannedCount: number, attemptedCount: number, remainingCount: number, stoppedEarly: boolean, results: Array, rebuild: Object}}
  */
 function consoleBatchImport_(folderId, deps) {
   const d = deps || buildConsoleDeps_();
   const scan = consoleScanFolder_(folderId, d);
   const candidates = scan.files.filter((f) => !f.alreadyImported);
 
-  const results = candidates.map((file, i) => {
-    const r = consoleImportOneDriveFile_(file.id, file.name, d, false);
+  // 2026-08-23（审计报告 HIGH-2）：批次开始前读一次，逐一处理时共用同一份
+  // 快照——不是每个文件各自重读整张表。「快照」意味着批次跑到一半，这份
+  // 资料不会因为前面几笔已经写入而更新，这是刻意的（同一批次里，后面的
+  // 文件判断该不该 retry 用的是批次开始时的状态，不会因为前面文件写入而
+  // 变化），不是忘了刷新。
+  const documentsSnapshot = d.sheetReader.readAll('Documents', DOCUMENTS_COLUMNS);
+  const verifiedIncomeSnapshot = d.sheetReader.readAll('Verified_Income', VERIFIED_INCOME_COLUMNS);
+
+  const nowMs = d.nowMs || (() => Date.now());
+  const timeBudgetMs = d.timeBudgetMs || 4.5 * 60 * 1000; // 6 分钟上限，留 1.5 分钟给 rebuild/收尾
+  const startedAt = nowMs();
+  const results = [];
+  let stoppedEarly = false;
+
+  for (let i = 0; i < candidates.length; i++) {
+    if (nowMs() - startedAt > timeBudgetMs) {
+      stoppedEarly = true;
+      break;
+    }
+    const file = candidates[i];
+    const r = consoleImportOneDriveFile_(file.id, file.name, d, !!file.needsRetry, documentsSnapshot, verifiedIncomeSnapshot);
+    results.push(r);
     // 已知风险（113 文件已经记录）：Drive.Files.copy 在紧密循环里连续调用
     // 曾有零星 "Invalid argument" 失败报告——文件之间留一点节流时间。
     if (typeof Utilities !== 'undefined' && i < candidates.length - 1) {
       Utilities.sleep(1200);
     }
-    return r;
-  });
+  }
 
   return {
     scannedCount: scan.files.length,
-    attemptedCount: candidates.length,
+    attemptedCount: results.length,
+    remainingCount: candidates.length - results.length,
+    stoppedEarly,
     results,
     rebuild: consoleRebuildProjections_(d)
   };
@@ -310,12 +368,18 @@ function consoleSaveLastFolderId_(folderId) {
   }
 }
 
-/** HTMLService 入口。部署成 Web App 后打开的就是这个。 */
+/**
+ * HTMLService 入口。部署成 Web App 后打开的就是这个。
+ * 2026-08-23 修正（审计报告 LOW-3）：改用 DEFAULT（等同不允许被其他网站
+ * iframe 嵌入）——ALLOWALL 是为了故意要给外部网站嵌入用的，这个 Console
+ * 只有 Steven 自己用（webapp 部署已经是 access: MYSELF），没有嵌入需求，
+ * ALLOWALL 只有 Clickjacking 曝险、没有对应的好处。
+ */
 function doGet(e) {
   return HtmlService.createTemplateFromFile('170_OperatorConsole')
     .evaluate()
     .setTitle('Compliance OS Operator Console')
-    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.DEFAULT);
 }
 
 /**

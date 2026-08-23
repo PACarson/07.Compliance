@@ -369,16 +369,27 @@
 
     function renderDashboard(d) {
       var el = document.getElementById('dashboard');
+      var summaries = d.monthlySummaries || [];
       var currentYm = new Date().toISOString().slice(0, 7);
-      var currentMonth = (d.monthlySummaries || []).find(function (m) { return m.year_month === currentYm; });
+      var currentMonth = summaries.find(function (m) { return m.year_month === currentYm; });
+      // 2026-08-23 修正（审计报告 Medium-1）：本月收入以前只认「跟今天日历
+      // 月份完全一致」的那笔——回填历史月份（例如现在是 8 月，汇入的是 7
+      // 月的 Statement）时会一直显示 0.00，即使下面月度导览其实有资料，
+      // 容易让人误以为汇入失败。当月没有资料时改显示最近一个有资料的月份，
+      // 并标注是哪个月，不是不明不白的 0.00。
+      var latestMonth = summaries.length
+        ? summaries.slice().sort(function (a, b) { return a.year_month < b.year_month ? 1 : -1; })[0]
+        : null;
+      var recentLabel = currentMonth ? '本月收入' : (latestMonth ? '最近有资料月份（' + latestMonth.year_month + '）' : '本月收入');
+      var recentValue = currentMonth ? currentMonth.net : (latestMonth ? latestMonth.net : 0);
       el.innerHTML = [
         card('YTD 总收入', d.ytd ? money(d.ytd.net) : '0.00', true),
-        card('本月收入', currentMonth ? money(currentMonth.net) : '0.00', true),
+        card(recentLabel, money(recentValue), true),
         card('累计 Verified 笔数', d.totalVerifiedCount != null ? String(d.totalVerifiedCount) : '0', false),
-        card('涵盖月份数', d.monthlySummaries ? String(d.monthlySummaries.length) : '0', false)
+        card('涵盖月份数', summaries ? String(summaries.length) : '0', false)
       ].join('');
 
-      state.monthlySummaries = d.monthlySummaries || [];
+      state.monthlySummaries = summaries;
       renderDataQualityBanner(d.invalidPeriodIncomeIds || []);
       // 保持目前选中的月份（例如刚汇入完重建），除非它已经不存在；否则预设选最新月份
       if (!state.selectedMonth || !state.monthlySummaries.some(function (m) { return m.year_month === state.selectedMonth; })) {

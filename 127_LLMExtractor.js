@@ -259,20 +259,40 @@ function realLLMExtractorDeps_(now) {
       }
     },
     httpClient: {
+      /**
+       * 2026-08-23 修正（审计报告 HIGH-4）：以前一有非 2xx 就直接抛错，
+       * 429（Rate Limit）、502/503 等短暂性服务端问题在批次汇入几十份
+       * 文件时并不罕见，一次偶发就中断当次那个文件的处理。现在对这两类
+       * 可重试的状态码做指数退避重试（1s/2s/4s），非 2xx 但不可重试的
+       * （例如 400/401，请求本身有问题，重试不会变好）维持原本直接抛错。
+       * UrlFetchApp 本身没有可调的逾时设定（GAS 平台限制，不是这里能修的），
+       * 重试次数因此也要有上限——不能让单一文件的重试吃光整批的 6 分钟
+       * 预算（见 170_OperatorConsole.js 的 consoleBatchImport_ 时间预算）。
+       */
       postJson(url, headers, body) {
-        const response = UrlFetchApp.fetch(url, {
-          method: 'post',
-          contentType: 'application/json',
-          headers,
-          payload: JSON.stringify(body),
-          muteHttpExceptions: true
-        });
-        const code = response.getResponseCode();
-        const text = response.getContentText();
-        if (code < 200 || code >= 300) {
-          throw new Error(`LLM API 回传 HTTP ${code}：${text.slice(0, 500)}`);
+        const maxAttempts = 4; // 第一次 + 最多 3 次重试
+        let lastError;
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          const response = UrlFetchApp.fetch(url, {
+            method: 'post',
+            contentType: 'application/json',
+            headers,
+            payload: JSON.stringify(body),
+            muteHttpExceptions: true
+          });
+          const code = response.getResponseCode();
+          const text = response.getContentText();
+          if (code >= 200 && code < 300) {
+            return JSON.parse(text);
+          }
+          lastError = new Error(`LLM API 回传 HTTP ${code}：${text.slice(0, 500)}`);
+          const isRetryable = code === 429 || code >= 500;
+          if (!isRetryable || attempt === maxAttempts) {
+            throw lastError;
+          }
+          Utilities.sleep(1000 * Math.pow(2, attempt - 1)); // 1s, 2s, 4s
         }
-        return JSON.parse(text);
+        throw lastError;
       }
     },
     now: now || new Date()
