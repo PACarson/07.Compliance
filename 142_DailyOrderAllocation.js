@@ -259,8 +259,15 @@ function parseOrderRowCandidate_(rowBlockRaw) {
 
   const andMoreMatch = flat.match(/\band\s+(\d+)\b/);
   const andMoreCount = andMoreMatch ? parseInt(andMoreMatch[1], 10) : 0;
-  if (rowType === 'Sekaligus' && ids.length < 2 && andMoreCount === 0) {
-    errors.push(`Sekaligus 行订单号数量异常（少于 2 且没有 "and N" 说明）：ids=${JSON.stringify(ids)} :: ${flat.slice(0, 80)}`);
+  // 2026-08-25 修正：原本要求 Sekaligus 至少 2 个订单号，但用真实 W33 PDF
+  // 第 14 页肉眼核对过（Steven 对照官方 PDF 原件确认）：Grab 自己的模板
+  // 确实会印出「Sekaligus + 只有 1 个订单号 + 没有 and N」这种行（同一页
+  // 上下文还同时有 2-ID 跟 "and N" 两种变体作对照），金额也跟当日 subtotal
+  // 对得上——这是真实业务规则，不是解析缺陷。改成只要求「至少 1 个可
+  // 识别订单号」；真正一个订单号都抓不到的情况，交给下面的
+  // `ids.length === 0` 检查落 Needs_Review，不是靠这里的数量门槛。
+  if (rowType === 'Sekaligus' && ids.length === 0 && andMoreCount === 0) {
+    errors.push(`Sekaligus 行一个订单号都没解析出来：${flat.slice(0, 80)}`);
   }
 
   // "Tanpa" 跟 "tunai"（小写，"Tanpa tunai" = 无现金/cashless 的第二个字）
