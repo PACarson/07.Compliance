@@ -261,6 +261,190 @@ function normalizeExtractionCandidate_(candidate, validation, extractorId, extra
   };
 }
 
+// =======================================================================
+// Order-level（Butiran Tempahan）candidate validation —— Phase 4，2026-08-25
+// Steven 明确要求把原本 142 里混在一起的检查拆成三个独立、各自可测试的
+// 层级（Structural / Arithmetic / Traceability），理由是「checksum 过了
+// 不等于整个 extraction 都对」——订单号本身抄错、但金额跟日期都对的话，
+// 光靠 142 的 checksum 抓不到，需要一个专门检查「这个订单号看起来像不像
+// 真的、有没有被保留下来」的独立关卡。三层任何一层没过都是 Needs_Review
+// （不是 Extraction_Failed——形状本身如果没问题，代表这是可以留给人看的
+// candidate，不是要整个丢弃），跟 validateExtractionCandidate_ 同一套
+// stage 语意。
+//
+// 刻意的边界：这几个函数只检查 candidate「内部」自洽，不接收
+// periodStartParts/periodEndParts 之类的外部脉络——candidate 是不是真的
+// 落在「这份 Statement 的」期间范围内，属于跟外部资料对照的判断，交给
+// 142_DailyOrderAllocation.js 既有的 resolveOrderDate_（Phase 3 已经写好
+// 并测过），不在这里重复一份。这里只检查 weekday_name/month_name 本身
+// 是不是「看起来像」合法值（已知枚举），不检查它们在特定一份 Statement
+// 里对不对得上——避免 125 这个通用验证文件反过来依赖 142 这个功能专属
+// 文件，维持既有的依赖方向（106/125 是共用底层，142 才依赖它们，不反过来）。
+// =======================================================================
+
+var ORDER_ID_PATTERN_ = /^(A-|PLAN-\d+-)[A-Z0-9]{4,}$/;
+var KNOWN_WEEKDAY_NAMES_ = ['Ahad', 'Isnin', 'Selasa', 'Rabu', 'Khamis', 'Jumaat', 'Sabtu'];
+var KNOWN_MONTH_NAMES_ = ['Januari', 'Februari', 'Mac', 'April', 'Mei', 'Jun', 'Julai', 'Ogos', 'September', 'Oktober', 'November', 'Disember'];
+var KNOWN_PAYMENT_METHODS_RAW_ = [/^Tanpa\s*tunai$/i, /^Tunai$/i, /^Tunai\s*\/\s*Tanpa\s*tunai$/i];
+
+/**
+ * @param {*} candidate 127_LLMExtractor.js 的 extractOrders() 产出、还没验证过的 candidate
+ * @return {string[]}
+ */
+function validateOrderCandidateSchema_(candidate) {
+  const errors = [];
+  if (!candidate || typeof candidate !== 'object') return ['candidate 本身不是一个 object'];
+  if (!candidate.extraction_scope || !isPositiveInt_(candidate.extraction_scope.first_page_seen) || !isPositiveInt_(candidate.extraction_scope.last_page_seen)) {
+    errors.push('extraction_scope.first_page_seen/last_page_seen 缺失或不是正整数');
+  }
+  if (!Array.isArray(candidate.days)) {
+    errors.push('candidate.days 不是阵列');
+    return errors; // 没有 days 阵列，下面逐项检查没有意义
+  }
+  candidate.days.forEach((day, di) => {
+    const dp = `days[${di}]`;
+    if (typeof day.weekday_name !== 'string') errors.push(`${dp}.weekday_name 缺失或不是字符串`);
+    if (!isPositiveInt_(day.day)) errors.push(`${dp}.day 缺失或不是正整数`);
+    if (typeof day.month_name !== 'string') errors.push(`${dp}.month_name 缺失或不是字符串`);
+    if (typeof day.day_block_complete !== 'boolean') errors.push(`${dp}.day_block_complete 缺失或不是 boolean`);
+    if (day.printed_daily_subtotal !== null && !isFiniteNumber_(day.printed_daily_subtotal)) errors.push(`${dp}.printed_daily_subtotal 既不是数字也不是 null`);
+    if (!Array.isArray(day.orders)) {
+      errors.push(`${dp}.orders 不是阵列`);
+      return;
+    }
+    day.orders.forEach((order, oi) => {
+      const op = `${dp}.orders[${oi}]`;
+      if (order.order_row_type !== 'Tunggal' && order.order_row_type !== 'Sekaligus') errors.push(`${op}.order_row_type 不是 Tunggal 或 Sekaligus：${JSON.stringify(order.order_row_type)}`);
+      if (typeof order.platform_raw !== 'string' || !order.platform_raw) errors.push(`${op}.platform_raw 缺失`);
+      if (!Array.isArray(order.order_ids_raw)) errors.push(`${op}.order_ids_raw 不是阵列`);
+      if (!Number.isInteger(order.and_more_count) || order.and_more_count < 0) errors.push(`${op}.and_more_count 缺失或不是非负整数`);
+      if (typeof order.payment_method_raw !== 'string' || !order.payment_method_raw) errors.push(`${op}.payment_method_raw 缺失`);
+      ['base_income', 'other_income', 'income_adjustment', 'net_income'].forEach((f) => {
+        if (!isFiniteNumber_(order[f])) errors.push(`${op}.${f} 缺失或不是数字`);
+      });
+      if (!isPositiveInt_(order.source_page)) errors.push(`${op}.source_page 缺失或不是正整数`);
+      if (typeof order.low_confidence !== 'boolean') errors.push(`${op}.low_confidence 缺失或不是 boolean`);
+    });
+  });
+  return errors;
+}
+
+/**
+ * Structural Integrity —— Steven 2026-08-25 §2 明确列的项目：row type 合法、
+ * 订单号格式符合已知 Grab pattern、Sekaligus >= 1 个 ID（今天用 W33 真实
+ * PDF 核实过的规则，不是 >= 2）、and N / bundled count 逻辑一致、payment
+ * method 是已知值。只检查 candidate 内部一致，不比对外部 period（见文件
+ * 顶端的边界说明）。
+ * @param {Object} candidate 已经过 validateOrderCandidateSchema_ 的 candidate
+ * @return {string[]}
+ */
+function validateOrderCandidateStructural_(candidate) {
+  const errors = [];
+  candidate.days.forEach((day, di) => {
+    const dp = `days[${di}]`;
+    if (KNOWN_WEEKDAY_NAMES_.indexOf(day.weekday_name) === -1) errors.push(`${dp}.weekday_name 不是已知的马来文星期几：${day.weekday_name}`);
+    if (KNOWN_MONTH_NAMES_.indexOf(day.month_name) === -1) errors.push(`${dp}.month_name 不是已知的马来文月份：${day.month_name}`);
+    if (day.day < 1 || day.day > 31) errors.push(`${dp}.day 超出 1-31 范围：${day.day}`);
+
+    day.orders.forEach((order, oi) => {
+      const op = `${dp}.orders[${oi}]`;
+      const idCount = order.order_ids_raw.length;
+
+      if (order.order_row_type === 'Sekaligus' && idCount === 0 && order.and_more_count === 0) {
+        errors.push(`${op}: Sekaligus 一个订单号都没有、and_more_count 也是 0，无法识别`);
+      }
+      if (order.order_row_type === 'Tunggal' && idCount > 1) {
+        errors.push(`${op}: 标示为 Tunggal 却有 ${idCount} 个订单号，跟单一订单矛盾`);
+      }
+      if (order.order_row_type === 'Tunggal' && order.and_more_count > 0) {
+        errors.push(`${op}: 标示为 Tunggal 却有 and_more_count=${order.and_more_count}，"and N" 只应该出现在 Sekaligus`);
+      }
+      order.order_ids_raw.forEach((id) => {
+        if (!ORDER_ID_PATTERN_.test(id)) errors.push(`${op}: 订单号格式不符合已知 Grab pattern（A-/PLAN-N- 前缀）：${JSON.stringify(id)}`);
+      });
+      if (!KNOWN_PAYMENT_METHODS_RAW_.some((re) => re.test(order.payment_method_raw))) {
+        errors.push(`${op}: payment_method_raw 不是已知值：${JSON.stringify(order.payment_method_raw)}`);
+      }
+    });
+  });
+  return errors;
+}
+
+/**
+ * Arithmetic Integrity（订单层级）—— 跟 validateCandidateArithmetic_ 同一个
+ * 精神，换成逐笔订单的 base+other+adjustment vs net。142_DailyOrderAllocation.js
+ * 的文字解析路径（parseOrderRowCandidate_）也用同一个容差常数
+ * EXTRACTION_TOLERANCE_，两条路径（文字 regex / Gemini JSON）共用同一个
+ * 算术判准，不是各自维护一份可能悄悄不一致的容差。
+ * @param {Object} candidate 已经过 schema 验证的 candidate
+ * @return {string[]}
+ */
+function validateOrderCandidateArithmetic_(candidate) {
+  const errors = [];
+  candidate.days.forEach((day, di) => {
+    day.orders.forEach((order, oi) => {
+      const recomputed = round2_(order.base_income + order.other_income + order.income_adjustment);
+      const diff = round2_(order.net_income - recomputed);
+      if (Math.abs(diff) > EXTRACTION_TOLERANCE_) {
+        errors.push(`days[${di}].orders[${oi}]: base(${order.base_income})+other(${order.other_income})+adjustment(${order.income_adjustment})=${recomputed}，跟 net_income(${order.net_income}) 对不上，差 ${diff}`);
+      }
+    });
+  });
+  return errors;
+}
+
+/**
+ * Traceability / Identity Integrity —— Steven 2026-08-25 §2 明确要求：
+ * 原始订单号必须保留、不能被 Gemini 自己「修正」成看起来更合理的样子。
+ * 这一层没有能独立核对的外部证据（不像 arithmetic 有算术关系可以打脸），
+ * 所以检查的是「有没有明显被动过手脚」的形状特征，而不是「这个订单号
+ * 本身对不对」——后者本来就没有独立信息源可以核对，这也是为什么文首
+ * 强调「checksum 过不代表订单号是对的」这个盲点没有被这一层解决，只是
+ * 被更明确地圈出来。
+ * @param {Object} candidate
+ * @return {string[]}
+ */
+function validateOrderCandidateTraceability_(candidate) {
+  const errors = [];
+  candidate.days.forEach((day, di) => {
+    day.orders.forEach((order, oi) => {
+      const op = `days[${di}].orders[${oi}]`;
+      const idCount = order.order_ids_raw.length;
+      if (order.order_row_type === 'Sekaligus' && idCount + order.and_more_count < 1) {
+        errors.push(`${op}: Sekaligus 订单号数量（含 and N）合计为 0，无法追溯`);
+      }
+      // 同一行内部出现重复订单号，通常代表 Gemini 把同一个号码读了两次
+      // 而不是真的有两笔一样的订单——保留下来让人看，不要静默去重
+      // （去重本身就是一种"修正"，不该在 candidate 阶段发生）。
+      const dupIds = order.order_ids_raw.filter((id, idx) => order.order_ids_raw.indexOf(id) !== idx);
+      if (dupIds.length > 0) {
+        errors.push(`${op}: order_ids_raw 内部有重复订单号，可能是读取重复而非真实重复：${JSON.stringify(dupIds)}`);
+      }
+    });
+  });
+  return errors;
+}
+
+/**
+ * 外部唯一入口——order-level 版本的 validateExtractionCandidate_。
+ * @param {*} candidate
+ * @return {{valid: boolean, stage: (string|null), errors: string[]}}
+ */
+function validateOrderExtractionCandidate_(candidate) {
+  const schemaErrors = validateOrderCandidateSchema_(candidate);
+  if (schemaErrors.length > 0) {
+    return { valid: false, stage: 'Extraction_Failed', errors: schemaErrors };
+  }
+  const errors = []
+    .concat(validateOrderCandidateStructural_(candidate))
+    .concat(validateOrderCandidateArithmetic_(candidate))
+    .concat(validateOrderCandidateTraceability_(candidate));
+  if (errors.length > 0) {
+    return { valid: false, stage: 'Needs_Review', errors };
+  }
+  return { valid: true, stage: null, errors: [] };
+}
+
 if (typeof module !== 'undefined') {
   module.exports = {
     EXTRACTION_TOLERANCE_,
@@ -270,6 +454,14 @@ if (typeof module !== 'undefined') {
     validateExtractionCandidate_,
     normalizeExtractionCandidate_,
     isoWeekFromParts_,
-    isoDateStringFromParts_
+    isoDateStringFromParts_,
+    ORDER_ID_PATTERN_,
+    KNOWN_WEEKDAY_NAMES_,
+    KNOWN_MONTH_NAMES_,
+    validateOrderCandidateSchema_,
+    validateOrderCandidateStructural_,
+    validateOrderCandidateArithmetic_,
+    validateOrderCandidateTraceability_,
+    validateOrderExtractionCandidate_
   };
 }

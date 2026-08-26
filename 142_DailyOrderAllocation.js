@@ -54,6 +54,7 @@
 if (typeof require === 'function') {
   var { round2_, normalizeIsoDateString_ } = require('./106_Utils.js');
   var { yearMonthFromIsoDate_ } = require('./160_MonthlyProjection.js');
+  var { validateOrderExtractionCandidate_ } = require('./125_ExtractionValidation.js');
 }
 
 var CHECKSUM_TOLERANCE_ = 0.01; // 跟 125_ExtractionValidation.js 的 EXTRACTION_TOLERANCE_ 同一个精度基准
@@ -544,6 +545,259 @@ function orderDateToYearMonth_(isoDate) {
   return yearMonthFromIsoDate_(isoDate);
 }
 
+// =======================================================================
+// Gemini extraction 对接 —— Phase 4，2026-08-25。127_LLMExtractor.js 的
+// extractOrders() 产出、125_ExtractionValidation.js 的
+// validateOrderExtractionCandidate_() 验证过的 candidate，在这里映射成
+// 跟上面文字解析路径完全一样的 candidate 形状——computeDailyChecksum_ /
+// computeStatementChecksum_ / matchInsentifLineDate_ 等等因此完全不用
+// 因为换了资料来源而改一行。
+// =======================================================================
+
+/**
+ * 一个 Gemini 回报的 order 物件（已经过 125 的四层验证）→ 跟
+ * parseOrderRowCandidate_ 完全一样形状的 candidate，外加 source_page
+ * （文字解析路径没有页码资讯，这个栏位是新增的，选填，不影响既有消费者）。
+ * 日期用既有、Phase 3 已测过的 resolveOrderDate_——125 刻意不检查这一步
+ * （见 125_ExtractionValidation.js 顶端的边界说明），这里才是真正拿这份
+ * Statement 的 period 去比对的地方。
+ * @param {Object} geminiDay candidate.days[i]（已通过 125 验证）
+ * @param {Object} geminiOrder geminiDay.orders[j]
+ * @param {{year:number,month:number,day:number}} periodStartParts
+ * @param {{year:number,month:number,day:number}} periodEndParts
+ * @return {{valid:boolean, errors:string[], candidate:(Object|null)}}
+ */
+function candidateFromGeminiOrderRow_(geminiDay, geminiOrder, periodStartParts, periodEndParts) {
+  const dateResult = resolveDateFromDayMonth_(geminiDay.day, geminiDay.month_name, periodStartParts, periodEndParts);
+  if (!dateResult.ok) {
+    return { valid: false, errors: [`日期无法在 statement period 内解析：${dateResult.reason}`], candidate: null };
+  }
+  if (KNOWN_WEEKDAY_MISMATCH_CHECK_(geminiDay.weekday_name, dateResult.isoDate)) {
+    return { valid: false, errors: [`weekday_name (${geminiDay.weekday_name}) 跟解析出来的日期 ${dateResult.isoDate} 实际的星期几对不上`], candidate: null };
+  }
+  const platform = PLATFORM_NAMES_.find((p) => geminiOrder.platform_raw.indexOf(p) !== -1) || null;
+  if (!platform) {
+    return { valid: false, errors: [`platform_raw 无法归类到已知 platform：${geminiOrder.platform_raw}`], candidate: null };
+  }
+  const idPrefix = platform === 'GrabExpress' ? 'PLAN-1-' : 'A-';
+  const idsText = geminiOrder.order_ids_raw.join(' / ') + (geminiOrder.and_more_count > 0 ? ` and ${geminiOrder.and_more_count}` : '');
+  const hasTanpa = /Tanpa\s*tunai/i.test(geminiOrder.payment_method_raw);
+  const hasTunai = /(?:^|\/)\s*Tunai\s*(?:$|\/)/i.test(geminiOrder.payment_method_raw) || /^Tunai$/i.test(geminiOrder.payment_method_raw.trim());
+  const paymentMethod = (hasTanpa && hasTunai) ? 'Mixed' : (hasTanpa ? 'Tanpa_Tunai' : (hasTunai ? 'Tunai' : null));
+
+  return {
+    valid: true,
+    errors: [],
+    candidate: {
+      order_date: dateResult.isoDate,
+      order_row_type: geminiOrder.order_row_type,
+      platform,
+      order_id_primary: geminiOrder.order_ids_raw[0] || null,
+      order_id_raw: idsText,
+      bundled_order_count: geminiOrder.order_row_type === 'Tunggal' ? 1 : (geminiOrder.order_ids_raw.length + geminiOrder.and_more_count),
+      order_identity_status: geminiOrder.and_more_count > 0 ? 'Partially_Known' : 'Fully_Known',
+      payment_method: paymentMethod,
+      base_income: round2_(geminiOrder.base_income),
+      other_income: round2_(geminiOrder.other_income),
+      income_adjustment: round2_(geminiOrder.income_adjustment),
+      net_income: round2_(geminiOrder.net_income),
+      source_page: geminiOrder.source_page,
+      extraction_method: 'Gemini_Structured_v1',
+      low_confidence: !!geminiOrder.low_confidence
+    }
+  };
+}
+
+/** weekday_name 跟实际算出来的日期是否吻合——防呆用（125 只查 weekday_name
+ * 是不是已知枚举，没有拿它去跟 day/month_name 交叉核对，这里补上）。 */
+function KNOWN_WEEKDAY_MISMATCH_CHECK_(weekdayName, isoDate) {
+  const idx = WEEKDAY_NAMES_.indexOf(weekdayName);
+  if (idx === -1) return true; // 未知名称，交给上面统一报错
+  const d = new Date(isoDate + 'T00:00:00Z');
+  return d.getUTCDay() !== idx;
+}
+
+/**
+ * 合并多个 page-range chunk 的 Gemini candidate（fallback 用）——按
+ * (weekday_name, day, month_name) 当 day-key。同一个 day-key 只在一个
+ * chunk 出现、且该 chunk 自报 day_block_complete=true → 直接采用。
+ * 出现在多个 chunk（跨块边界的日期分组）→ 合并 orders 并对同一个
+ * order（用 order_ids_raw 的 JSON 序列化 + source_page 当 identity）
+ * 去重；如果两个 chunk 对同一个 printed_daily_subtotal 报的数字不一样，
+ * 或者合并后仍然没有任何一个 chunk 报出这一天的 printed_daily_subtotal，
+ * 都不要猜——整份合并结果标记为需要人工看，而不是挑一个数字硬用。
+ * @param {Array<{candidate: Object, pageRange: {firstPage:number,lastPage:number}}>} chunkResults
+ * @return {{merged: (Object|null), errors: string[]}}
+ */
+function mergeChunkedExtractionResults_(chunkResults) {
+  const errors = [];
+  const byKey = new Map();
+  chunkResults.forEach(({ candidate }) => {
+    candidate.days.forEach((day) => {
+      const key = `${day.weekday_name}|${day.day}|${day.month_name}`;
+      if (!byKey.has(key)) {
+        byKey.set(key, { weekday_name: day.weekday_name, day: day.day, month_name: day.month_name, subtotals: [], orders: [], anyComplete: false });
+      }
+      const entry = byKey.get(key);
+      if (day.printed_daily_subtotal !== null) entry.subtotals.push(day.printed_daily_subtotal);
+      if (day.day_block_complete) entry.anyComplete = true;
+      entry.orders.push(...day.orders);
+    });
+  });
+
+  const mergedDays = [];
+  byKey.forEach((entry, key) => {
+    const uniqueSubtotals = [...new Set(entry.subtotals.map((s) => round2_(s)))];
+    if (uniqueSubtotals.length > 1) {
+      errors.push(`日期分组 ${key} 在不同 chunk 里报出不一致的 printed_daily_subtotal：${JSON.stringify(uniqueSubtotals)}`);
+    }
+    // 同一笔订单可能因为 chunk 重叠范围被两个 chunk 都看到并各自报一次——
+    // 用「order_ids_raw + source_page」当 identity 去重，不是信任 chunk
+    // 自己讲的 day_block_complete 就假设没有重叠。
+    const seen = new Set();
+    const dedupedOrders = [];
+    entry.orders.forEach((o) => {
+      const identity = JSON.stringify(o.order_ids_raw) + '@' + o.source_page;
+      if (seen.has(identity)) return;
+      seen.add(identity);
+      dedupedOrders.push(o);
+    });
+    mergedDays.push({
+      weekday_name: entry.weekday_name, day: entry.day, month_name: entry.month_name,
+      day_block_complete: entry.anyComplete,
+      printed_daily_subtotal: uniqueSubtotals.length === 1 ? uniqueSubtotals[0] : null,
+      orders: dedupedOrders
+    });
+    if (uniqueSubtotals.length === 0) {
+      errors.push(`日期分组 ${key} 合并后没有任何 chunk 报出 printed_daily_subtotal，无法做 daily checksum`);
+    }
+  });
+
+  return { merged: { extraction_scope: { first_page_seen: Math.min(...chunkResults.map((c) => c.pageRange.firstPage)), last_page_seen: Math.max(...chunkResults.map((c) => c.pageRange.lastPage)) }, days: mergedDays, notes: '' }, errors };
+}
+
+/**
+ * Phase 4 顶层协调——「整份 PDF 一次呼叫」是首选，失败/验证不过才 fallback
+ * 到分块（Steven 2026-08-25 §1）。CMP-P13 精神：呼叫方不需要知道内部
+ * 到底试了几次、走了哪条路，只关心最后拿到的是一个 Fully_Allocated /
+ * Partially_Allocated / Needs_Review 的结果，不会是例外中断整个 Statement。
+ *
+ * 重要老实话（写在这里，不要假装没有）：这个函数的 fallback 分支——
+ * 真的把 PDF 切成 page range 分别丢给 Gemini、再合并——目前只用合成的
+ * fake extractor 测过合并逻辑本身对不对，没有、也没办法在这个环境里对
+ * 真的 Gemini API 验证过"分段之后 Gemini 实际会不会给出可以合并的结果"。
+ * Phase 4 report 里会明确列出来，这不是隐藏的限制。
+ *
+ * @param {{fileId:string, mimeType:string, documentId:string, totalPages:number}} document
+ * @param {{netDeliveryIncome:number, periodStartParts:Object, periodEndParts:Object, verifiedIncomeId:string}} verifiedIncomeContext
+ * @param {{extractor: Object, now: (Date|undefined)}} deps extractor 必须有 extractOrders(document, pageRangeOrNull)
+ * @return {Object} { batchId, allocationStatus, dailyAllocations, orderRows, nonRetryableErrors, attempts }
+ */
+function runGeminiOrderExtractionWithFallback_(document, verifiedIncomeContext, deps) {
+  const now = deps.now instanceof Date ? deps.now : new Date();
+  const batchId = `CMP-OALB-${verifiedIncomeContext.verifiedIncomeId}-${now.getTime()}`;
+  const attempts = [];
+
+  function tryValidate(candidate, label) {
+    const validation = validateOrderExtractionCandidate_(candidate);
+    attempts.push({ label, stage: validation.stage, errorCount: validation.errors.length });
+    return validation;
+  }
+
+  // 第一次尝试：整份文件一次呼叫（首选路径）
+  let fullCandidate = null;
+  let fullValidation = null;
+  try {
+    fullCandidate = deps.extractor.extractOrders(document, null).candidate;
+    fullValidation = tryValidate(fullCandidate, 'full_document');
+  } catch (err) {
+    attempts.push({ label: 'full_document', stage: 'Extraction_Failed', errorCount: 1, exception: String(err && err.message || err) });
+  }
+
+  let finalCandidate = null;
+  if (fullValidation && fullValidation.valid) {
+    finalCandidate = fullCandidate;
+  } else {
+    // Fallback：切成两个有 1 页重叠的 page range 各打一次。用这么简单的
+    // 二分而不是更细的分块，是因为目前完全没有真实证据支持「细到几页
+    // 一块比较可靠」这个假设——细节交给 Phase 5 真的对真实 Gemini 测试
+    // 之后再调，这里先给一个能动、逻辑上站得住的版本。
+    const totalPages = document.totalPages;
+    const midpoint = Math.ceil(totalPages / 2);
+    const ranges = [
+      { firstPage: 1, lastPage: Math.min(midpoint + 1, totalPages) },
+      { firstPage: Math.max(midpoint, 1), lastPage: totalPages }
+    ];
+    const chunkResults = [];
+    let anyChunkException = false;
+    ranges.forEach((range) => {
+      try {
+        const candidate = deps.extractor.extractOrders(document, range).candidate;
+        const validation = tryValidate(candidate, `chunk_${range.firstPage}-${range.lastPage}`);
+        if (validation.valid) {
+          chunkResults.push({ candidate, pageRange: range });
+        }
+      } catch (err) {
+        anyChunkException = true;
+        attempts.push({ label: `chunk_${range.firstPage}-${range.lastPage}`, stage: 'Extraction_Failed', errorCount: 1, exception: String(err && err.message || err) });
+      }
+    });
+
+    if (chunkResults.length > 0) {
+      const { merged, errors: mergeErrors } = mergeChunkedExtractionResults_(chunkResults);
+      const mergedValidation = tryValidate(merged, 'merged_chunks');
+      if (mergedValidation.valid && mergeErrors.length === 0) {
+        finalCandidate = merged;
+      } else {
+        attempts.push({ label: 'merged_chunks_rejected', stage: 'Needs_Review', errorCount: mergeErrors.length + mergedValidation.errors.length, mergeErrors, validationErrors: mergedValidation.errors });
+      }
+    } else if (anyChunkException) {
+      attempts.push({ label: 'all_chunks_failed', stage: 'Extraction_Failed', errorCount: 1 });
+    }
+  }
+
+  if (!finalCandidate) {
+    // 全部路径都没能产生一个通过验证的 candidate——Steven 明确要求：
+    // 不能让整个 Statement 因此失败/中断，回一个明确的 Needs_Review 结果，
+    // 不抛例外、不中断呼叫方的流程（例如批次汇入其他 Statement）。
+    return { batchId, allocationStatus: 'Needs_Review', dailyAllocations: [], orderRows: [], nonRetryableErrors: attempts, attempts };
+  }
+
+  // finalCandidate 已经通过 125 的四层验证，逐笔映射成既有 candidate 形状，
+  // 复用 Phase 3 完全没变过的 checksum/allocation 逻辑。
+  const orderRows = [];
+  const mappingErrors = [];
+  finalCandidate.days.forEach((day) => {
+    day.orders.forEach((order) => {
+      const mapped = candidateFromGeminiOrderRow_(day, order, verifiedIncomeContext.periodStartParts, verifiedIncomeContext.periodEndParts);
+      if (mapped.valid) orderRows.push(mapped.candidate);
+      else mappingErrors.push({ day: `${day.weekday_name} ${day.day} ${day.month_name}`, errors: mapped.errors });
+    });
+  });
+
+  const dailyAllocations = finalCandidate.days.map((day) => {
+    const rowsForDay = orderRows.filter((r) => {
+      const d = new Date(r.order_date + 'T00:00:00Z');
+      return WEEKDAY_NAMES_[d.getUTCDay()] === day.weekday_name && d.getUTCDate() === day.day;
+    });
+    const checksum = computeDailyChecksum_(rowsForDay, day.printed_daily_subtotal);
+    return {
+      date: rowsForDay.length > 0 ? rowsForDay[0].order_date : null,
+      order_row_count: rowsForDay.length,
+      net_delivery_income: checksum.calculatedTotal,
+      printed_daily_subtotal: checksum.printedSubtotal,
+      checksum_difference: checksum.difference,
+      checksum_status: checksum.status
+    };
+  });
+
+  const allDaysMatched = dailyAllocations.length > 0 && dailyAllocations.every((d) => d.checksum_status === 'Matched') && mappingErrors.length === 0;
+  const statementChecksum = computeStatementChecksum_(dailyAllocations, verifiedIncomeContext.netDeliveryIncome);
+  const allocationStatus = (allDaysMatched && statementChecksum.status === 'Matched') ? 'Fully_Allocated' : 'Needs_Review';
+
+  return { batchId, allocationStatus, dailyAllocations, orderRows, nonRetryableErrors: mappingErrors, attempts, statementChecksum };
+}
+
 if (typeof module !== 'undefined') {
   module.exports = {
     CHECKSUM_TOLERANCE_,
@@ -566,6 +820,9 @@ if (typeof module !== 'undefined') {
     matchInsentifLineDate_,
     matchExplicitPeriodReference_,
     matchBayaranLainLainDate_,
-    orderDateToYearMonth_
+    orderDateToYearMonth_,
+    candidateFromGeminiOrderRow_,
+    mergeChunkedExtractionResults_,
+    runGeminiOrderExtractionWithFallback_
   };
 }

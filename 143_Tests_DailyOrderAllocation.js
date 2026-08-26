@@ -243,6 +243,74 @@ function runDailyOrderAllocationTests_() {
   const jan2026 = round2_((DOAL_W01_EXPECTED_DAILY_['2026-01-01'] + DOAL_W01_EXPECTED_DAILY_['2026-01-02'] + DOAL_W01_EXPECTED_DAILY_['2026-01-03'] + DOAL_W01_EXPECTED_DAILY_['2026-01-04']));
   results.push({ name: 'TEST 跨月投影: W01 正确拆成 2025-12 / 2026-01 两个月份桶，不是整周塞一个月', pass: Math.abs(grouped['2025-12'] - dec2025) < 0.01 && Math.abs(grouped['2026-01'] - jan2026) < 0.01, actual: grouped, expected: { '2025-12': dec2025, '2026-01': jan2026 } });
 
+  // ---- Phase 4（2026-08-25）：Gemini candidate 映射 + chunk 合并 + fallback 编排 ----
+  const { candidateFromGeminiOrderRow_, mergeChunkedExtractionResults_, runGeminiOrderExtractionWithFallback_ } = require('./142_DailyOrderAllocation.js');
+
+  // 用 Phase 1 已经验证过的真实数字构造"如果 Gemini 回报正确"的样子——
+  // 这是证明映射逻辑本身对不对，不是证明 Gemini 真的会这样回报（那需要
+  // 真的打 API，这个环境做不到，见 Phase 4 report）。
+  const geminiDaySample = { weekday_name: 'Ahad', day: 4, month_name: 'Januari', day_block_complete: true, printed_daily_subtotal: 5.50 };
+  const geminiOrderSample = { order_row_type: 'Tunggal', platform_raw: 'GrabFood', order_ids_raw: ['A-8QLIOUFWWKVDAV'], and_more_count: 0, payment_method_raw: 'Tanpa tunai', base_income: 4.10, other_income: 1.40, income_adjustment: 0, net_income: 5.50, source_page: 7, low_confidence: false };
+  const mapped = candidateFromGeminiOrderRow_(geminiDaySample, geminiOrderSample, DOAL_W01_PERIOD_START_, DOAL_W01_PERIOD_END_);
+  results.push({ name: 'Phase4.映射: Gemini candidate 正确映射出 order_date=2026-01-04', pass: mapped.valid && mapped.candidate.order_date === '2026-01-04', actual: mapped, expected: 'order_date=2026-01-04' });
+  results.push({ name: 'Phase4.映射: 保留 order_id_raw 原文，跟文字解析路径输出同一个形状', pass: mapped.valid && mapped.candidate.order_id_raw === 'A-8QLIOUFWWKVDAV' && mapped.candidate.net_income === 5.50, actual: mapped.candidate, expected: 'order_id_raw/net_income 正确' });
+
+  const wrongWeekday = candidateFromGeminiOrderRow_(Object.assign({}, geminiDaySample, { weekday_name: 'Sabtu' }), geminiOrderSample, DOAL_W01_PERIOD_START_, DOAL_W01_PERIOD_END_);
+  results.push({ name: 'Phase4.映射: weekday_name 跟实际日期对不上（4 Jan 2026 其实是 Ahad 不是 Sabtu）→ 明确拒绝，不静默接受', pass: wrongWeekday.valid === false, actual: wrongWeekday, expected: 'valid:false' });
+
+  // ---- chunk 合并：两个有重叠的 page range 各自看到同一天的一部分订单 ----
+  const chunkA = { candidate: { extraction_scope: { first_page_seen: 7, last_page_seen: 8 }, days: [{ weekday_name: 'Ahad', day: 4, month_name: 'Januari', day_block_complete: false, printed_daily_subtotal: null, orders: [Object.assign({}, geminiOrderSample, { source_page: 7 })] }], notes: '' }, pageRange: { firstPage: 1, lastPage: 8 } };
+  const chunkB = { candidate: { extraction_scope: { first_page_seen: 8, last_page_seen: 9 }, days: [{ weekday_name: 'Ahad', day: 4, month_name: 'Januari', day_block_complete: true, printed_daily_subtotal: 205.50, orders: [Object.assign({}, geminiOrderSample, { source_page: 7 }), { order_row_type: 'Tunggal', platform_raw: 'GrabFood', order_ids_raw: ['A-8QLEFDAGXXXRAV'], and_more_count: 0, payment_method_raw: 'Tanpa tunai', base_income: 3.70, other_income: 2.10, income_adjustment: 0, net_income: 5.80, source_page: 8, low_confidence: false }] }], notes: '' }, pageRange: { firstPage: 7, lastPage: 24 } };
+  const mergeResult = mergeChunkedExtractionResults_([chunkA, chunkB]);
+  results.push({ name: 'Phase4.合并: 两个 chunk 都报到的同一笔订单（source_page 7 的 8QLIOUFWWKVDAV）不会被重复计入', pass: mergeResult.merged.days[0].orders.length === 2, actual: mergeResult.merged.days[0].orders.length, expected: 2 });
+  results.push({ name: 'Phase4.合并: printed_daily_subtotal 取有报出数字的那个 chunk（chunk A 是 null）', pass: mergeResult.merged.days[0].printed_daily_subtotal === 205.50, actual: mergeResult.merged.days[0].printed_daily_subtotal, expected: 205.50 });
+  results.push({ name: 'Phase4.合并: 没有不一致的 subtotal，没有 merge error', pass: mergeResult.errors.length === 0, actual: mergeResult.errors, expected: [] });
+
+  const conflictingChunk = { candidate: { extraction_scope: { first_page_seen: 8, last_page_seen: 9 }, days: [{ weekday_name: 'Ahad', day: 4, month_name: 'Januari', day_block_complete: true, printed_daily_subtotal: 999.99, orders: [] }], notes: '' }, pageRange: { firstPage: 7, lastPage: 24 } };
+  const conflictMerge = mergeChunkedExtractionResults_([chunkB, conflictingChunk]);
+  results.push({ name: 'Phase4.合并: 两个 chunk 对同一天的 printed_daily_subtotal 报出不同数字 → 明确 merge error，不猜哪个对', pass: conflictMerge.errors.length > 0, actual: conflictMerge.errors, expected: '至少一个 error' });
+
+  // ---- 顶层 fallback 编排：mock extractor 模拟三种情境 ----
+  function mockExtractor_(fullResult, chunkResults) {
+    let callCount = 0;
+    return {
+      extractOrders(document, pageRange) {
+        callCount++;
+        if (pageRange === null) {
+          if (fullResult instanceof Error) throw fullResult;
+          return { candidate: fullResult };
+        }
+        const idx = pageRange.firstPage === 1 ? 0 : 1;
+        const r = chunkResults[idx];
+        if (r instanceof Error) throw r;
+        return { candidate: r };
+      },
+      _callCount() { return callCount; }
+    };
+  }
+  const goodFullCandidate = {
+    extraction_scope: { first_page_seen: 1, last_page_seen: 24 },
+    days: [{ weekday_name: 'Ahad', day: 4, month_name: 'Januari', day_block_complete: true, printed_daily_subtotal: 5.50, orders: [geminiOrderSample] }],
+    notes: ''
+  };
+  const vic = { netDeliveryIncome: 5.50, periodStartParts: DOAL_W01_PERIOD_START_, periodEndParts: DOAL_W01_PERIOD_END_, verifiedIncomeId: 'CMP-VI-TEST' };
+
+  const happyPath = runGeminiOrderExtractionWithFallback_({ fileId: 'f1', documentId: 'doc1', totalPages: 24 }, vic, { extractor: mockExtractor_(goodFullCandidate, []), now: new Date('2026-08-25T00:00:00Z') });
+  results.push({ name: 'Phase4.编排: 整份文件一次就成功 → Fully_Allocated，不触发 fallback', pass: happyPath.allocationStatus === 'Fully_Allocated' && happyPath.attempts.length === 1, actual: happyPath.allocationStatus, expected: 'Fully_Allocated' });
+
+  const fallbackSucceeds = runGeminiOrderExtractionWithFallback_(
+    { fileId: 'f1', documentId: 'doc1', totalPages: 24 }, vic,
+    { extractor: mockExtractor_({ extraction_scope: { first_page_seen: 1, last_page_seen: 24 }, days: 'broken', notes: '' }, [chunkA.candidate, chunkB.candidate]), now: new Date('2026-08-25T00:00:00Z') }
+  );
+  results.push({ name: 'Phase4.编排: 整份文件 schema 坏掉 → 自动 fallback 到分块，分块合并后成功', pass: fallbackSucceeds.attempts.some((a) => a.label === 'full_document' && a.stage === 'Extraction_Failed') && fallbackSucceeds.attempts.some((a) => a.label === 'merged_chunks'), actual: fallbackSucceeds.attempts.map((a) => a.label + ':' + a.stage), expected: '包含 full_document:Extraction_Failed 和 merged_chunks' });
+
+  const totalFailure = runGeminiOrderExtractionWithFallback_(
+    { fileId: 'f1', documentId: 'doc1', totalPages: 24 }, vic,
+    { extractor: mockExtractor_(new Error('network down'), [new Error('network down'), new Error('network down')]), now: new Date('2026-08-25T00:00:00Z') }
+  );
+  results.push({ name: 'Phase4.编排: 整份文件跟两个 chunk 全部失败 → Needs_Review，不抛例外中断整个 Statement（Steven 明确要求）', pass: totalFailure.allocationStatus === 'Needs_Review' && Array.isArray(totalFailure.dailyAllocations), actual: totalFailure.allocationStatus, expected: 'Needs_Review（没有抛例外）' });
+  results.push({ name: 'Phase4.编排: batchId 带正确前缀跟 verifiedIncomeId，符合已确认的 idempotency 格式', pass: /^CMP-OALB-CMP-VI-TEST-\d+$/.test(totalFailure.batchId), actual: totalFailure.batchId, expected: 'CMP-OALB-CMP-VI-TEST-<timestamp>' });
+
   // ---- 7: repeated header / footer 不被误判成订单行 ----
   results.push({ name: 'TEST 7: repeated header/footer 不产生假的 invalid-row 噪音（W01 invalid 数量应该很小，不是几十笔）', pass: w01.invalid.length < 5, actual: w01.invalid.length, expected: '< 5' });
   results.push({ name: 'TEST 7b: repeated header/footer 不产生假的 invalid-row 噪音（W33）', pass: w33.invalid.length < 5, actual: w33.invalid.length, expected: '< 5' });

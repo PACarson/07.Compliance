@@ -7,7 +7,9 @@
 if (typeof require === 'function') {
   var {
     validateCandidateSchema_, validateCandidatePeriod_, validateCandidateArithmetic_,
-    validateExtractionCandidate_, normalizeExtractionCandidate_, isoWeekFromParts_
+    validateExtractionCandidate_, normalizeExtractionCandidate_, isoWeekFromParts_,
+    validateOrderCandidateSchema_, validateOrderCandidateStructural_, validateOrderCandidateArithmetic_,
+    validateOrderCandidateTraceability_, validateOrderExtractionCandidate_
   } = require('./125_ExtractionValidation.js');
   require('./106_Utils.js');
   var { assertEqual_ } = require('./105_TestUtils.js');
@@ -119,7 +121,71 @@ function runAllExtractionValidationTests() {
   }
   assertEqual_('normalize 不能对没通过验证的 candidate 呼叫——会抛错，不会静默产出东西', normalizeThrew, true, results);
 
+  // ============ Order-level (Butiran Tempahan) candidate — Phase 4，2026-08-25 ============
+  function validOrderCandidate_() {
+    return {
+      extraction_scope: { first_page_seen: 7, last_page_seen: 9 },
+      days: [{
+        weekday_name: 'Ahad', day: 4, month_name: 'Januari', day_block_complete: true, printed_daily_subtotal: 9.40,
+        orders: [
+          { order_row_type: 'Tunggal', platform_raw: 'GrabFood', order_ids_raw: ['A-8QLIOUFWWKVDAV'], and_more_count: 0, payment_method_raw: 'Tanpa tunai', base_income: 4.10, other_income: 1.40, income_adjustment: 0, net_income: 5.50, source_page: 7, low_confidence: false },
+          { order_row_type: 'Sekaligus', platform_raw: 'GrabFood', order_ids_raw: ['A-8QL4CN9WWW57AV'], and_more_count: 0, payment_method_raw: 'Tanpa tunai', base_income: 3.90, other_income: 0, income_adjustment: 0, net_income: 3.90, source_page: 8, low_confidence: false }
+        ]
+      }],
+      notes: ''
+    };
+  }
+
+  assertEqual_('合法 order candidate：schema 没有错误', validateOrderCandidateSchema_(validOrderCandidate_()), [], results);
+  assertEqual_('合法 order candidate：structural 没有错误', validateOrderCandidateStructural_(validOrderCandidate_()), [], results);
+  assertEqual_('合法 order candidate：arithmetic 没有错误', validateOrderCandidateArithmetic_(validOrderCandidate_()), [], results);
+  assertEqual_('合法 order candidate：traceability 没有错误', validateOrderCandidateTraceability_(validOrderCandidate_()), [], results);
+  assertEqual_('合法 order candidate：整体 valid=true', validateOrderExtractionCandidate_(validOrderCandidate_()).valid, true, results);
+
+  const badRowType = validOrderCandidate_();
+  badRowType.days[0].orders[0].order_row_type = 'Sesuatu';
+  assertEqual_('未知 row type：schema 报错', validateOrderCandidateSchema_(badRowType).length > 0, true, results);
+
+  const sekaligusZeroIds = validOrderCandidate_();
+  sekaligusZeroIds.days[0].orders[1].order_ids_raw = [];
+  sekaligusZeroIds.days[0].orders[1].and_more_count = 0;
+  assertEqual_('Sekaligus 0 个订单号且 and_more_count=0：structural 报错（今天确认的规则：>=1 个即合法，0 个不合法）', validateOrderCandidateStructural_(sekaligusZeroIds).length > 0, true, results);
+
+  const sekaligusOneId = validOrderCandidate_(); // 已经是 1 个 id 的 Sekaligus，代表今天的规则变更
+  assertEqual_('Sekaligus 只有 1 个订单号、没有 and N：structural 不报错（W33 page 14 已经肉眼核实过的真实规则）', validateOrderCandidateStructural_(sekaligusOneId).length, 0, results);
+
+  const tunggalTwoIds = validOrderCandidate_();
+  tunggalTwoIds.days[0].orders[0].order_ids_raw = ['A-1', 'A-2'];
+  assertEqual_('Tunggal 却有 2 个订单号：structural 报错', validateOrderCandidateStructural_(tunggalTwoIds).length > 0, true, results);
+
+  const badIdFormat = validOrderCandidate_();
+  badIdFormat.days[0].orders[0].order_ids_raw = ['XYZ-not-a-real-format'];
+  assertEqual_('订单号格式不符合已知 Grab pattern：structural 报错', validateOrderCandidateStructural_(badIdFormat).length > 0, true, results);
+
+  const badPayment = validOrderCandidate_();
+  badPayment.days[0].orders[0].payment_method_raw = 'Bitcoin';
+  assertEqual_('未知付款方式：structural 报错', validateOrderCandidateStructural_(badPayment).length > 0, true, results);
+
+  const badArithmetic = validOrderCandidate_();
+  badArithmetic.days[0].orders[0].net_income = 999;
+  assertEqual_('asas+lain+pelarasan 跟 net_income 对不上：arithmetic 报错', validateOrderCandidateArithmetic_(badArithmetic).length > 0, true, results);
+
+  const dupIds = validOrderCandidate_();
+  dupIds.days[0].orders[1].order_ids_raw = ['A-8QL4CN9WWW57AV', 'A-8QL4CN9WWW57AV'];
+  assertEqual_('同一行内部重复订单号：traceability 报错（可能是读取重复，不是真实重复）', validateOrderCandidateTraceability_(dupIds).length > 0, true, results);
+
+  const orderMissingArithmeticAndStructural = validOrderCandidate_();
+  orderMissingArithmeticAndStructural.days[0].orders[0].payment_method_raw = 'Bitcoin';
+  orderMissingArithmeticAndStructural.days[0].orders[0].net_income = 999;
+  const combinedValidation = validateOrderExtractionCandidate_(orderMissingArithmeticAndStructural);
+  assertEqual_('同时有 structural 跟 arithmetic 问题：一次全部列出，不是抓到第一个就停', combinedValidation.errors.length >= 2, true, results);
+  assertEqual_('schema 过但其他层没过：stage 是 Needs_Review 不是 Extraction_Failed', combinedValidation.stage, 'Needs_Review', results);
+
+  const brokenSchema = { days: 'not-an-array' };
+  assertEqual_('schema 本身就坏掉：stage 是 Extraction_Failed', validateOrderExtractionCandidate_(brokenSchema).stage, 'Extraction_Failed', results);
+
   const allPass = results.every((r) => r.pass);
+
   results.forEach((r) => {
     console.log(`${r.pass ? 'PASS' : 'FAIL'} ${r.name}` + (r.pass ? '' : ` (got ${JSON.stringify(r.actual)}, expected ${JSON.stringify(r.expected)})`));
   });

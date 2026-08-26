@@ -28,6 +28,136 @@
  * 痕迹，不然没办法回头看「这次 LLM 到底是怎么编错的」。
  */
 
+/**
+ * Butiran Tempahan（逐笔订单）extraction schema — Phase 4（2026-08-25，
+ * 对应 compliance-os-phase4-gemini-extraction-design.md §3，Steven 批准）。
+ *
+ * 跟上面 LLM_EXTRACTION_SCHEMA_（statement 层级）同一个文件、同一个
+ * Adapter，因为两者本质上是同一件事（叫 Gemini 读同一份 PDF、要结构化
+ * JSON），只是要的栏位跟 prompt 不同——CMP-P7「外部依赖收拢成单一
+ * Adapter」：Gemini 只有一个说话的地方，不要因为多了一种抽取需求就
+ * 多开一个文件重新接一次 API。
+ *
+ * 跟 statement 层级 schema 的关键差异：这里完全不给 Gemini 任何计算或
+ * 判断空间——`and_more_count` 没写就是 0、`other_income` 空白就是 0，
+ * 这两个「找不到就当 0」的规则明确写进 prompt，而不是留给 Gemini 自己
+ * 决定「大概是 0 吧」——CMP-P10 的字面意思是「不确定要显式」，但这里的
+ * 情况是"这两个栏位空白本身就是明确证据"，跟"看不清楚所以猜"是两回事，
+ * 所以允许写死这条规则，不算违反不猜的原则。除此之外一律要求原文照抄，
+ * 抓不到/看不懂的一律留 null，不准 Gemini 用自己的判断填补。
+ */
+var BUTIRAN_TEMPAHAN_EXTRACTION_SCHEMA_ = {
+  type: 'object',
+  properties: {
+    extraction_scope: {
+      type: 'object',
+      description: '这次抽取实际涵盖的页码范围——不管是整份文件还是指定范围，都要照实回报，不要照抄 prompt 里给的范围了事（万一 Gemini 实际上只看得到部分页面）。',
+      properties: {
+        first_page_seen: { type: 'integer' },
+        last_page_seen: { type: 'integer' }
+      },
+      required: ['first_page_seen', 'last_page_seen']
+    },
+    days: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          weekday_name: { type: 'string', description: 'PDF 上印的原文星期几，例如 "Ahad"，照抄不要翻译' },
+          day: { type: 'integer' },
+          month_name: { type: 'string', description: 'PDF 上印的原文月份名，例如 "Januari"，照抄不要翻译' },
+          day_block_complete: {
+            type: 'boolean',
+            description: '这个日期分组在你实际看到的页面范围内是否完整（有看到它的开头也看到它自己的 "RM x,xxx.xx" 小计）。如果这个日期分组的内容看起来延伸到你看到的页面范围以外（开头或结尾被切断），填 false。'
+          },
+          printed_daily_subtotal: {
+            type: ['number', 'null'],
+            description: '该日期分组结尾印出来的 "RM x,xxx.xx"，逐字读出这个数字本身，不要自己加总 orders 算出来；如果这个分组不完整、看不到它自己的小计，填 null。'
+          },
+          orders: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                order_row_type: { type: 'string', enum: ['Tunggal', 'Sekaligus'], description: '照 PDF 原文，不要因为看到多个订单号就自己判断成 Sekaligus——以 PDF 实际印的字为准' },
+                platform_raw: { type: 'string', description: '照 PDF 原文，例如 "GrabFood"、"GrabExpress Instant -- Bike"，不要正规化或简化' },
+                order_ids_raw: {
+                  type: 'array', items: { type: 'string' },
+                  description: '这一行明确印出来的订单号，逐个照抄，包含前缀（"A-" 或 "PLAN-1-" 等）。只列印出来看得到的，不要因为是 Sekaligus 就推测/补出应该有几个。'
+                },
+                and_more_count: { type: 'integer', description: '这一行文字里 "and N" 的 N；没有这个文字就填 0，不要自己猜测隐藏了几个订单。' },
+                payment_method_raw: { type: 'string', description: '照 PDF 原文，例如 "Tanpa tunai"、"Tunai"，或两者都有时原样列出' },
+                base_income: { type: 'number', description: 'Pendapatan asas 栏' },
+                other_income: { type: 'number', description: 'Pendapatan lain 栏；这一栏空白（没有印数字）就填 0，不是不确定，是这一栏本来就没有数字。' },
+                income_adjustment: { type: 'number', description: 'Pelarasan Pendapatan 栏' },
+                net_income: { type: 'number', description: 'Pendapatan bersih 栏' },
+                source_page: { type: 'integer', description: '这一行实际印在第几页' },
+                low_confidence: { type: 'boolean', description: '如果这一行任何欄位印刷模糊、被遮挡、或你不确定自己读对，填 true，并在下面 notes 具体说明是哪一行、哪个欄位。' }
+              },
+              required: ['order_row_type', 'platform_raw', 'order_ids_raw', 'and_more_count', 'payment_method_raw', 'base_income', 'other_income', 'income_adjustment', 'net_income', 'source_page', 'low_confidence']
+            }
+          }
+        },
+        required: ['weekday_name', 'day', 'month_name', 'day_block_complete', 'printed_daily_subtotal', 'orders']
+      }
+    },
+    notes: {
+      type: 'string',
+      description: '任何模糊不清、无法确定、或你选择不猜测而留白的地方，具体说明是哪一天、哪一行、哪个欄位。完全没有这类情况就给空字符串。'
+    }
+  },
+  required: ['extraction_scope', 'days', 'notes']
+};
+
+/**
+ * @param {{firstPage:number, lastPage:number}|null} pageRange 传 null 表示整份文件一次处理（Phase 4 design 的首选路径）；
+ *   传 {firstPage, lastPage} 表示只处理这个页码范围内看得到的内容（chunk fallback 用）。
+ */
+function buildButiranTempahanPrompt_(pageRange) {
+  const scopeLine = pageRange
+    ? `这次只需要处理第 ${pageRange.firstPage} 页到第 ${pageRange.lastPage} 页看得到的内容——如果某个日期分组的开头或结尾落在这个范围以外，仍然把你在这个范围内看到的部分列出来，并且把该分组的 "day_block_complete" 填 false，不要因为看不到全貌就跳过整个分组不报。`
+    : '这是完整一份 PDF，处理全部页面。';
+  return [
+    '你是一个财务文件抽取工具。以下是一份 Grab 骑手周结单（PDF）当中的',
+    '"Butiran Tempahan - Penghantaran"（逐笔订单明细）区段。',
+    scopeLine,
+    '',
+    '严格规则，逐条遵守：',
+    '1. 只转录 PDF 上实际印出来的文字和数字，不要计算、不要推测、不要四舍五入。',
+    '2. 不要为了让 base_income + other_income + income_adjustment 等于 net_income 而调整任何一个数字——就算加起来对不上，也是照抄各自印出来的数字，对不上是我们自己会去检查的事，不是你要修正的事。',
+    '3. 一行如果标示为 "Sekaligus"，只列出这一行明确印出来的订单号；如果文字里有 "and N"，把 N 填进 and_more_count，不要自己猜测/编出那 N 个订单号是什么，也不要因为是 Sekaligus 就把它拆成好几个独立的订单。',
+    '4. 一行如果标示为 "Tunggal"，就是单一订单，即使你觉得金额看起来像是多笔订单合并也不要改判成 Sekaligus——以 PDF 印的字为准。',
+    '5. 日期只从该行所在的日期分组标题读取（例如 "Ahad, 4 Januari"），不要用其他页面的日期去推断这一行属于哪一天，也不要把一个日期分组的订单归到另一个日期分组。',
+    '6. 任何一个欄位如果印刷模糊、被遮挡、看不清楚，把该行的 low_confidence 填 true 并在 notes 说明，欄位本身仍填你能辨识到的最佳读数，不要用 null 掩盖——除非完全无法辨识出任何数字/文字，此时才允许该欄位留空/null 并在 notes 说明原因。',
+    '7. 不要输出这份文件里没有出现过的订单号或金额。'
+  ].join('\n');
+}
+
+/**
+ * 纯函数——组 Butiran Tempahan 抽取的 Gemini request body。跟
+ * buildGeminiRequestBody_ 结构完全一样，只是换了 prompt 跟 schema——
+ * 两者共用同一个 postJson/parseGeminiResponse_/evidence 机制。
+ * @param {string} pdfBase64
+ * @param {{firstPage:number, lastPage:number}|null} pageRange
+ * @return {Object}
+ */
+function buildGeminiOrderExtractionRequestBody_(pdfBase64, pageRange) {
+  return {
+    contents: [
+      {
+        parts: [
+          { inline_data: { mime_type: 'application/pdf', data: pdfBase64 } },
+          { text: buildButiranTempahanPrompt_(pageRange) }
+        ]
+      }
+    ],
+    generationConfig: {
+      responseMimeType: 'application/json',
+      responseSchema: BUTIRAN_TEMPAHAN_EXTRACTION_SCHEMA_
+    }
+  };
+}
+
 if (typeof require === 'function') {
   var { validateCandidateSchema_ } = require('./125_ExtractionValidation.js');
 }
@@ -238,6 +368,66 @@ function createLLMExtractor_(config, deps) {
           uncertaintyNote: (parsed.candidate && parsed.candidate.extraction_notes) || ''
         }
       };
+    },
+
+    /**
+     * Butiran Tempahan（逐笔订单）抽取——Phase 4 新增。跟上面 extract()
+     * 是同一个 Adapter、同一份 postJson 重试逻辑、同一套证据留存机制，
+     * 差别只在 schema/prompt 换成订单层级的，而且多接受一个可选的
+     * pageRange 参数支援 chunk fallback（compliance-os-phase4-gemini-
+     * extraction-design.md §2：整份文件一次处理是首选，pageRange 只在
+     * 需要 fallback 时才用）。
+     * @param {{fileId: string, mimeType: string, documentId: (string|null)}} document
+     * @param {{firstPage:number, lastPage:number}|null} pageRange 传 null 表示整份处理
+     * @return {{mode: 'structured', candidate: Object, evidence: Object}}
+     */
+    extractOrders(document, pageRange) {
+      const now = deps.now instanceof Date ? deps.now : new Date();
+      const extractionVersion = now.toISOString();
+      const scopeTag = pageRange ? `orders:p${pageRange.firstPage}-${pageRange.lastPage}` : 'orders:full';
+      const extractorId = `LLMExtractor:${model}:${scopeTag}`;
+
+      const pdfBytes = deps.driveService.getFileBytes(document.fileId);
+      const pdfBase64 = deps.driveService.bytesToBase64(pdfBytes);
+      const requestBody = buildGeminiOrderExtractionRequestBody_(pdfBase64, pageRange || null);
+
+      const rawResponse = deps.httpClient.postJson(
+        `${endpoint}?key=${config.apiKey}`,
+        { 'Content-Type': 'application/json' },
+        requestBody
+      );
+
+      let parsed;
+      let evidenceFileId = null;
+      try {
+        parsed = parseGeminiResponse_(rawResponse);
+      } finally {
+        const evidenceRecord = buildEvidenceRecord_({
+          documentId: document.documentId,
+          driveFileId: document.fileId,
+          extractorId,
+          extractionVersion,
+          finishReason: parsed ? parsed.finishReason : null,
+          prompt: buildButiranTempahanPrompt_(pageRange || null),
+          candidate: parsed ? parsed.candidate : null,
+          rawResponse
+        });
+        const evidenceFileName = `${document.documentId || document.fileId}__${scopeTag.replace(/[:]/g, '-')}__${extractionVersion.replace(/[:.]/g, '-')}.json`;
+        evidenceFileId = deps.driveService.writeJsonFile(config.evidenceFolderId, evidenceFileName, evidenceRecord);
+      }
+
+      return {
+        mode: 'structured',
+        candidate: parsed.candidate,
+        evidence: {
+          extractorId,
+          extractionVersion,
+          evidenceFileId,
+          finishReason: parsed.finishReason,
+          pageRange: pageRange || null,
+          uncertaintyNote: (parsed.candidate && parsed.candidate.notes) || ''
+        }
+      };
     }
   };
 }
@@ -317,8 +507,11 @@ function realLLMExtractor_() {
 if (typeof module !== 'undefined') {
   module.exports = {
     LLM_EXTRACTION_SCHEMA_,
+    BUTIRAN_TEMPAHAN_EXTRACTION_SCHEMA_,
     buildExtractionPrompt_,
+    buildButiranTempahanPrompt_,
     buildGeminiRequestBody_,
+    buildGeminiOrderExtractionRequestBody_,
     parseGeminiResponse_,
     buildEvidenceRecord_,
     createLLMExtractor_,
