@@ -26,6 +26,11 @@ var COMPLIANCE_OS_CONSTITUTION = {
       date: '2026-08-21',
       change: 'CMP-CR5 补完整（原本只写了 IDE 下拉选单那个理由，漏了 google.script.run 看不到带下划线后缀函数这件——2026-08-20 真实 GAS 环境踩过）；新增 CMP-P14（AI/LLM 产生的候选事实必须先过独立于该 AI 本身的 deterministic validation 才能变成 Truth）。两条都是「真实运行暴露出 Constitution 层没说完整/没覆盖到的东西」，不是重新设计——900/901 其余内容不动，Architecture Freeze 维持',
       approvedBy: 'Steven'
+    },
+    {
+      date: '2026-08-25',
+      change: 'Daily Order-Level Allocation（跨月 Grab Statement 逐日/逐单归属，取代整周粗颗粒的 Needs_Allocation）Phase 1-4 设计与实作完成，新增 ADR-004（四层数据模型）、ADR-005（Butiran Tempahan 抽取方式：Gemini Extraction Adapter + 确定性验证，取代 Phase 2 一度倾向的纯确定性文字解析）、CMP-CR6（Sekaligus 合法性判准，2026-08-25 用真实 W33 PDF 原件核对过）。142/143（Daily Order Allocation 引擎+测试）为新文件；125/126、127/128 为既有文件的加法性扩充（新增 Butiran Tempahan 相关的 schema/validation/extraction 函数，既有 statement 层级功能一行未改）。140/150/160/108/110/170/900/901 本身、Architecture Freeze、Governance 既有内容均未变动或重开——这是 Freeze 既有例外条款（ADR-003 建立的先例：真实数据/真实需求可以在不重开整层设计的前提下新增 ADR）的延续，不是第二次重新讨论 Freeze 本身。⚠️ 明确未完成：ADR-004/ADR-005 的代码在 Node 模拟环境全部测试通过，但从未对真实 Gemini API 或真实 GAS runtime 验证过（这个开发环境本身没有到 Google API 的网络路由、也没有真的 GAS 环境）——status 标注刻意写成「Decided（设计与方向）＋未验证（真实环境）」两段式，不是「Production」，完整清单见同一天的 checkpoint/handoff 文件',
+      approvedBy: 'Steven'
     }
   ],
 
@@ -168,12 +173,17 @@ var COMPLIANCE_OS_CONSTITUTION = {
       id: 'CMP-CR5',
       statement:
         '私有函数命名用 GAS 平台惯例的后缀下划线 functionName_()，不是 UEF 原文字面的前缀——这是 Language Convention Override（见治理文档）在 Compliance OS 里的具体声明，理由是两个独立的平台事实：(1) 后缀下划线在 Apps Script 编辑器里会隐藏于「选取要执行的函数」下拉选单；(2) google.script.run 看不到、也叫不动带这个后缀的函数（Apps Script 官方文件明载，不是这个专案自己的假设或某次 bug 的临时补丁）。第二点的直接后果：任何要给 HTMLService 前端（google.script.run）当入口呼叫的 server 函数，一律不能把 xxx_() 直接暴露出去，必须额外提供一个不带下划线的公开函数当薄壳，内部呼叫真正的 xxx_() 实作——内部逻辑永远留在 _ 版本里（继续享有隐藏于下拉选单、可以放心重构的好处），公开层只做参数原样转发，不重复任何逻辑。2026-08-20 在真实 GAS 环境证实过：漏掉这层公开 wrapper，前端会卡在「呼叫中」不会有任何回应，不是快速报错，容易被误判成别的问题。'
+    },
+    {
+      id: 'CMP-CR6',
+      statement:
+        'Grab Weekly Statement 的 "Pesanan Sekaligus"（合并订单）行，合法条件是至少 1 个可识别订单号，不是至少 2 个——2026-08-25 用真实 2026-W33 PDF 原件第 14 页肉眼核对过：同一页里，一笔 Sekaligus 只印 1 个订单号、没有 "and N" 说明，金额仍跟当日 Grab 印出的 subtotal 精确对上，紧邻着一笔 2 个订单号的 Sekaligus 跟一笔带 "and N" 的 Sekaligus 可以直接对照——这是 Grab 模板本身的真实行为，不是解析缺陷，因此不能拿「订单号数量」当合法性判准，只能拿「至少有 1 个可识别订单号，或者有 "and N" 说明」当判准；真正一个订单号都识别不出来的情况才是 Needs_Review，不是订单号数量本身。'
     }
   ],
 
   /**
    * 已记录的 ADR，完整内容见治理文档 compliance-os-governance-draft.md
-   * §1/§3.2/§4.2/§2.5——909_ADR.js 从未真的建过（一直只是文件地图里的
+   * §1/§3.2/§4.2/§2.5/§2.7/§2.8——909_ADR.js 从未真的建过（一直只是文件地图里的
    * 占位引用），这里改指向实际存在、一直在用的地方，不是新的决定，只是
    * 修正一个从没被抓到的旧指针（跟本次 ADR-003 本身无关，顺手修的）。
    */
@@ -181,7 +191,9 @@ var COMPLIANCE_OS_CONSTITUTION = {
     { id: 'ADR-000', title: '为什么 Compliance OS 是独立 GAS 项目', status: 'Decided' },
     { id: 'ADR-001', title: 'Reconciliation Engine 如何读取 Rider OS 数据', status: 'Decided' },
     { id: 'ADR-002', title: 'Official Truth Principle', status: 'Decided' },
-    { id: 'ADR-003', title: 'Reconciliation 与 Verified Income 解耦（Reconciliation is an annotation, not a publication gate）', status: 'Decided' }
+    { id: 'ADR-003', title: 'Reconciliation 与 Verified Income 解耦（Reconciliation is an annotation, not a publication gate）', status: 'Decided' },
+    { id: 'ADR-004', title: 'Daily Order-Level Allocation：四层数据模型（Order_Allocation / Non_Order_Income_Allocation / Daily_Allocation / Monthly_Allocation）与 Fact/Projection 边界', status: 'Decided（架构与设计层级；142/143 已实作并通过 Node 测试；未接入 108/110/170，未在真实 GAS 验证——见 checkpoint 文件）' },
+    { id: 'ADR-005', title: 'Butiran Tempahan（订单层级）PDF 抽取方式：Gemini 作为 Extraction Adapter + 142 确定性验证，取代原本 Phase 2 倾向的纯确定性文字解析', status: 'Decided（方向与边界；127/125/142 的对应代码已实作并通过 Node mock 测试；未对真实 Gemini API 或真实 GAS runtime 验证过——见 checkpoint 文件）' }
   ]
 };
 

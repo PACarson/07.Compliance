@@ -1,12 +1,14 @@
-# Compliance OS — Governance Layer（Draft v0.8）
+# Compliance OS — Governance Layer（Draft v0.9）
 
-> **状态：v0.6 之后本已 Architecture Freeze（见 §9）；v0.7 的 ADR-003 是 Freeze 自己写的例外条款；v0.8 是同一个例外的延续执行——Steven 2026-08-17 决定的 Real Data Pilot（不是新的例外，是 ADR-003 生效后「下一步该做什么」的直接指示，不需要另开 ADR）。不重开其他已冻结的设计。**
+> **状态：v0.6 之后本已 Architecture Freeze（见 §9）；v0.7 的 ADR-003 是 Freeze 自己写的例外条款；v0.8/v0.9 是同一个例外的延续执行，不是新的例外。不重开其他已冻结的设计。**
 >
 > v0.6：确认 v0.5 六项（EP3、Property OS 理由、UCR1-4/1899 bug、Compliance Calendar Projection、RiderOSAdapter、ADR-000）；私有函数命名改回 GAS 后缀惯例 `functionName_()`；`RiderOSAdapter` 已经写好并测试（占位版）。改动清单见 §9。
 >
-> v0.7（**已批准并实作，2026-08-17**）：新增 ADR-003（Reconciliation 与 Verified Income 解耦）+ CMP-P12；更新 §2.1 Pipeline、§2.3 Document Lifecycle、§7 Reconciliation_Log schema（Verified_Income schema 维持不变，见 §7 说明）；110/130/140 与对应测试已实作、Node 模拟 + 10 组 `runAllXTests()` 重跑通过，`900`/`901` 已同步。PDF 抽取方式：Drive OCR 先接成真的，LLM API 按证据决定，见 §9。
+> v0.7（**已批准并实作，2026-08-17**）：新增 ADR-003（Reconciliation 与 Verified Income 解耦）+ CMP-P12；更新 §2.1 Pipeline、§2.3 Document Lifecycle、§7 Reconciliation_Log schema（Verified_Income schema 维持不变，见 §7 说明）；110/130/140 与对应测试已实作、Node 模拟 + 10 组 `runAllXTests()` 重跑通过，`900`/`901` 已同步。~~PDF 抽取方式：Drive OCR 先接成真的，LLM API 按证据决定，见 §9。~~ **⚠️ 2026-08-25 审计时发现这句话已经过时且被推翻——见下面 v0.9 说明，901 自己的 verificationHistory 其实早在 2026-08-21 就正确记录了后续变化，只有这份 .md 治理文件没跟着同步，此处保留原文划掉以留存历史，不是本次新决定。**
 >
-> v0.8（**已实作，2026-08-17～18**）：Real Data Pilot——112 接上真的 Drive OCR；新增 117_SheetReader.js（Sheet 读取唯一出口，TruthWriter 的对称层）；110 拆出 runImportPipeline_（不丢例外的共用核心，批次/重试都靠它）；140 新增发布幂等检查（existingIncomeIds）+ 新原则 CMP-P13；新增 170_OperatorConsole.js/.html/171（真正的 HTMLService Console，取代 `compliance-os-console.jsx`——见 §9 已退役）。appsscript.json 新增 Drive Advanced Service + webapp 部署设定。12 组 `runAllXTests()`、共 229 项断言通过。
+> v0.8（**已实作，2026-08-17～18**）：Real Data Pilot——~~112 接上真的 Drive OCR~~（**同上，2026-08-25 审计更正：这句话不准确，901 记录显示 112 实际上一直只有 placeholder，2026-08-21 之后改走 LLM extraction，从未真的接上 Drive OCR**）；新增 117_SheetReader.js（Sheet 读取唯一出口，TruthWriter 的对称层）；110 拆出 runImportPipeline_（不丢例外的共用核心，批次/重试都靠它）；140 新增发布幂等检查（existingIncomeIds）+ 新原则 CMP-P13；新增 170_OperatorConsole.js/.html/171（真正的 HTMLService Console，取代 `compliance-os-console.jsx`——见 §9 已退役）。appsscript.json 新增 Drive Advanced Service + webapp 部署设定。12 组 `runAllXTests()`、共 229 项断言通过。
+>
+> v0.9（**Decided（设计/方向）；实作已完成、Node 测试已过；未经真实 Gemini API 或真实 GAS runtime 验证，2026-08-24～25**）：新增 ADR-004（Daily Order-Level Allocation 四层数据模型，§2.7）、ADR-005（Butiran Tempahan 抽取改用 Gemini Extraction Adapter + 142 确定性验证，取代 Phase 2 一度倾向的纯确定性文字解析，§2.8）、CMP-CR6（Sekaligus 合法性判准，900 已更新）。新增 142_DailyOrderAllocation.js/143_Tests_DailyOrderAllocation.js；125/126、127/128 加法性扩充。同一次审计顺手发现并标注了上面 v0.7/v0.8 两处跟 901 实际记录不一致的旧文字（不是这次造成的 drift，是这次才第一次被发现）。**完整的完成/未完成/blocked 清单、下一步操作，见同一天产出的 checkpoint/handoff 文件，不在这份治理文件里重复维护一份进度追踪。**
 
 ---
 
@@ -197,6 +199,40 @@ ADR-003 批准后，Steven 定的下一步优先序：Real Data Pilot 优先于 
 
 ---
 
+### 2.7 Daily Order-Level Allocation：四层数据模型 — ADR-004（Decided：设计层级；2026-08-24～25）
+
+**背景**：ADR-003 之后，跨月 Grab Weekly Statement（例如 2025-12-29～2026-01-04）的收入怎么分给 12 月/1 月，一直靠 `160_MonthlyProjection.js` 的整周粗颗粒 `Needs_Allocation` 标记，不实际拆分。Steven 提供两份真实 PDF（2026-W01 跨月、2026-W33 单月）驱动这次设计。
+
+**Question**：Butiran Tempahan（逐笔订单明细）能不能把这个问题从「整周猜」变成「逐日算」？
+
+**Evidence（不是假设，两份真实 PDF 都验证过）**：逐日印出的 Grab 官方小计，加总后精确等于 Verified_Income 的 net_delivery_income，两份样本分毫不差；Tip 有自己独立的、逐笔带日期的台账，同样精确重建；Insentif/Bayaran-lain-lain 有没有日期证据因周而异（不能假设固定 sub-type 清单）。
+
+**Decision**：四层模型——`Order_Allocation`（逐行订单证据）／`Non_Order_Income_Allocation`（Tip/Insentif/Bayaran-lain-lain 逐条证据，`allocated_date` 可为 null）／`Daily_Allocation`（逐日 checksum + 已分配收入，checksum 只对 net_delivery_income 做，因为只有它有官方逐日小计可核对）／`Monthly_Allocation`（月度汇总，尚未建表，见下）。`Verified_Income` 本身不改一个欄位——这层是事后附加的 annotation，跟 ADR-003 同一个精神。无法判定日期的金额永远不进任何一个月份的汇总，宁可留在 statement 层级标 Needs_Review，也不猜。
+
+**Steven 批准**：Phase 1（真实 schema 调查）、Phase 2（data model + algorithm 设计）、Phase 3（142/143 pure functions + 测试）逐阶段确认；`Failed_Checksum` 状态提案被否决，改沿用既有 `Needs_Review`；`Daily_Allocation` 确认不存 `month` 欄位（CMP-P6）；批准 `142_DailyOrderAllocation.js`/`143_Tests_DailyOrderAllocation.js` 编号（170 已被 Operator Console 占用）。
+
+**目前状态**（2026-08-25）：142/143 已实作，Node 模拟测试 67 项 62 项通过（5 项失败可追溯到单一已知的本地 fixture 文字抽取问题，不是设计或真实数据问题，见 checkpoint 文件）。**没有**接 108_SheetSetup.js（没有真的 Sheet）、**没有**接 110_DocumentImport.js、**没有**接 170_OperatorConsole.js、**没有**建 Monthly_Allocation 实体表（Steven 的 Phase 3 指示本身只要求到 Daily_Allocation + 查询用的 date→month 函数）。
+
+**Related ADRs**：ADR-003（Fact/Projection 分离、TruthWriter append-only 的 query-latest 模式，这里直接沿用）、ADR-005（Butiran Tempahan 怎么从 PDF 变成 Order_Allocation 的输入来源）
+
+### 2.8 Butiran Tempahan PDF 抽取方式 — ADR-005（Decided：方向；2026-08-25，**取代** Phase 2 一度倾向的方案）
+
+**Question**：逐笔订单资料要怎么从 PDF 变成结构化资料？
+
+**Options 曾经考虑过的**：(a) 纯确定性文字/正规表达式解析（Phase 2 一度倾向，理由是 CMP-P14「LLM 不是 Truth Engine」）；(b) Gemini 结构化输出，142 只做确定性验证（checksum + 三层 candidate 校验）。
+
+**Evidence**：Phase 3 实际用确定性文字解析对两份真实 PDF 编码时，真的撞到「同一个视觉栏位的字被 PDF 文字层拆到不相邻位置」的问题（Sekaligus 订单号前缀、payment method 关键字都遇到过），花了大量心力写容错 token 搜寻绕过；Steven 判断一个真正理解表格视觉结构的模型从根上不会有这类问题。
+
+**Decision**：(b)。**Steven 批准（2026-08-25）**，并明确追加两个边界条件：① 整份 PDF 一次呼叫是首选，不是硬性假设，但 fallback 到分页/分块必须存在且能安全合并去重、不能因为抽取失败就让整个 Statement 处理中断；② checksum 通过不等于「整个 extraction 都对」——订单号本身抄错但金额/日期都对，checksum 抓不到，所以另外要求 Structural / Arithmetic / Traceability 三层独立验证（`125_ExtractionValidation.js`），不是只有 checksum 一道关卡。Gemini 的角色边界维持 CMP-P14：Extraction Adapter，不能为了让 checksum 过而自行修改金额/日期/订单号，验证不过就是 `Needs_Review`，不允许静默重试到过为止。
+
+**跟 CMP-CR6 的关系**：这次决定 Gemini 抽取的过程中，用真实 W33 PDF 原件核对 Sekaligus 订单号数量规则时（第 14 页），确认了「Sekaligus 只要 ≥1 个可识别订单号即合法」这个真实业务规则（900 已新增 CMP-CR6），这条规则同时写进了 Gemini 的 prompt 跟 125 的 structural 验证，两边不能有分歧。
+
+**目前状态**（2026-08-25，⚠️ 请勿在没读这段之前假设「已经在生产环境验证」）：127/125/142 对应代码已实作，Node 环境用 fake httpClient/mock 验证过 request 组装、response 解析、三层验证、chunk 合并去重、fallback 编排全部逻辑正确。**从未对真实 Gemini API 打过一次真的请求**（这次的开发环境没有到 Google API 的网络路由）；**没有真实 GAS runtime 验证过**（UrlFetchApp/DriveApp/trigger 断点续跑都只是照文件写的 GAS 官方行为写代码，没有实际跑过）。人工验证清单见 `128_Tests_LLMExtractor.js` 文件末尾，以及同一天的 checkpoint/handoff 文件。
+
+**Related ADRs**：ADR-004（142 的四层模型是这里 Gemini candidate 最终要映射成的形状）、CMP-P14（原则本身不变，这是它在新场景的具体应用）
+
+---
+
 ## 3. Data Ownership — 对应 `904_Data_Ownership.js`
 
 - Compliance OS 独占官方原始文件的读写权；Finance OS / Rider OS / Reminder OS 永远不直接打开这些文件或其 Sheet
@@ -311,9 +347,9 @@ COMPLIANCE_DUE_SOON / COMPLIANCE_OVERDUE / COMPLIANCE_COMPLETED
 
 ## 6. File Map — 对应 `907_File_Map.js`
 
-**900s Engineering**：900_Constitution.js（§1，含 ADR-000，**已写**——CMP-P1-13 原则 + CMP-CR1-5 编码规则）／901_System_Architecture.js（§2，**已写**——Compliance OS 自己的模块目录 + Architecture-Layers-to-Blueprint 映射）／902_Event_Model.js（§5）／903_State_Model.js（§2.3）／904_Data_Ownership.js（§3）／905_CoreBridge.js（§4）／906_AI_Integration.js（Reserved T3）／907_File_Map.js（本节）／908_Project_State.js（§9）／909_ADR.js（§1 ADR-000、§4.2 ADR-001、§3.2 ADR-002、§2.5 ADR-003）
+**900s Engineering**：900_Constitution.js（§1，含 ADR-000，**已写**——CMP-P1-14 原则 + CMP-CR1-6 编码规则）／901_System_Architecture.js（§2，**已写**——Compliance OS 自己的模块目录 + Architecture-Layers-to-Blueprint 映射）／902_Event_Model.js（§5）／903_State_Model.js（§2.3）／904_Data_Ownership.js（§3）／905_CoreBridge.js（§4）／906_AI_Integration.js（Reserved T3）／907_File_Map.js（本节）／908_Project_State.js（§9）／909_ADR.js（§1 ADR-000、§4.2 ADR-001、§3.2 ADR-002、§2.5 ADR-003、§2.7 ADR-004、§2.8 ADR-005）
 
-**100s Blueprint**：101_Vision.js（§0）／102_Principles.js／105_TestUtils.js（**已写**）／106_Utils.js（**已写**）／110_DocumentImport.js（**已写**，v3：拆出 runImportPipeline_）／111_Tests_DocumentImport.js（**已写**）／112_DocumentTextExtractor.js（**已写**，v2：Drive OCR 真实实作）／113_Tests_DocumentTextExtractor.js（**已写**）／115_TruthWriter.js（**已写**）／116_Tests_TruthWriter.js（**已写**）／117_SheetReader.js（**已写，新增**）／118_Tests_SheetReader.js（**已写，新增**）／120_DocumentParsing.js（已写）／121_GrabWeeklyParser.js（已写）／122_Tests_GrabWeeklyParser.js（已写）／123_RiderOSAdapter.js（已写，占位版）／124_Tests_RiderOSAdapter.js（已写）／130_Reconciliation.js（**已写**，v2：ADR-003）／131_Tests_Reconciliation.js（**已写**）／140_VerifiedIncome.js（**已写**，v3：发布幂等检查）／141_Tests_VerifiedIncome.js（**已写**）／150_ComplianceCalendar.js（**已写**）／151_Tests_ComplianceCalendar.js（**已写**）／160_MonthlyProjection.js（**已写**——之前这份清单漏列了，跟本次改动无关，顺手补上）／161_Tests_MonthlyProjection.js（**已写**）／170_OperatorConsole.js（**已写，新增**）／170_OperatorConsole.html（**已写，新增**）／171_Tests_OperatorConsole.js（**已写，新增**）／190_Tests_Contracts.js（**已写**，新增测试类别）
+**100s Blueprint**：101_Vision.js（§0）／102_Principles.js／105_TestUtils.js（**已写**）／106_Utils.js（**已写**）／110_DocumentImport.js（**已写**，v3：拆出 runImportPipeline_）／111_Tests_DocumentImport.js（**已写**）／112_DocumentTextExtractor.js（**已写**，provider factory：llm 默认接 127、ocr 保留未实作的占位——**2026-08-25 审计更正**：这一行先前写着「v2：Drive OCR 真实实作」，901 的 verificationHistory 显示这从未真的发生过，2026-08-21 起改走 LLM extraction，此处一并修正，不是新决定）／113_Tests_DocumentTextExtractor.js（**已写**）／115_TruthWriter.js（**已写**）／116_Tests_TruthWriter.js（**已写**）／117_SheetReader.js（**已写，新增**）／118_Tests_SheetReader.js（**已写，新增**）／120_DocumentParsing.js（已写）／121_GrabWeeklyParser.js（已写）／122_Tests_GrabWeeklyParser.js（已写）／123_RiderOSAdapter.js（已写，占位版）／124_Tests_RiderOSAdapter.js（已写）／125_ExtractionValidation.js（**已写**，2026-08-25 加法性扩充新增订单层级四层验证，ADR-004/005）／126_Tests_ExtractionValidation.js（**已写**，同上）／127_LLMExtractor.js（**已写**，2026-08-25 加法性扩充新增 extractOrders()，ADR-005）／128_Tests_LLMExtractor.js（**已写**，同上，文件末尾有 Phase 4 专属人工验证清单）／130_Reconciliation.js（**已写**，v2：ADR-003）／131_Tests_Reconciliation.js（**已写**）／140_VerifiedIncome.js（**已写**，v3：发布幂等检查）／141_Tests_VerifiedIncome.js（**已写**）／142_DailyOrderAllocation.js（**已写，新增**，ADR-004/005——纯逻辑，未接 108/110/170，未对真实 Gemini/GAS 验证）／143_Tests_DailyOrderAllocation.js（**已写，新增**）／150_ComplianceCalendar.js（**已写**）／151_Tests_ComplianceCalendar.js（**已写**）／160_MonthlyProjection.js（**已写**——之前这份清单漏列了，跟本次改动无关，顺手补上）／161_Tests_MonthlyProjection.js（**已写**）／170_OperatorConsole.js（**已写，新增**）／170_OperatorConsole.html（**已写，新增**）／171_Tests_OperatorConsole.js（**已写，新增**）／190_Tests_Contracts.js（**已写**，新增测试类别）
 
 核心 Runtime 主线全部写完。剩下只有 `906_AI_Integration.js`——按 Blueprint BP-3 刻意保留 Tier 3，不展开。
 
@@ -366,6 +402,8 @@ COMPLIANCE_DUE_SOON / COMPLIANCE_OVERDUE / COMPLIANCE_COMPLETED
 - **ADR-001**：Reconciliation Engine 读取 Rider OS 数据 → 已决定，见 §4.2（Event + Weekly Settlement 触发 + UCR7 Adapter 模式，Adapter 内部先占位）
 - **ADR-002**：Official Truth Principle → 已决定，见 §3.2
 - **ADR-003**：Reconciliation 与 Verified Income 解耦（Rider OS 从必要条件变成可选、非阻断的次要验证）→ **已批准并实作（2026-08-17）**，见 §2.5
+- **ADR-004**：Daily Order-Level Allocation 四层数据模型（Order_Allocation/Non_Order_Income_Allocation/Daily_Allocation/Monthly_Allocation，取代整周粗颗粒的 Needs_Allocation）→ **Decided（设计层级，2026-08-24～25）；142/143 已实作、Node 测试通过；未接入 108/110/170，未在真实 GAS 验证**，见 §2.7
+- **ADR-005**：Butiran Tempahan 抽取方式改用 Gemini Extraction Adapter + 142 确定性验证（取代 Phase 2 一度倾向的纯确定性文字解析）→ **Decided（方向，2026-08-25）；127/125/142 对应代码已实作、Node mock 测试通过；未对真实 Gemini API 或真实 GAS runtime 验证**，见 §2.8
 - Decision OS → 维持不纳入
 - Finance OS 904 → 已确认，见 §3
 - **评审建议「平台稳定 ID 优先于路径/显示名」推广到整个生态**（Drive→file_id、Calendar→event_id、Sheets→spreadsheet_id、Gmail→message_id）→ 方向认同，但按 BP-2/UEF §0.9，Blueprint 层级的推广需要第二个项目独立验证同样的模式，或有明确的生态级效益，不是单一项目讲得通就够。目前只有 Compliance OS 一个实例（drive_file_id vs drive_path），先留在这里当 Compliance OS 自己的原则（CMP-P 系列可以补一条），不越权直接宣告成生态规则——这也是 UEF 自己的 Candidate Patterns（D7）机制存在的原因
@@ -381,7 +419,8 @@ COMPLIANCE_DUE_SOON / COMPLIANCE_OVERDUE / COMPLIANCE_COMPLETED
 
 - Status：**Architecture Freeze**（采纳评审建议的表述）——Governance 层（Architecture / Data Ownership / Module Boundary / File Map / Sheet Schema / Event Model / ADR-000-003）内容稳定，往后除非有新证据或真实数据暴露问题，不再主动扩充设计。重心转向工程质量（测试覆盖、Contract Test、已知限制的透明度），跟 UEF Blueprint Change Policy（§0.9）的精神一致——不因为"讨论起来合理"就继续加，只有第二个项目的独立证据或真实需求才动。**v0.7：Freeze 本身写了例外条款，ADR-003（§2.5）是目前唯一在跑过的例外，已批准并实作完成（2026-08-17）——不是重新打开整层设计，ADR-000/001/002 与 Freeze 其余范围维持不变。v0.8（Real Data Pilot，见 §2.6）是同一个例外的延续执行，不是第二个例外——Steven 明确列了这次不做的清单：Document Repository、新的 Compliance Event types、Decision OS、其他未来抽象、为了"以后可能需要"而加的 Infrastructure，都没有加。Freeze 继续有效，只有真实数据跑出来的证据才能再开例外**
 - **核心 Runtime 现状**（用 `901_System_Architecture.js` 的 `computeComplianceOsEngineeringMetrics_()` 算，不是手动维护的数字，这行数字是真的跑了这个函数核对过的）：16 个模块，15 个 Tested，1 个 Designed（`906_AI_Integration.js`，按 Blueprint BP-3 刻意保留 Tier 3，不是缺测试）。28 个 .js 文件（含 900/901 本身）的 GAS 合并模拟 2026-08-18 重跑，12 组 `runAllXTests()`、共 229 项断言，持续通过
-- **已知限制**（占位、等确认才能变真的，都不影响继续开发）：PDF→文字抽取方式（Drive OCR **已实作完成**，真的调用 Drive API 那步待真实 GAS 环境用真实 PDF 验证；LLM API 保留占位，只有真实数据证明 Drive OCR 不够准才根据实际 failure evidence 决定要不要启用、选哪家）、Personal AI Core EventBus 真实调用方式、Rider OS 的 RIDER_WEEKLY_ESTIMATE_READY 发布能力（ADR-003 之后 Rider OS 完全是可选项，不等它）、Compliance Calendar 的通知去重策略（连续多天 Due_Soon 会不会重复吵）、Operator Console 真实 Drive 环境的行为（folder 扫描、批次汇入节流、真的部署成 Web App）——Node 环境测不到，都在人工验证清单里
+- **已知限制**（占位、等确认才能变真的，都不影响继续开发）：PDF→文字抽取方式——**2026-08-25 审计更正**：这一行先前写「Drive OCR 已实作完成」，901 的 verificationHistory 显示这不准确，2026-08-21 起实际改走 LLM extraction（`127_LLMExtractor.js`），Drive OCR 至今仍只有占位（`112_DocumentTextExtractor.js` 的 `placeholderExtractor_`），真的调用 Gemini API/DriveApp 那几行待真实 GAS 环境验证；2026-08-25 起，订单层级（Butiran Tempahan）抽取额外确定要用 Gemini（ADR-005，见 §2.8），同样待真实环境验证。其余：Personal AI Core EventBus 真实调用方式、Rider OS 的 RIDER_WEEKLY_ESTIMATE_READY 发布能力（ADR-003 之后 Rider OS 完全是可选项，不等它）、Compliance Calendar 的通知去重策略（连续多天 Due_Soon 会不会重复吵）、Operator Console 真实 Drive 环境的行为（folder 扫描、批次汇入节流、真的部署成 Web App）、Daily Order-Level Allocation 尚未接入 108/110/170（ADR-004，见 §2.7）——都在各自的人工验证清单里，Node 环境测不到
 - **已退役**：`compliance-os-console.jsx`（v0.8，被 170_OperatorConsole.js/.html 取代——旧版是把 121/130/160 的逻辑在浏览器端重新写一份，跟真正的 GAS 模块是两份独立代码；新版直接呼叫真正的后端函数，逻辑只有一份）
 - **历史变更摘要**（v0.1→v0.7 完整细节见各版本自身，这里只列大方向）：v0.1-v0.3 定下 Compliance OS 的定位、Data Ownership、Parser/Reconciliation/Event 设计，三轮外部评审逐步收敛（Document Repository 不抽离、通用 Compliance 事件不加具名类型、Official Truth Principle）；v0.4 用真实 Grab Statement 修正了收入结构假设；v0.5 对照 UEF v1.5/Blueprint v1.2 原文修正了引用错误与 Tier 判断，新增 ADR-000；v0.6 起进入实作阶段——`900_Constitution.js`/`901_System_Architecture.js` 落成 Compliance OS 自己的 UEF/Blueprint，核心链路（Import→Parse→Reconciliation→VerifiedIncome→ComplianceCalendar）全部写完测试，含一次实测抓到的真实 GAS 撞名 bug（详见 `901` 的 verificationHistory）；v0.7（**已批准并实作，2026-08-17**）：Steven 要求 v1 不依赖 Rider OS 独立运行，触发 ADR-003——Reconciliation 从 Verified Income 的前提条件改成可选、非阻断的事后注解（对账状态查询时从 Reconciliation_Log 现算，Verified_Income schema 不变），核心链路简化为 Import→Parse→VerifiedIncome→（可选）Reconciliation→ComplianceCalendar；110/130/140 + 对应测试已实作并通过全套回归；PDF 抽取方式定案为 Drive OCR 先做真的、LLM API 按证据决定；下一阶段 Real Data Pilot 优先，Finance OS 暂缓；v0.8（**已实作，2026-08-17～18**）：Real Data Pilot 执行完成——新增 117_SheetReader.js（读取唯一出口）、110 拆出 runImportPipeline_（批次/重试共用、不丢例外）、140 新增发布幂等检查（existingIncomeIds + CMP-P13）、170_OperatorConsole.js/.html/171（真 HTMLService Console，取代 compliance-os-console.jsx）；appsscript.json 加 Drive Advanced Service + webapp 设定；12 组 runAllXTests()、229 项断言通过
 - Next：Real Data Pilot 的代码面已经做完——Drive OCR 真实实作、Operator Console（HTMLService，Drive 直读 + `drive_file_id` 去重 + 批次汇入 + Retry）、发布幂等检查都已实作并通过 Node 回归。**真正剩下的是 Steven 拿 2026-01 至今的真实 Grab Weekly Statement 在真实 GAS 环境跑一次**——这是 Node 环境完全验证不到的部分（见 111/113/118/171 各自的人工验证清单），目的是找真实数据暴露的 bug（Parser failure / OCR 失败 / 去重失败 / 周界月界 / schema mismatch / 缺欄位 / 金额解析错误 / 重试与幂等），当作下一轮 Architecture 决策的证据。Compliance OS 用真实数据稳定运行一段时间、真实 bug 修完之后，才开始 Finance OS，作为验证「Constitution + Architecture + Adapter + NN_Tests + Contract Tests」这套模式是否真的可复用的第二个 Domain OS——不是现在
+- **Daily Order-Level Allocation 子项目（2026-08-24 起，ADR-004/005）现状与下一步单独整理在 2026-08-25 的 checkpoint/handoff 文件里，不在这里重复维护第二份进度追踪**——本节以上内容（Real Data Pilot 相关）跟这个子项目是两条独立的线，互不影响，此处只加这一行指针
