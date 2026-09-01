@@ -99,15 +99,19 @@ Jumaat, 2 Januari ← 下一天标题
 
 ---
 
-## 6. 最重要的判断
+## 6. 真实 GAS OCR 结果（2026-08-29 补上，最后一块证据）
 
-**结论：C，Hybrid——但跟一般"各做一半"的 hybrid 不一样，这里的分工建议是「deterministic 当 primary，Gemini 当 fallback／交叉验证」，理由如下，不是因为已经写了 Gemini code 就预设选它：**
+Steven 在真实 GAS 跑了 `Drive.Files.insert(W01, {ocr:true})`，把转出来的纯文字贴回来。核对之后，**结论要往 B 修正——这份真实证据比 sandbox 里测过的任何方法都乱**，而且乱的方式跟已经预设的"如果 GAS OCR 品质明显更差、行序打乱，就退回 B"这个条件直接对上。
 
-- 支持"deterministic 可以当 primary"的证据（本报告用两份真实 statement 实测）：格式是固定模板；解析逻辑在拿到坐标级文字时，W01+W33 合计 324 笔里 319 笔（98.5%）完全正确、直接呼叫真实 142 函数就是 Matched，其余 5 笔正确地落到 Needs_Review 而不是猜错、且金额全部正确；两个真正的版面陷阱（小计位置、栏位留白）都已经用两份真实 PDF 各自独立验证一致，且是**机械、确定性的规则**，不是启发式猜测；完全不产生 Gemini 的 token 成本、也没有 quota/503/429 这类外部依赖。
-- 唯一没有解决、也解决不了的：**GAS 原生能不能产出坐标级或至少跟 pymupdf 一样乾净的文字**，这个只有 `Drive.Files.insert(...,{ocr:true})` 真的在 GAS 里跑一次才知道，无法在这个 sandbox 验证。如果 GAS 的 OCR 转换品质够好（哪怕比不上 pdfplumber，只要不比 `pdftotext -layout` 差），deterministic 当 primary 是有真实证据支撑的；如果 GAS 的 OCR 品质明显更差（比如常态性把栏位读错、行序打乱），那就应该退回 B（Gemini 当 primary）。
-- Gemini 的角色不会因此消失：至少在 (a) 真实 GAS 环境验证 OCR 品质之前、(b) 遇到本报告这 5 笔这类 Needs_Review 的情况时，Gemini 仍然是有价值的 fallback / 第二意见来源——这跟你原本 Phase 4 的"Gemini 不是 Truth Engine，checksum 才是"完全一致，只是现在 checksum 通过的第一顺位候选人可能从 Gemini 变成 deterministic。
+具体证据：
+- **总笔数大致完整**：侦测到 172 个"Pesanan"标记（跟已知的 173 差 1），代表内容大致都还在，不是整批漏掉。
+- **同一笔已知问题订单（Isnin, 8PRUR5AGXAQRAV）这次错得更严重**：`Pesanan Tunggal / A- / Tanpa / tunai 2.20 1.80 4.00 / GrabFood / Pesanan Sekaligus / 8PRUR5AGXAQRAV / A- / 8PRP8M8GWO2SAV Tanpa / GrabMart`——这笔订单自己的 ID（8PRUR5AGXAQRAV）被排到了**下一笔订单的"Pesanan Sekaligus"标记之后**，不只是同一行内错位，是跨到别笔订单的地盘去了。这是这份 PDF 第 4 种独立测过的方法（`pdftotext -layout`、pdfplumber 坐标法、现在加上 GAS OCR）在同一个位置出问题，只有 pymupdf 完全正确——这一点没有变。
+- **这不是单一个案**：另外抽查到至少一笔（GrabMart, 8Q3D7BGGWXW8AV）也是同样"自己的 ID 被推到下一笔 Sekaligus 标记之后"的情况。而且错位的具体方式每次不太一样——有时候 ID 只是被推到自己这行的最后面（还在同一笔订单的范围内），有时候整个跨过下一笔订单的开头——**没有单一、一致的规则可以还原**，不像下面这个日期/小计的例子。
+- **日期/小计的顺序也变了，但这个部分是一致、可还原的**：真实 PDF 里"每天的小计出现在那天订单结束、下一天标题之前"；这份 GAS OCR 文字里，顺序整个往后挪了一格——变成"下一天标题先出现，小计接在标题后面"，而且这个规则从头到尾都一样（Ahad 的 205.50 出现在"Sabtu"标题后面、Sabtu 的 213.50 出现在"Jumaat"标题后面……最后 Isnin 的 157.90 排在最尾端没有后续标题）。这部分虽然位置换了，但换法本身很规律，专门写一条对应规则就能救回来。
 
-**建议的下一步（不是现在就决定）**：你在真实 GAS 跑一次 `Drive.Files.insert(pdfId, {ocr:true})` 转换 W01，把转出来的 Google Doc 文字贴回来，我直接拿这份真实 GAS 产出的文字去跑同一套 checksum 验证——这一步做完，A vs C 的判断就有真实环境证据，不用再靠这个 sandbox 的推测。
+**结论修正**：deterministic 的解析逻辑（第 5 节证明的那套）完全没有问题；问题出在 GAS 唯一能用的原生管道——`{ocr:true}` 这个转换——产出的文字，在订单行这一层的乱法，比 sandbox 测过的任何方法都更不可预期，而且至少一部分是跨订单边界的位移，不是单纯"栏位对错"这种事后能用一条规则救回来的问题。这达到了你原本设的"品质明显更差就退回 B"这个门槛。
+
+**修正后的建议**：**Gemini 维持 primary**，deterministic 的角色收窄到两个已经证明很稳的地方——(1) 顶层 Ringkasan 摘要栏位（固定 9 行，格式比订单表简单很多，这次连日期/小计这种"位置整体位移但仍然规律"的情况都能救，摘要栏位大概率更没问题，但这个还没实测，只是合理推测）；(2) 不管订单来自 Gemini 还是任何方法，checksum 这一层继续用现有 142 的 `computeDailyChecksum_`/`computeStatementChecksum_` 把关，这个跟资料来源无关，永远该留着。订单级的 Butiran Tempahan，维持 Gemini 当 primary，除非你想专门花时间为 GAS OCR 这种"部分跨订单错位"的乱法写一个更复杂的救援 parser——这个我可以做，但没办法保证能做到跟 pymupdf 那种乾净度一样高，值不值得投入这个时间是你的判断。
 
 ---
 
@@ -117,7 +121,7 @@ Jumaat, 2 Januari ← 下一天标题
 
 **倾向 PDF → Gemini 直接（不要先转文字再喂给它）**，理由：
 - 第 4 节发现的"栏位留白"问题，本质上是**丢失了空间/视觉资讯就无法正确判断**——Gemini 直接读 PDF（原生多模态）时能利用跟人眼一样的视觉线索去分辨"这一格是空的"，而不是像纯文字流那样，3 个数字要嘛全部读对要嘛数学上有歧义
-- 先转文字这一步，等于用了本报告一直在验证的其中一种（可能不完美的）deterministic 方法，把它的误差直接传给 Gemini，等于两层误差叠加，而不是两条独立的验证路径
+- 第 6 节的真实 GAS OCR 结果进一步支持这一点：先转文字这一步，现在证实会把这份文件的行序、甚至订单边界都打乱，把这个已经很不乾净的文字喂给 Gemini，等于两层误差叠加，而不是两条独立的验证路径
 - 唯一支持"先转文字再喂 Gemini"的理由是省 token/成本，但 Phase 4 设计阶段已经算过这份文件用 Gemini 直接读的成本（每份 statement 约 $0.03-0.05），不构成真正的限制
 
 如果你想要 Gemini 当 fallback 而不是唯一防线，直接喂原始 PDF 应该更稳，也更符合现有 142/127 已经写好的架构（Gemini Adapter 本来就是直接吃 PDF blob）。
@@ -126,4 +130,4 @@ Jumaat, 2 Januari ← 下一天标题
 
 ## 状态
 
-Deterministic 解析逻辑在 W01、W33 两份真实 statement 上都已经完整验证到 checksum 层级（直接呼叫真实、未修改的 142 函数）。GAS 原生文字抽取品质是唯一没办法在这里解决的未知数，等同于当初 Gemini 需要真实环境验证的处境，等你跑一次 `Drive.Files.insert(...,{ocr:true})` 才能补齐。112/127/142 全部未修改，本报告全部是独立的新脚本产生。
+Deterministic 解析逻辑本身在 W01、W33 两份真实 statement 上已经完整验证到 checksum 层级（直接呼叫真实、未修改的 142 函数），没有疑问。真正的瓶颈是 GAS 唯一能用的原生文字管道（`{ocr:true}`）产出的订单级文字不够乾净，这点已经用真实 GAS 输出证实，不再是未知数。结论从"C 偏向 deterministic primary"修正为"**Gemini 维持 primary，deterministic 收窄到摘要栏位＋checksum 把关**"。112/127/142 全部未修改，本报告全部是独立的新脚本产生。
