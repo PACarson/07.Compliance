@@ -31,6 +31,11 @@ var COMPLIANCE_OS_CONSTITUTION = {
       date: '2026-08-25',
       change: 'Daily Order-Level Allocation（跨月 Grab Statement 逐日/逐单归属，取代整周粗颗粒的 Needs_Allocation）Phase 1-4 设计与实作完成，新增 ADR-004（四层数据模型）、ADR-005（Butiran Tempahan 抽取方式：Gemini Extraction Adapter + 确定性验证，取代 Phase 2 一度倾向的纯确定性文字解析）、CMP-CR6（Sekaligus 合法性判准，2026-08-25 用真实 W33 PDF 原件核对过）。142/143（Daily Order Allocation 引擎+测试）为新文件；125/126、127/128 为既有文件的加法性扩充（新增 Butiran Tempahan 相关的 schema/validation/extraction 函数，既有 statement 层级功能一行未改）。140/150/160/108/110/170/900/901 本身、Architecture Freeze、Governance 既有内容均未变动或重开——这是 Freeze 既有例外条款（ADR-003 建立的先例：真实数据/真实需求可以在不重开整层设计的前提下新增 ADR）的延续，不是第二次重新讨论 Freeze 本身。⚠️ 明确未完成：ADR-004/ADR-005 的代码在 Node 模拟环境全部测试通过，但从未对真实 Gemini API 或真实 GAS runtime 验证过（这个开发环境本身没有到 Google API 的网络路由、也没有真的 GAS 环境）——status 标注刻意写成「Decided（设计与方向）＋未验证（真实环境）」两段式，不是「Production」，完整清单见同一天的 checkpoint/handoff 文件',
       approvedBy: 'Steven'
+    },
+    {
+      date: '2026-09-02',
+      change: 'ADR-005 的 status 更新，不是新决定：Steven 要求暂停 Gemini 工作、专门用真实 W01/W33 PDF 测试「deterministic 抽取能否取代 Gemini」这个 ADR-005 从设计时就存在、但从未真的拿证据核对过的问题——结论是维持原决定（Gemini primary），但这次是真实证据支撑，不是延续 Phase 4 时的方向性判断。同一段时间内，127/142 也第一次真的打通了真实 Gemini API 调用（Gate 1 通过，见 901 verificationHistory），但完整链路（Gate 2）跟要不要正式换预设 model 都还没有结论，status 字段刻意保留这个「部分验证、部分待定」的两段式，不写成整条链路已验证。900/901 其余内容、Architecture Freeze 均未变动或重开',
+      approvedBy: 'Steven'
     }
   ],
 
@@ -193,7 +198,7 @@ var COMPLIANCE_OS_CONSTITUTION = {
     { id: 'ADR-002', title: 'Official Truth Principle', status: 'Decided' },
     { id: 'ADR-003', title: 'Reconciliation 与 Verified Income 解耦（Reconciliation is an annotation, not a publication gate）', status: 'Decided' },
     { id: 'ADR-004', title: 'Daily Order-Level Allocation：四层数据模型（Order_Allocation / Non_Order_Income_Allocation / Daily_Allocation / Monthly_Allocation）与 Fact/Projection 边界', status: 'Decided（架构与设计层级；142/143 已实作并通过 Node 测试；未接入 108/110/170，未在真实 GAS 验证——见 checkpoint 文件）' },
-    { id: 'ADR-005', title: 'Butiran Tempahan（订单层级）PDF 抽取方式：Gemini 作为 Extraction Adapter + 142 确定性验证，取代原本 Phase 2 倾向的纯确定性文字解析', status: 'Decided（方向与边界；127/125/142 的对应代码已实作并通过 Node mock 测试；未对真实 Gemini API 或真实 GAS runtime 验证过——见 checkpoint 文件）' }
+    { id: 'ADR-005', title: 'Butiran Tempahan（订单层级）PDF 抽取方式：Gemini 作为 Extraction Adapter + 142 确定性验证，取代原本 Phase 2 倾向的纯确定性文字解析', status: 'Decided，且这个方向本身已用真实证据重新核对过一次（2026-08-29～09-02，见 checkpoint）：Steven 明确要求先暂停 Gemini 工作、专门测试「deterministic 抽取能不能取代 Gemini」这个问题本身——真实 W01/W33 PDF 用坐标级文字抽取测出 319/324 笔可精确重建，证明确定性解析逻辑本身没问题；但唯一能在真实 GAS 产生文字的原生管道（Drive OCR，`{ocr:true}`）真的跑过一次后，出现跨订单边界的错位、没有单一规则能救回——这是这条 ADR 从未有过的、针对「反方案」本身的真实环境证据，结论是维持 Gemini primary，deterministic 收窄到 checksum 验证层。另外，127/125/142 现在为止最完整的真实环境证据：Gate 1（真实 Gemini API 呼叫，完全未改的既有 schema/prompt）首次成功——finishReason=STOP、173 笔、无 schema mismatch；用的是 gemini-3.5-flash（默认 gemini-3.7-flash 连续 3 次真实呼叫都是 503，诊断为该模型刚上市不久、需求过载，非代码缺陷）。Gate 2（125/142 完整链路的 checksum 结果）因为测试脚本自身的 GAS 执行时间预算问题还没跑完，是否要正式改预设 model 尚未决定——完整证据与「决定 vs 尚待确认」的区分见 2026-09-02 checkpoint 文件，不要把 Gate 1 通过直接当成整条链路已验证' }
   ]
 };
 
