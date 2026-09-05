@@ -798,6 +798,209 @@ function runGeminiOrderExtractionWithFallback_(document, verifiedIncomeContext, 
   return { batchId, allocationStatus, dailyAllocations, orderRows, nonRetryableErrors: mappingErrors, attempts, statementChecksum };
 }
 
+// =======================================================================
+// Persistence —— ADR-004 四层模型的 Daily_Allocation / Non_Order_Income_
+// Allocation 两张表，第一次接上真的 Sheet（透过 115_TruthWriter.js，UCR6：
+// 不直接 sheet.appendRow()）。Order_Allocation / Monthly_Allocation 不在这
+// 次范围内（Steven 明确只列了这两张）。
+//
+// 这一段只新增，不改上面任何一行——runGeminiOrderExtractionWithFallback_
+// 等既有函式回传的 in-memory 形状完全不变，这里只是多一层「把回传结果写
+// 进 Sheet」的薄封装，跟 140_VerifiedIncome.js 的 writeVerifiedIncome_ /
+// verifyAndPublishIncome_ 同一个套路：*_COLUMNS 常数 + build*Row(s)_ 纯函式
+// + write*_ 呼叫 truthWriter.appendValidatedRow + 查询用的 getLatest*_。
+//
+// 栏位顺序规则（140_VerifiedIncome.js 顶端 2026-08-22 教训、UCR6 的直接
+// 延伸）：这两张都是全新表，还没有任何真实资料，下面这个顺序是初版；
+// 之后如果要加新栏位，一律加在整个陣列最后面，不要插在中间——不然等表里
+// 已经有真实资料之后，旧资料会因为栏位错位被读成别的意思。
+// =======================================================================
+
+/**
+ * Daily_Allocation：一笔 = 一个 batch 里的一天。batch_id 直接沿用
+ * runGeminiOrderExtractionWithFallback_ 已经在算的 CMP-OALB-{verifiedIncomeId}-
+ * {timestamp}（Steven 明确要求不要另外发明第二套 batch identity），
+ * allocation_status 是整个 batch 的结果（Fully_Allocated/Needs_Review），
+ * 重复记在每一天的行上，查询时不用回头 join 一张不存在的 batch 表。
+ */
+var DAILY_ALLOCATION_COLUMNS = [
+  'daily_allocation_id', 'batch_id', 'verified_income_id',
+  'date', 'order_row_count', 'net_delivery_income', 'printed_daily_subtotal',
+  'checksum_difference', 'checksum_status', 'allocation_status', 'written_at'
+];
+
+/**
+ * Non_Order_Income_Allocation：一笔 = 一条非订单收入台账记录（Tip /
+ * Insentif / Bayaran_Lain_Lain 三选一，category 自己标）。
+ *
+ * ⚠️ 范围说明（不是这次新增的缺口，是既有、记录在案的缺口——见
+ * 901_System_Architecture.js）：matchInsentifLineDate_ / matchBayaranLainLainDate_
+ * 只做「日期判定」，不产生完整一行（Insentif/Bayaran-lain-lain 目前没有
+ * 类似 parseTipSection_ 那种"逐行解析出 description+amount"的完整实作，
+ * Gemini 这边 extract() 目前也只回报统计总额，不是逐行文字）。这里的
+ * buildNonOrderIncomeAllocationRow_ 因此不自己去解析原始文字，而是要求
+ * 呼叫方已经把 category/description_raw/amount 跟这三个判定函式其中一个
+ * 的回传值（dateSource/allocatedDate/referencedSourcePeriod/linkedOrderId）
+ * 组成同一个 candidate 物件——持久化层只负责「这个统一形状能不能正确、
+ * 完整地写进 Sheet（包括 allocated_date 允许 null）」，不负责组出这个
+ * 形状本身。真正逐行组出这个 candidate 的呼叫方，等 Gemini 或其他方式
+ * 真的产出非订单收入的逐行资料时才会存在——这不是这次 Persistence 任务
+ * 的范围（会碰到 extraction contract，按规则 1 应该 STOP，不是我自己
+ * 顺手做掉）。
+ *
+ * @typedef {{category:string, descriptionRaw:(string|null), amount:number,
+ *   dateSource:string, allocatedDate:(string|null),
+ *   referencedSourcePeriod:(string|null), linkedOrderId:(string|null)}}
+ *   NonOrderIncomeCandidate
+ */
+var NON_ORDER_INCOME_ALLOCATION_COLUMNS = [
+  'non_order_income_id', 'batch_id', 'verified_income_id', 'category',
+  'description_raw', 'amount', 'allocated_date', 'date_source',
+  'referenced_source_period', 'linked_order_id', 'written_at'
+];
+
+/**
+ * @param {Object} batchResult runGeminiOrderExtractionWithFallback_() 的回传
+ *   （batchId/allocationStatus/dailyAllocations 三个字段会被用到，其余忽略）
+ * @param {string} verifiedIncomeId 例如 "CMP-INCOME-2026-W01"
+ * @param {Date} [now]
+ * @return {Array<Object>} 已经是 DAILY_ALLOCATION_COLUMNS 形状的 row 物件陣列
+ */
+function buildDailyAllocationRows_(batchResult, verifiedIncomeId, now) {
+  if (!batchResult || !Array.isArray(batchResult.dailyAllocations)) {
+    throw new Error('buildDailyAllocationRows_: batchResult.dailyAllocations 缺失或不是阵列');
+  }
+  if (!verifiedIncomeId) {
+    throw new Error('buildDailyAllocationRows_: verifiedIncomeId 缺失——Daily_Allocation 必须能追溯回它所属的 Verified_Income');
+  }
+  const writtenAt = (now instanceof Date ? now : new Date()).toISOString();
+  return batchResult.dailyAllocations.map((day) => ({
+    daily_allocation_id: `${batchResult.batchId}-${day.date || 'UNDATED'}`,
+    batch_id: batchResult.batchId,
+    verified_income_id: verifiedIncomeId,
+    date: day.date,
+    order_row_count: day.order_row_count,
+    net_delivery_income: day.net_delivery_income,
+    printed_daily_subtotal: day.printed_daily_subtotal,
+    checksum_difference: day.checksum_difference,
+    checksum_status: day.checksum_status,
+    allocation_status: batchResult.allocationStatus,
+    written_at: writtenAt
+  }));
+}
+
+/**
+ * 查询用——某个 verified_income_id 目前最新的 batch_id 是哪个，从全部既有
+ * 记录里用 batch_id 字串排序（batch_id 带 timestamp，同 130_Reconciliation.js
+ * 的 getCurrentReconciliationStatus_ 同一个原理）算出来，不是存在别处等着
+ * 被回头更新的欄位（UCR6：TruthWriter 只支援 append）。
+ * @param {string} verifiedIncomeId
+ * @param {Array<{verified_income_id:string, batch_id:string}>} dailyAllocationRecords 从 Sheet 读回来的既有全部记录
+ * @return {string|null}
+ */
+function getLatestDailyAllocationBatchId_(verifiedIncomeId, dailyAllocationRecords) {
+  const forIncome = (dailyAllocationRecords || []).filter((r) => r.verified_income_id === verifiedIncomeId);
+  if (forIncome.length === 0) return null;
+  return forIncome.reduce((a, b) => (a.batch_id > b.batch_id ? a : b)).batch_id;
+}
+
+/** 同上，但直接回传最新那个 batch 的全部行（例如给 Monthly Projection 之类的消费者用）。 */
+function getLatestDailyAllocationRows_(verifiedIncomeId, dailyAllocationRecords) {
+  const latestBatchId = getLatestDailyAllocationBatchId_(verifiedIncomeId, dailyAllocationRecords);
+  if (!latestBatchId) return [];
+  return (dailyAllocationRecords || []).filter((r) => r.batch_id === latestBatchId);
+}
+
+/**
+ * 把一个 batch 的 Daily_Allocation 写进 Sheet（透过 TruthWriter，UCR6）。
+ *
+ * existingRows 是可选的（不给就是原本的行为：一律写入，旧 batch 天然因为
+ * batch_id 不同而不会被覆写——这是 143 Test 28 已经确认过的 idempotency
+ * 定义本身）。如果给了 existingRows，会多一层「这个 verified_income_id
+ * 现有最新的 batch 是不是已经 Fully_Allocated」的保护：已经是的话就跳过、
+ * 不再多写一个 batch，除非 force=true——这一层是这次新加、比既有定义更
+ * 严格的一个选择性策略，不是本来就决定好的行为，标在这里方便 Steven
+ * 之后决定要不要保留。
+ * @param {Object} truthWriter 115_TruthWriter.js 的实例
+ * @param {Object} batchResult runGeminiOrderExtractionWithFallback_() 的回传
+ * @param {string} verifiedIncomeId
+ * @param {Date} [now]
+ * @param {Array<Object>} [existingRows] 已存在的 Daily_Allocation 全部记录（选填）
+ * @param {boolean} [force] 即使既有最新 batch 已经 Fully_Allocated，仍强制再写一个新 batch
+ * @return {{written:Array<Object>, skipped:boolean, reason:(string|undefined), existingBatchId:(string|undefined)}}
+ */
+function writeDailyAllocationBatch_(truthWriter, batchResult, verifiedIncomeId, now, existingRows, force) {
+  if (existingRows && !force) {
+    const latestBatchId = getLatestDailyAllocationBatchId_(verifiedIncomeId, existingRows);
+    if (latestBatchId) {
+      const latestRows = existingRows.filter((r) => r.batch_id === latestBatchId);
+      const latestStatus = latestRows.length > 0 ? latestRows[0].allocation_status : null;
+      if (latestStatus === 'Fully_Allocated') {
+        return { written: [], skipped: true, reason: 'Already_Fully_Allocated', existingBatchId: latestBatchId };
+      }
+    }
+  }
+  const rows = buildDailyAllocationRows_(batchResult, verifiedIncomeId, now);
+  rows.forEach((row) => truthWriter.appendValidatedRow('Daily_Allocation', row, DAILY_ALLOCATION_COLUMNS));
+  return { written: rows, skipped: false };
+}
+
+/**
+ * @param {NonOrderIncomeCandidate} candidate
+ * @param {string} batchId
+ * @param {string} verifiedIncomeId
+ * @param {Date} now
+ * @param {number} sequenceIndex 同一个 batch 里的第几笔非订单收入（0 起算），
+ *   用来组出稳定、不重复的 non_order_income_id——这类记录没有像订单号那种
+ *   天然唯一的业务 ID 可以借用。
+ * @return {Object} NON_ORDER_INCOME_ALLOCATION_COLUMNS 形状的 row 物件
+ */
+function buildNonOrderIncomeAllocationRow_(candidate, batchId, verifiedIncomeId, now, sequenceIndex) {
+  if (!candidate || !candidate.category) {
+    throw new Error('buildNonOrderIncomeAllocationRow_: candidate.category 缺失（必须是 Tip/Insentif/Bayaran_Lain_Lain 之一）');
+  }
+  if (typeof candidate.amount !== 'number' || isNaN(candidate.amount)) {
+    throw new Error(`buildNonOrderIncomeAllocationRow_: candidate.amount 缺失或不是数字（category=${candidate.category}）`);
+  }
+  if (!candidate.dateSource) {
+    throw new Error(`buildNonOrderIncomeAllocationRow_: candidate.dateSource 缺失——就算判定不出日期也要显式给 'Not_Determinable'，不能整个欄位不见（CMP-P10）`);
+  }
+  const writtenAt = (now instanceof Date ? now : new Date()).toISOString();
+  return {
+    non_order_income_id: `${batchId}-NOI-${sequenceIndex}`,
+    batch_id: batchId,
+    verified_income_id: verifiedIncomeId,
+    category: candidate.category,
+    description_raw: candidate.descriptionRaw === undefined ? null : candidate.descriptionRaw,
+    amount: round2_(candidate.amount),
+    // CMP-P10 + Steven 明确要求：allocated_date 允许 null（日期判定不出来
+    // 是真实、要保留的状态，不能因为要写进 Sheet 就编一个日期）——
+    // TruthWriter.appendValidatedRow 本来就把显式 null 转成空字符串写入，
+    // 只有 undefined 才会被当成漏填而抛错，这里确保永远传 null 不传 undefined。
+    allocated_date: candidate.allocatedDate === undefined ? null : candidate.allocatedDate,
+    date_source: candidate.dateSource,
+    referenced_source_period: candidate.referencedSourcePeriod === undefined ? null : candidate.referencedSourcePeriod,
+    linked_order_id: candidate.linkedOrderId === undefined ? null : candidate.linkedOrderId,
+    written_at: writtenAt
+  };
+}
+
+/**
+ * 把同一个 batch 的一批非订单收入候选写进 Sheet（透过 TruthWriter，UCR6）。
+ * @param {Object} truthWriter
+ * @param {Array<NonOrderIncomeCandidate>} candidates
+ * @param {string} batchId 建议跟同一次处理的 Daily_Allocation batch 用同一个
+ *   batch_id（呼叫方决定，这里不強制、不自己生成第二套）
+ * @param {string} verifiedIncomeId
+ * @param {Date} [now]
+ * @return {Array<Object>} 实际写入的 row 物件陣列
+ */
+function writeNonOrderIncomeAllocationBatch_(truthWriter, candidates, batchId, verifiedIncomeId, now) {
+  const rows = (candidates || []).map((c, i) => buildNonOrderIncomeAllocationRow_(c, batchId, verifiedIncomeId, now, i));
+  rows.forEach((row) => truthWriter.appendValidatedRow('Non_Order_Income_Allocation', row, NON_ORDER_INCOME_ALLOCATION_COLUMNS));
+  return rows;
+}
+
 if (typeof module !== 'undefined') {
   module.exports = {
     CHECKSUM_TOLERANCE_,
@@ -823,6 +1026,14 @@ if (typeof module !== 'undefined') {
     orderDateToYearMonth_,
     candidateFromGeminiOrderRow_,
     mergeChunkedExtractionResults_,
-    runGeminiOrderExtractionWithFallback_
+    runGeminiOrderExtractionWithFallback_,
+    DAILY_ALLOCATION_COLUMNS,
+    NON_ORDER_INCOME_ALLOCATION_COLUMNS,
+    buildDailyAllocationRows_,
+    getLatestDailyAllocationBatchId_,
+    getLatestDailyAllocationRows_,
+    writeDailyAllocationBatch_,
+    buildNonOrderIncomeAllocationRow_,
+    writeNonOrderIncomeAllocationBatch_
   };
 }

@@ -28,6 +28,7 @@ if (typeof require === 'function') {
   var { DOCUMENTS_COLUMNS } = require('./110_DocumentImport.js');
   var { RECONCILIATION_LOG_COLUMNS } = require('./130_Reconciliation.js');
   var { VERIFIED_INCOME_COLUMNS } = require('./140_VerifiedIncome.js');
+  var { DAILY_ALLOCATION_COLUMNS, NON_ORDER_INCOME_ALLOCATION_COLUMNS } = require('./142_DailyOrderAllocation.js');
   var { COMPLIANCE_CALENDAR_COLUMNS, COMPLIANCE_COMPLETIONS_COLUMNS } = require('./150_ComplianceCalendar.js');
   var { getTargetSpreadsheet_ } = require('./115_TruthWriter.js');
 }
@@ -82,6 +83,23 @@ function buildSheetSchemas_() {
       name: 'Compliance_Completions',
       columns: COMPLIANCE_COMPLETIONS_COLUMNS,
       textColumns: COMPLIANCE_COMPLETIONS_COLUMNS // 全部都是文字/ID 栏位
+    },
+    {
+      // ADR-004 四层模型的第一张接上真的 Sheet 的表（142_DailyOrderAllocation.js
+      // 2026-09-05 新增）。date 是 "YYYY-MM-DD" 字符串，跟 Verified_Income 的
+      // period_start/period_end 同一个理由必须留在 textColumns，不然会被
+      // Sheets 静默转成日期序列值。
+      name: 'Daily_Allocation',
+      columns: DAILY_ALLOCATION_COLUMNS,
+      textColumns: ['daily_allocation_id', 'batch_id', 'verified_income_id', 'date', 'checksum_status', 'allocation_status', 'written_at']
+      // order_row_count/net_delivery_income/printed_daily_subtotal/checksum_difference
+      // 刻意不列——留给 Sheets 当数字
+    },
+    {
+      name: 'Non_Order_Income_Allocation',
+      columns: NON_ORDER_INCOME_ALLOCATION_COLUMNS,
+      textColumns: ['non_order_income_id', 'batch_id', 'verified_income_id', 'category', 'description_raw', 'allocated_date', 'date_source', 'referenced_source_period', 'linked_order_id', 'written_at']
+      // amount 刻意不列——留给 Sheets 当数字
     }
   ];
 }
