@@ -173,7 +173,20 @@ function resolveDateFromDayMonth_(day, monthName, periodStartParts, periodEndPar
   if (candidates.length > 1) return { ok: false, reason: `月份 ${monthName} 对应多个年份，无法唯一判定` };
   const year = candidates[0].year;
   if (!isValidYmd_(year, monthNumber, day)) return { ok: false, reason: `${year}-${monthName}-${day} 不是合法日期` };
-  return { ok: true, isoDate: isoDateFromYmd_(year, monthNumber, day) };
+  const isoDate = isoDateFromYmd_(year, monthNumber, day);
+  // 2026-09-06 新增：月份在 statement 涵盖范围内，不代表这一天也在——
+  // 例如 statement 是 2025-12-29~2026-01-04，"1月19日" 的月份（Januari）
+  // 确实是这份 statement 涵盖的两个月之一，但 19 号本身在 period 外，
+  // 之前只查到月份这一步就放行，这个真实发生过（Gemini 把日期
+  // hallucinate 成同月份、不同周）。这里补上「resolved date 必须真的落在
+  // period_start~period_end 之间」——用 ISO 字符串比较，YYYY-MM-DD 格式
+  // 字典序排序就是时间排序，不需要再转 Date 物件。
+  const periodStartIso = isoDateFromYmd_(periodStartParts.year, periodStartParts.month, periodStartParts.day);
+  const periodEndIso = isoDateFromYmd_(periodEndParts.year, periodEndParts.month, periodEndParts.day);
+  if (isoDate < periodStartIso || isoDate > periodEndIso) {
+    return { ok: false, reason: `${isoDate} 的月份虽然在 statement 期间范围内，但实际日期不在 period_start(${periodStartIso})~period_end(${periodEndIso}) 之间` };
+  }
+  return { ok: true, isoDate };
 }
 
 function resolveOrderDate_(weekdayName, day, monthName, periodStartParts, periodEndParts) {

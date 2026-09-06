@@ -17,7 +17,7 @@
 
 if (typeof require === 'function') {
   var {
-    isoDateFromYmd_, isValidYmd_, enumerateYearMonthsInPeriod_, resolveOrderDate_,
+    isoDateFromYmd_, isValidYmd_, enumerateYearMonthsInPeriod_, resolveOrderDate_, resolveDateFromDayMonth_,
     splitIntoDayBlocks_, extractOrderIds_, parseOrderRowCandidate_, parseDayBlock_,
     computeDailyChecksum_, computeStatementChecksum_, parseTipSection_, matchInsentifLineDate_,
     matchExplicitPeriodReference_, matchBayaranLainLainDate_, orderDateToYearMonth_,
@@ -319,6 +319,55 @@ function runDailyOrderAllocationTests_() {
   // ---- 7: repeated header / footer 不被误判成订单行 ----
   results.push({ name: 'TEST 7: repeated header/footer 不产生假的 invalid-row 噪音（W01 invalid 数量应该很小，不是几十笔）', pass: w01.invalid.length < 5, actual: w01.invalid.length, expected: '< 5' });
   results.push({ name: 'TEST 7b: repeated header/footer 不产生假的 invalid-row 噪音（W33）', pass: w33.invalid.length < 5, actual: w33.invalid.length, expected: '< 5' });
+
+  // =====================================================================
+  // Date validation gap fix —— resolveDateFromDayMonth_ 现在同时检查
+  // 「月份在 period 内」AND「解析出来的日期真的落在 period_start~
+  // period_end 之间」（2026-09-06 新增，修复真实发生过的案例：Gemini 把
+  // 日期 hallucinate 成同月份、不同周，例如 2026年1月19-25日，月份对但
+  // 周不对，之前只查到月份这一步就放行）
+  // =====================================================================
+
+  const w01Boundary = [
+    { day: 29, month: 'Disember', shouldPass: true, iso: '2025-12-29' },
+    { day: 31, month: 'Disember', shouldPass: true, iso: '2025-12-31' },
+    { day: 1, month: 'Januari', shouldPass: true, iso: '2026-01-01' }, // 跨年份，必须解到 2026 不是 2025
+    { day: 4, month: 'Januari', shouldPass: true, iso: '2026-01-04' },
+    { day: 5, month: 'Januari', shouldPass: false }, // 月份对，日期在 period 外
+    { day: 19, month: 'Januari', shouldPass: false }, // 真实 hallucination 案例（168 笔那次）
+    { day: 25, month: 'Januari', shouldPass: false },
+    { day: 9, month: 'Februari', shouldPass: false } // 月份本身不在 period 内
+  ];
+  w01Boundary.forEach((c) => {
+    const r = resolveDateFromDayMonth_(c.day, c.month, DOAL_W01_PERIOD_START_, DOAL_W01_PERIOD_END_);
+    const pass = c.shouldPass ? (r.ok === true && r.isoDate === c.iso) : (r.ok === false);
+    results.push({
+      name: `DateBoundary.W01: ${c.day} ${c.month} 应该 ${c.shouldPass ? ('PASS(' + c.iso + ')') : 'REJECT'}`,
+      pass, actual: r, expected: c.shouldPass ? { ok: true, isoDate: c.iso } : { ok: false }
+    });
+  });
+
+  const w33Boundary = [
+    { day: 10, month: 'Ogos', shouldPass: true, iso: '2026-08-10' },
+    { day: 16, month: 'Ogos', shouldPass: true, iso: '2026-08-16' },
+    { day: 9, month: 'Ogos', shouldPass: false },
+    { day: 17, month: 'Ogos', shouldPass: false },
+    { day: 1, month: 'Julai', shouldPass: false },
+    { day: 1, month: 'September', shouldPass: false }
+  ];
+  w33Boundary.forEach((c) => {
+    const r = resolveDateFromDayMonth_(c.day, c.month, DOAL_W33_PERIOD_START_, DOAL_W33_PERIOD_END_);
+    const pass = c.shouldPass ? (r.ok === true && r.isoDate === c.iso) : (r.ok === false);
+    results.push({
+      name: `DateBoundary.W33: ${c.day} ${c.month} 应该 ${c.shouldPass ? ('PASS(' + c.iso + ')') : 'REJECT'}`,
+      pass, actual: r, expected: c.shouldPass ? { ok: true, isoDate: c.iso } : { ok: false }
+    });
+  });
+
+  // 用 resolveOrderDate_（订单实际呼叫的入口，多一层 weekday 检查）而不是
+  // 只测底层函式，确保修复在真正的调用路径上也生效——这是真实撞过的事故
+  const realHallucinationCase = resolveOrderDate_('Isnin', 19, 'Januari', DOAL_W01_PERIOD_START_, DOAL_W01_PERIOD_END_);
+  results.push({ name: 'DateBoundary: 真实 168 笔事故重现（"Isnin, 19 Januari"）现在被拒绝', pass: realHallucinationCase.ok === false, actual: realHallucinationCase, expected: '{ ok: false }' });
 
   // =====================================================================
   // Persistence —— Daily_Allocation / Non_Order_Income_Allocation
