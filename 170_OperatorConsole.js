@@ -33,6 +33,8 @@ if (typeof require === 'function') {
   var { DOCUMENTS_COLUMNS, computeFileHash_, runImportPipeline_ } = require('./110_DocumentImport.js');
   var { VERIFIED_INCOME_COLUMNS } = require('./140_VerifiedIncome.js');
   var { computeMonthlyIncomeSummary_, computeYearToDateIncomeSummary_, computeMonthlyAllocation_, computeComplianceProjection_, findInvalidPeriodIncomeIds_ } = require('./160_MonthlyProjection.js');
+  var { DAILY_ALLOCATION_COLUMNS, runGeminiOrderExtractionWithFallback_, writeDailyAllocationBatch_ } = require('./142_DailyOrderAllocation.js');
+  var { realLLMExtractor_ } = require('./127_LLMExtractor.js');
 }
 
 /** 真的去调用 Drive API 的那一层——只能在真实 GAS 环境跑，Node 测不了。 */
@@ -300,6 +302,12 @@ function consoleManualImport_(pastedText, deps) {
  */
 function consoleRebuildProjections_(deps) {
   const verifiedIncomeRecords = deps.sheetReader.readAll('Verified_Income', VERIFIED_INCOME_COLUMNS);
+  // 2026-09-15 Production Wiring Slice：把既有的 Daily_Allocation 一起读出来，
+  // 传给 160——是否要拿它来把某笔 Needs_Allocation 的订单收入分月计入，
+  // 判断逻辑全部在 160 里（查 allocation_status 是不是 Fully_Allocated），
+  // 这里只负责提供资料，不重复判断一次。完全不会因为这里多读一张表就去
+  // 触发 Execution B/呼叫 Gemini——纯读取既有内容。
+  const dailyAllocationRecords = deps.sheetReader.readAll('Daily_Allocation', DAILY_ALLOCATION_COLUMNS);
   // 2026-08-22：改用 computeMonthlyAllocation_ 列出每笔记录实际触及的全部月份
   // （1 或 2 个），不是只取"该周星期四所在月份"——不然一个月如果只有横跨
   // 该月的 Needs_Allocation 记录、没有任何完全落在该月的记录，旧写法会让
@@ -313,11 +321,11 @@ function consoleRebuildProjections_(deps) {
   // 需求 §5 的 Monthly Console UI 把这两块放在同一个月份视图里，这里一起
   // 附上，前端不用为了 Compliance Projection 另外发一次请求。
   const monthlySummaries = months.map((ym) => {
-    const summary = computeMonthlyIncomeSummary_(verifiedIncomeRecords, ym);
+    const summary = computeMonthlyIncomeSummary_(verifiedIncomeRecords, ym, dailyAllocationRecords);
     return Object.assign({}, summary, { compliance_projection: computeComplianceProjection_(ym, summary) });
   });
   const currentYear = deps.now.getFullYear();
-  const ytd = computeYearToDateIncomeSummary_(verifiedIncomeRecords, currentYear);
+  const ytd = computeYearToDateIncomeSummary_(verifiedIncomeRecords, currentYear, undefined, dailyAllocationRecords);
   // 2026-08-22：跟 Needs_Allocation（跨月、待人工判断分月）不是同一件事——
   // 这里是「period 本身就读不出来／不合法」，通常代表 Sheet 里有栏位错位
   // 或残留旧资料，Steven 该去清资料，不是等系统帮他猜。明确列出来，不要
@@ -353,6 +361,134 @@ function consoleGetIncomeDetail_(incomeId, deps) {
     income,
     document: doc ? { documentId: doc.document_id, driveFileId: doc.drive_file_id, drivePath: doc.drive_path, status: doc.status } : null
   };
+}
+
+/**
+ * 112_DocumentTextExtractor.js 的 DocumentTextExtractor 单例只往外传
+ * .extract()（statement 层级），没有把 .extractOrders() 往外传——142 的
+ * runGeminiOrderExtractionWithFallback_ 需要的正是 .extractOrders()。这里
+ * 另外包一层给它用，不改 112（112 不在这次 Production Wiring Slice 的
+ * 授权范围内，这个 wrapper 完全没碰到 112 半行）。跟 112 的
+ * lazyLLMExtractor_() 同一个理由延迟建构：module 顶层就急着
+ * realLLMExtractor_() 的话，Script Properties（GEMINI_API_KEY 等）还没设
+ * 定时会让整个专案载入失败，不是只有呼叫到这个函数才失败。
+ * @return {{extractOrders: function(Object, ?Array): Object}}
+ */
+function lazyOrderExtractor_() {
+  let cached = null;
+  return {
+    extractOrders(document, pageRange) {
+      if (!cached) cached = realLLMExtractor_();
+      return cached.extractOrders(document, pageRange);
+    }
+  };
+}
+
+/**
+ * Verified_Income 的 period_start/period_end 是 ISO 日期字符串
+ * （"2025-12-29"）；142 的 runGeminiOrderExtractionWithFallback_ 需要的
+ * verifiedIncomeContext 却是 periodStartParts/periodEndParts 这种
+ * {year,month,day} 形状（142 自己的 JSDoc 写得很清楚，143 的测试也是直接
+ * 手写这个形状的常量喂给它）。这个转换本来就不存在——142 在这次 wiring 之前
+ * 从来没有真的接过 Verified_Income 的资料，唯一的呼叫方只有 143 手写的
+ * fixture。纯字符串拆解，不重新实作任何既有的日期/期间判断逻辑。
+ * @param {string} isoDate "2025-12-29"
+ * @return {{year:number,month:number,day:number}}
+ */
+function isoDateStringToParts_(isoDate) {
+  const parts = String(isoDate).split('-').map(Number);
+  return { year: parts[0], month: parts[1], day: parts[2] };
+}
+
+/**
+ * Execution B——跟 Document Import（Execution A）完全独立的第二个 GAS
+ * execution，触发既有 142_DailyOrderAllocation.js 的 daily allocation。
+ * 架构依据：ArchitectureDecisionConfirmation_2026-09-15.md。
+ *
+ * 输入只有一个 verified_income_id 字符串，不依赖任何 UI 状态、暂存变量、
+ * 或「刚刚 import 的那份 PDF」——每次呼叫都重新去读 Verified_Income/
+ * Documents/Daily_Allocation 现有内容，所以可以在跟 Execution A 完全不同
+ * 的时间点独立重跑/重试，也可以被同一个 income_id 安全地重复呼叫（幂等性
+ * 完全交给既有的 writeDailyAllocationBatch_ 的 skip-if-Fully_Allocated
+ * 守卫，这里不重新发明）。
+ *
+ * 只调用既有的 142 API（runGeminiOrderExtractionWithFallback_ /
+ * writeDailyAllocationBatch_），不重新实作 daily allocation 逻辑本身——这
+ * 里的职责只有「找到正确的输入、组好 deps、呼叫、把结果转成清楚的回传值」。
+ *
+ * Failure safety：runGeminiOrderExtractionWithFallback_ 自己的设计是全部
+ * 路径都不抛例外、失败明确回 Needs_Review；真的走到 catch 代表连 fallback
+ * 都没接住的例外（例如 Drive 读档失败）。不管哪一种，Verified_Income 都不
+ * 会被这个函数改动一个字——失败就是不写 / 写出 Needs_Review 的
+ * Daily_Allocation，160 那边看到的还是原本的 Needs_Allocation，不会误判
+ * 成已经处理好。
+ *
+ * @param {string} incomeId 例如 "CMP-INCOME-2026-W01"
+ * @param {Object} [deps]
+ * @return {Object} 明确的结果状态（status: 'Done'|'Skipped'|'Error'），不是
+ *   Boolean 或裸例外
+ */
+function consoleRunDailyAllocation_(incomeId, deps) {
+  const d = deps || buildConsoleDeps_();
+
+  const incomeRecord = d.sheetReader.readAll('Verified_Income', VERIFIED_INCOME_COLUMNS)
+    .find((r) => r.income_id === incomeId);
+  if (!incomeRecord) {
+    return { incomeId, status: 'Error', error: `找不到 income_id=${incomeId} 对应的 Verified_Income 记录` };
+  }
+
+  const allocation = computeMonthlyAllocation_(incomeRecord);
+  if (allocation.status !== 'Needs_Allocation') {
+    return { incomeId, status: 'Skipped', reason: `这笔记录目前的分类是 ${allocation.status}，不是 Needs_Allocation，不需要跑 daily allocation` };
+  }
+
+  // 2026-09-15 起把从这里开始的整段（读 Documents、呼叫既有 142 API、读/写
+  // Daily_Allocation）都包进同一个 try/catch——原本只包 Gemini 呼叫那一行，
+  // 但 Sheet 读写本身理论上也可能抛错（例如真实 GAS 环境下的 Sheet API
+  // 问题），没接住的话会让整个 console 呼叫直接崩溃，而不是回一个干净的
+  // Error 状态。跟这份专案一路要求的"永远回明确的结果状态，不留没接住的
+  // 例外"原则一致，不是只有 Gemini 那一步需要 fail closed。
+  try {
+    const documentRow = incomeRecord.source_document_id
+      ? d.sheetReader.readAll('Documents', DOCUMENTS_COLUMNS).find((doc) => doc.document_id === incomeRecord.source_document_id)
+      : null;
+    if (!documentRow) {
+      return { incomeId, status: 'Error', error: `找不到 source_document_id=${incomeRecord.source_document_id} 对应的 Documents 记录` };
+    }
+
+    const document = { fileId: documentRow.drive_file_id, mimeType: 'application/pdf', documentId: documentRow.document_id };
+    const verifiedIncomeContext = {
+      verifiedIncomeId: incomeId,
+      periodStartParts: isoDateStringToParts_(incomeRecord.period_start),
+      periodEndParts: isoDateStringToParts_(incomeRecord.period_end),
+      netDeliveryIncome: incomeRecord.net_delivery_income
+    };
+
+    // orderExtractor 可以透过 deps 注入（测试用假的，不必真的打 Gemini）——
+    // 跟这个专案其他 deps 注入的惯例一致；deps 没给就用真正的 lazy 版本。
+    // 注意：runGeminiOrderExtractionWithFallback_ 自己的设计是全部路径都不
+    // 抛例外——extractor 真的丢例外时，它会在内部被 full-doc/chunk fallback
+    // 接住，回传一个正常的、allocationStatus 是 Needs_Review 的结果，不会
+    // 走到这个 function 的 catch。这里保留 try/catch 是为了 142 自己都没
+    // 预期到的例外（例如 deps.extractor 本身有问题），双重保险，不是重复
+    // 实作 142 已经有的 fallback。
+    const orderExtractor = d.orderExtractor || lazyOrderExtractor_();
+    const batchResult = runGeminiOrderExtractionWithFallback_(document, verifiedIncomeContext, { extractor: orderExtractor, now: d.now });
+
+    const existingDailyAllocationRows = d.sheetReader.readAll('Daily_Allocation', DAILY_ALLOCATION_COLUMNS);
+    const writeResult = writeDailyAllocationBatch_(d.truthWriter, batchResult, incomeId, d.now, existingDailyAllocationRows);
+
+    return {
+      incomeId,
+      status: 'Done',
+      allocationStatus: batchResult.allocationStatus,
+      skipped: !!writeResult.skipped,
+      reason: writeResult.reason,
+      rowsWritten: (writeResult.written || []).length
+    };
+  } catch (err) {
+    return { incomeId, status: 'Error', error: String((err && err.message) || err) };
+  }
 }
 
 /** 记住上次用过的 Folder ID，下次打开 Console 不用重新贴。真的很小的一个
@@ -433,6 +569,11 @@ function consoleManualImport(pastedText, deps) {
 function consoleGetIncomeDetail(incomeId, deps) {
   return consoleGetIncomeDetail_(incomeId, deps);
 }
+/** Execution B 的公开薄壳——Console 在某笔 Needs_Allocation 记录旁边的
+ *  "Run Daily Allocation" 按钮呼叫这个，不是 consoleRunDailyAllocation_。 */
+function consoleRunDailyAllocation(incomeId, deps) {
+  return consoleRunDailyAllocation_(incomeId, deps);
+}
 
 if (typeof module !== 'undefined') {
   module.exports = {
@@ -447,6 +588,8 @@ if (typeof module !== 'undefined') {
     consoleRebuildProjections_,
     consoleGetDashboard_,
     consoleGetIncomeDetail_,
+    consoleRunDailyAllocation_,
+    lazyOrderExtractor_,
     consoleGetDashboard,
     consoleGetLastFolderId,
     consoleSaveLastFolderId,
@@ -454,6 +597,7 @@ if (typeof module !== 'undefined') {
     consoleBatchImport,
     consoleRetryFile,
     consoleManualImport,
-    consoleGetIncomeDetail
+    consoleGetIncomeDetail,
+    consoleRunDailyAllocation
   };
 }

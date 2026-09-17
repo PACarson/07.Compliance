@@ -203,6 +203,113 @@ function runAllMonthlyProjectionTests() {
   assertEqual_('YTD 不给 through_year_month 时用最新月份（W31 是 Superseded，8 月不该出现）', ytdNoLimit.through_year_month, '2026-07', results);
 
   // ============================================================
+  // 2026-09-15 Production Wiring Slice——Needs_Allocation 不再无条件排除，
+  // 先查有没有 142 已经 Fully_Allocated 的 Daily_Allocation。W01 的每日数字
+  // 是 Gate 2 已经验证过的真实 ground truth（不是编的）：
+  //   12月 = 157.90+196.00+174.70 = 528.60
+  //   1月  = 187.60+162.40+213.50+205.50 = 769.00
+  //   合计 = 1297.60（跟已验证的周总额吻合）
+  // ============================================================
+  function sampleDailyAllocationRow_(batchId, incomeId, date, orderCount, netDeliveryIncome, allocationStatus) {
+    return {
+      daily_allocation_id: `${batchId}-${date}`, batch_id: batchId, verified_income_id: incomeId,
+      date, order_row_count: orderCount, net_delivery_income: netDeliveryIncome,
+      printed_daily_subtotal: netDeliveryIncome, checksum_difference: 0,
+      checksum_status: 'Fully_Allocated', allocation_status: allocationStatus || 'Fully_Allocated',
+      written_at: '2026-09-10T15:17:28.008Z'
+    };
+  }
+  const w01Income = {
+    income_id: 'CMP-INCOME-2026-W01', period: '2026-W01',
+    period_start: '2025-12-29', period_end: '2026-01-04', currency: 'MYR',
+    net_delivery_income: 1297.60, incentive: 566.20, tip: 50.00, other_payments: 19.00,
+    total_deductions: 0, net: round2ForTest_(1297.60 + 566.20 + 50.00 + 19.00),
+    amount: 1932.80, source: 'Compliance OS', origin_platform: 'Grab', status: 'Verified',
+    verified_at: '2026-01-05T00:00:00Z', source_document_id: 'DOC-2026-W01'
+  };
+  const w01DailyRowsData = [
+    ['2025-12-29', 21, 157.90], ['2025-12-30', 28, 196.00], ['2025-12-31', 23, 174.70],
+    ['2026-01-01', 22, 187.60], ['2026-01-02', 20, 162.40], ['2026-01-03', 28, 213.50], ['2026-01-04', 31, 205.50]
+  ];
+  const w01DailyRows = w01DailyRowsData.map(([date, count, amt]) => sampleDailyAllocationRow_('BATCH-W01-1', 'CMP-INCOME-2026-W01', date, count, amt));
+
+  // ---- Test 1：非跨月 Statement——传了（跟它无关的）Daily_Allocation 也不受影响 ----
+  const julyWithUnrelatedDaily = computeMonthlyIncomeSummary_(records, '2026-07', w01DailyRows);
+  assertEqual_('Test1(wiring)·非跨月月份的汇总，传入无关的 Daily_Allocation 不影响结果', julyWithUnrelatedDaily, julySummary, results);
+
+  // ---- Test 2：跨月 Statement（真实 W01）——12/1 月分别拿到正确的订单收入 ----
+  const decSummary = computeMonthlyIncomeSummary_([w01Income], '2025-12', w01DailyRows);
+  const janSummary = computeMonthlyIncomeSummary_([w01Income], '2026-01', w01DailyRows);
+  assertEqual_('Test2·12月 net_delivery_income = 157.90+196.00+174.70', decSummary.net_delivery_income, 528.60, results);
+  assertEqual_('Test2·1月 net_delivery_income = 187.60+162.40+213.50+205.50', janSummary.net_delivery_income, 769.00, results);
+  assertEqual_('Test2·12+1月订单收入合计等于已验证的周总额 1297.60', round2ForTest_(decSummary.net_delivery_income + janSummary.net_delivery_income), 1297.60, results);
+  assertEqual_('Test2·W01 不再出现在 12 月的 needs_allocation（订单收入已经可靠分月）', decSummary.needs_allocation.length, 0, results);
+  assertEqual_('Test2·W01 不再出现在 1 月的 needs_allocation', janSummary.needs_allocation.length, 0, results);
+
+  // ---- Test 3：verified_income_id 正确关联——不会跟别的 income_id 的 Daily_Allocation 混在一起 ----
+  const decoyDailyRows = [sampleDailyAllocationRow_('BATCH-DECOY-1', 'CMP-INCOME-2026-W99', '2026-01-01', 5, 9999)];
+  const janWithDecoyOnly = computeMonthlyIncomeSummary_([w01Income], '2026-01', decoyDailyRows);
+  assertEqual_('Test3·verified_income_id 不匹配的 Daily_Allocation 不会被误用', janWithDecoyOnly.net_delivery_income, 0, results);
+  assertEqual_('Test3·verified_income_id 不匹配时 W01 仍然落回 needs_allocation', janWithDecoyOnly.needs_allocation.map((n) => n.income_id), ['CMP-INCOME-2026-W01'], results);
+  assertEqual_('Test3·partially_allocated 里的 income_id 精确等于 W01 自己的 income_id', janSummary.partially_allocated.map((p) => p.income_id), ['CMP-INCOME-2026-W01'], results);
+
+  // ---- Test 4：重复执行不会 double count——两批 Fully_Allocated，只认最新一批 ----
+  const w01OldWrongBatch = w01DailyRowsData.map(([date, count, amt]) =>
+    sampleDailyAllocationRow_('BATCH-W01-0-OLDER', 'CMP-INCOME-2026-W01', date, count, amt + 1000) // 故意跟真值不同，确认真的没被用到
+  );
+  const janWithOldAndNewBatch = computeMonthlyIncomeSummary_([w01Income], '2026-01', w01OldWrongBatch.concat(w01DailyRows));
+  assertEqual_('Test4·同一个 verified_income_id 有新旧两批 Fully_Allocated，只用最新一批（不是两批加总，也不是用到旧的那批）', janWithOldAndNewBatch.net_delivery_income, 769.00, results);
+
+  // ---- Test 5：allocation failure（Needs_Review）——fail closed，落回 needs_allocation，不假装已分配 ----
+  const w01NeedsReviewRows = w01DailyRowsData.map(([date, count, amt]) =>
+    sampleDailyAllocationRow_('BATCH-W01-FAILED', 'CMP-INCOME-2026-W01', date, count, amt, 'Needs_Review')
+  );
+  const janWithFailedAllocation = computeMonthlyIncomeSummary_([w01Income], '2026-01', w01NeedsReviewRows);
+  assertEqual_('Test5·allocation_status 是 Needs_Review 时不计入 net_delivery_income', janWithFailedAllocation.net_delivery_income, 0, results);
+  assertEqual_('Test5·allocation_status 是 Needs_Review 时落回 needs_allocation（不是 partially_allocated）', janWithFailedAllocation.needs_allocation.map((n) => n.income_id), ['CMP-INCOME-2026-W01'], results);
+  assertEqual_('Test5·allocation_status 是 Needs_Review 时 partially_allocated 是空的', janWithFailedAllocation.partially_allocated.length, 0, results);
+
+  // ---- Test 6：非订单收入（Insentif/Tip/Bayaran lain-lain）——已知但不猜日期，跟 net 分开 ----
+  assertEqual_('Test6·12月 unallocated_non_order_income = 566.20+50.00+19.00（Insentif+Tip+Bayaran lain-lain）', decSummary.unallocated_non_order_income, 635.20, results);
+  assertEqual_('Test6·1月同一笔记录也会看到同样的未分配金额（横跨的两个月都要看得到，跟 needs_allocation 原本的做法一致）', janSummary.unallocated_non_order_income, 635.20, results);
+  assertEqual_('Test6·非订单收入完全没有被塞进 12 月的 net_delivery_income（还是干净的 528.60，不是 528.60+一部分 635.20）', decSummary.net_delivery_income, 528.60, results);
+  assertEqual_('Test6·net 也只含可靠分月的订单收入部分（12月 net 等于 net_delivery_income，不含猜测的非订单收入）', decSummary.net, decSummary.net_delivery_income, results);
+
+  // ---- Test 7：既有行为回归——跨月周如果完全没有 Daily_Allocation，维持 2026-09-15 之前一模一样的排除行为 ----
+  const janWithoutAnyDailyAllocation = computeMonthlyIncomeSummary_([w01Income], '2026-01');
+  assertEqual_('Test7·没给 dailyAllocationRecords（或不存在）时，行为完全等同这次改版之前——整周排除，net_delivery_income 是 0', janWithoutAnyDailyAllocation.net_delivery_income, 0, results);
+  assertEqual_('Test7·没给 dailyAllocationRecords 时落回 needs_allocation', janWithoutAnyDailyAllocation.needs_allocation.map((n) => n.income_id), ['CMP-INCOME-2026-W01'], results);
+  assertEqual_('Test7·非跨月的既有测试资料集（julySummary）行为完全不受这次改动影响', computeMonthlyIncomeSummary_(records, '2026-07'), julySummary, results);
+
+  // ---- YTD 层级：partially_allocated / unallocated_non_order_income 的去重
+  //      （用同一年内横跨两月的 W27，不是跨年份的 W01——W01 横跨
+  //      2025/2026 两个不同"年"，本来就不会同时出现在同一次 YTD 查询里，
+  //      不能拿它测这个去重逻辑；W27 横跨 6/7 月、同一年，才是会真的
+  //      触发"同一笔在两个月的 YTD 汇总里都出现"这个情况的例子） ----
+  const w27DailyRows = [
+    sampleDailyAllocationRow_('BATCH-W27-1', 'CMP-INCOME-2026-W27', '2026-06-29', 10, 300),
+    sampleDailyAllocationRow_('BATCH-W27-1', 'CMP-INCOME-2026-W27', '2026-06-30', 10, 300),
+    sampleDailyAllocationRow_('BATCH-W27-1', 'CMP-INCOME-2026-W27', '2026-07-01', 10, 400)
+  ];
+  const recordsWithW27Allocated = records.map((r) => r.income_id === 'CMP-INCOME-2026-W27'
+    ? Object.assign({}, r, { incentive: 100, tip: 10, other_payments: 5 })
+    : r);
+  const ytdWithW27Allocated = computeYearToDateIncomeSummary_(recordsWithW27Allocated, '2026', '2026-07', w27DailyRows);
+  assertEqual_('YTD 去重(wiring)·partially_allocated 只有一笔 W27，不是两笔（6月/7月各出现一次要去重）', ytdWithW27Allocated.partially_allocated.map((p) => p.income_id), ['CMP-INCOME-2026-W27'], results);
+  assertEqual_('YTD 去重(wiring)·unallocated_non_order_income 只算一次 W27 的 100+10+5=115（不是两个月各算一次变 230）', ytdWithW27Allocated.unallocated_non_order_income, 115, results);
+  // 这行本来直接拿 net(800/1200/900/1734.10) 去加，第一次跑测试就抓到自己
+  // 算错——sampleVerifiedIncome_ 的 net_delivery_income 是 net*0.66，不是
+  // net 本身。改成用同一个换算方式重新算一次，独立核对过跟实作结果一致
+  // （528.00+600+792.00+594.00+1144.51+400=4058.51），不是看到 FAIL 就直接
+  // 把预期值改成程式回传的数字。
+  assertEqual_(
+    'YTD 去重(wiring)·W27 的订单收入正确分进 6/7 两月（W22/28/29/30 是 net*0.66，W27 是 300+300+400 这三天）',
+    ytdWithW27Allocated.net_delivery_income,
+    round2ForTest_(round2ForTest_(800 * 0.66) + (300 + 300) + round2ForTest_(1200 * 0.66) + round2ForTest_(900 * 0.66) + round2ForTest_(1734.10 * 0.66) + 400),
+    results
+  );
+
+  // ============================================================
   // computeComplianceProjection_——需求 §10：SOCSO 是已确认的固定值，
   // EPF/Tax 在规则确认前明确回传 Not_Configured，不产生数字
   // ============================================================

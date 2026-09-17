@@ -2,14 +2,16 @@ if (typeof require === 'function') {
   var {
     buildConsoleDeps_, consoleScanFolder_, consoleImportOneDriveFile_, consoleBatchImport_,
     consoleRetryFile_, consoleManualImport_, consoleRebuildProjections_, consoleGetDashboard_,
-    consoleGetIncomeDetail_, consoleGetDashboard, consoleGetLastFolderId, consoleScanFolder,
-    consoleManualImport, consoleGetIncomeDetail
+    consoleGetIncomeDetail_, consoleRunDailyAllocation_, consoleGetDashboard, consoleGetLastFolderId, consoleScanFolder,
+    consoleManualImport, consoleGetIncomeDetail, consoleRunDailyAllocation
   } = require('./170_OperatorConsole.js');
   var { createTruthWriter_ } = require('./115_TruthWriter.js');
   var { createSheetReader_ } = require('./117_SheetReader.js');
   var { createRiderOSAdapter_ } = require('./123_RiderOSAdapter.js');
   require('./130_Reconciliation.js');
   var { VERIFIED_INCOME_COLUMNS } = require('./140_VerifiedIncome.js');
+  var { DAILY_ALLOCATION_COLUMNS } = require('./142_DailyOrderAllocation.js');
+  var { DOCUMENTS_COLUMNS } = require('./110_DocumentImport.js');
   require('./112_DocumentTextExtractor.js');
   var { assertEqual_, fakeStore_, fakeSheetAccessor_, fakeLockProvider_, TEST_FIXTURE_GRAB_WEEKLY_STATEMENT } = require('./105_TestUtils.js');
 }
@@ -209,6 +211,122 @@ function runAllOperatorConsoleTests() {
   const deps11b = fakeConsoleDeps_([]);
   deps11b._accessor.appendRow('Verified_Income', ['CMP-INCOME-2026-W33', '2026-W33', 'MYR', 1000, 100, 50, 0, -50, 1100, 1100, 'Compliance OS', 'Grab', 'Verified', '2026-08-17T00:00:00Z', null, 'GrabWeeklyParser', '2026-08-10', '2026-08-16']);
   assertEqual_('consoleGetIncomeDetail 转发结果跟 consoleGetIncomeDetail_ 一致', consoleGetIncomeDetail('CMP-INCOME-2026-W33', deps11a), consoleGetIncomeDetail_('CMP-INCOME-2026-W33', deps11b), results);
+
+  // ============================================================
+  // 2026-09-15 Production Wiring Slice——consoleRunDailyAllocation_（Execution
+  // B 的入口）。用真的 createTruthWriter_/createSheetReader_ 接一个假的
+  // sheetAccessor，只有 Gemini 呼叫本身用假的 orderExtractor（deps 注入，
+  // 不是真的打 API）——测的是「找到正确输入、组好 deps、呼叫既有 142 API、
+  // 转成清楚回传值」这个编排逻辑本身，不是重新测一次 142 的抽取/校验（那些
+  // 已经在 143 测过）。
+  // ============================================================
+  function seedNeedsAllocationFixture_(deps) {
+    deps.truthWriter.appendValidatedRow('Documents', {
+      document_id: 'DOC-2026-W01', source: 'Grab', document_type: 'Weekly_Statement', document_class: 'Income_Proof',
+      period: '2026-W01', file_hash: 'hash-w01', drive_file_id: '1fUrux2zoQgvKe0DvsPrR5Xma9pxa57yA',
+      drive_path: 'Compliance OS/Grab/2026/W01.pdf', status: 'Imported'
+    }, DOCUMENTS_COLUMNS);
+    deps.truthWriter.appendValidatedRow('Verified_Income', {
+      income_id: 'CMP-INCOME-2026-W01', period: '2026-W01', currency: 'MYR',
+      // net_delivery_income 故意跟下面 fakeFullyAllocatedCandidate_ 那笔假造的
+      // 单笔订单（4.00）对上——runGeminiOrderExtractionWithFallback_ 自己会做
+      // statement 层级的 checksum（真实订单总额 vs Verified_Income 的
+      // net_delivery_income），两边对不上的话会正确回 Needs_Review，不是这次
+      // wiring 测试要验证的东西（142 自己的算术校验，143 已经测过）——这里
+      // 只是要让这笔 fixture 内部自洽，测的是编排本身。
+      net_delivery_income: 4.00, incentive: 566.20, tip: 50.00, other_payments: 19.00,
+      total_deductions: 0, net: 639.20, amount: 639.20, source: 'Compliance OS', origin_platform: 'Grab',
+      status: 'Verified', verified_at: '2026-01-05T00:00:00Z', source_document_id: 'DOC-2026-W01', extractor_id: 'test',
+      period_start: '2025-12-29', period_end: '2026-01-04'
+    }, VERIFIED_INCOME_COLUMNS);
+  }
+  function fakeOrderExtractor_(candidateOrError) {
+    return {
+      extractOrders(document, pageRange) {
+        if (candidateOrError instanceof Error) throw candidateOrError;
+        return { candidate: candidateOrError };
+      }
+    };
+  }
+  const fakeFullyAllocatedCandidate_ = {
+    extraction_scope: { first_page_seen: 1, last_page_seen: 24 },
+    days: [{
+      weekday_name: 'Isnin', day: 29, month_name: 'Disember', day_block_complete: true, printed_daily_subtotal: 4.00,
+      orders: [{ order_row_type: 'Tunggal', platform_raw: 'GrabFood', order_ids_raw: ['A-TESTORDER1'], and_more_count: 0, payment_method_raw: 'Tanpa tunai', base_income: 2.20, other_income: 1.80, income_adjustment: 0, net_income: 4.00, source_page: 21, low_confidence: false }]
+    }],
+    notes: ''
+  };
+
+  const depsRDA1 = fakeConsoleDeps_();
+  seedNeedsAllocationFixture_(depsRDA1);
+  const rdaMissing = consoleRunDailyAllocation_('CMP-INCOME-NOT-EXIST', Object.assign({}, depsRDA1, { orderExtractor: fakeOrderExtractor_(fakeFullyAllocatedCandidate_) }));
+  assertEqual_('consoleRunDailyAllocation_·找不到 income_id 时明确回 Error（不是抛例外、不是静默 Skipped）', rdaMissing.status, 'Error', results);
+
+  const depsRDA2 = fakeConsoleDeps_();
+  seedNeedsAllocationFixture_(depsRDA2);
+  const rdaResult = consoleRunDailyAllocation_('CMP-INCOME-2026-W01', Object.assign({}, depsRDA2, { orderExtractor: fakeOrderExtractor_(fakeFullyAllocatedCandidate_) }));
+  assertEqual_('consoleRunDailyAllocation_·正常跑完·status 是 Done', rdaResult.status, 'Done', results);
+  assertEqual_('consoleRunDailyAllocation_·正常跑完·allocationStatus 是 Fully_Allocated', rdaResult.allocationStatus, 'Fully_Allocated', results);
+  assertEqual_('consoleRunDailyAllocation_·正常跑完·真的写了 1 笔 Daily_Allocation', rdaResult.rowsWritten, 1, results);
+  const writtenDailyRows = depsRDA2._accessor.getWritten('Daily_Allocation');
+  assertEqual_('consoleRunDailyAllocation_·写进 Sheet 的那一行 verified_income_id 正确', writtenDailyRows[0][DAILY_ALLOCATION_COLUMNS.indexOf('verified_income_id')], 'CMP-INCOME-2026-W01', results);
+
+  // 幂等性：同一个 income_id 再跑一次——既有 writeDailyAllocationBatch_ 的
+  // skip-if-已经-Fully_Allocated 守卫接手，不需要为这次 wiring 重新发明。
+  const rdaRetry = consoleRunDailyAllocation_('CMP-INCOME-2026-W01', Object.assign({}, depsRDA2, { orderExtractor: fakeOrderExtractor_(fakeFullyAllocatedCandidate_) }));
+  assertEqual_('consoleRunDailyAllocation_·同一个 income_id 重跑一次·不会重复写（既有 Fully_Allocated 守卫接手）', rdaRetry.skipped, true, results);
+  assertEqual_('consoleRunDailyAllocation_·重跑一次后 Daily_Allocation 还是只有 1 笔，不是 2 笔', depsRDA2._accessor.getWritten('Daily_Allocation').length, 1, results);
+
+  // Full（不是 Needs_Allocation）的记录——不需要跑 daily allocation，明确 Skipped
+  const depsRDA3 = fakeConsoleDeps_();
+  depsRDA3.truthWriter.appendValidatedRow('Verified_Income', {
+    income_id: 'CMP-INCOME-2026-W30', period: '2026-W30', currency: 'MYR',
+    net_delivery_income: 1000, incentive: 0, tip: 0, other_payments: 0,
+    total_deductions: 0, net: 1000, amount: 1000, source: 'Compliance OS', origin_platform: 'Grab',
+    status: 'Verified', verified_at: '2026-07-28T09:00:00Z', source_document_id: null, extractor_id: null,
+    period_start: '2026-07-20', period_end: '2026-07-26'
+  }, VERIFIED_INCOME_COLUMNS);
+  const rdaSkipFull = consoleRunDailyAllocation_('CMP-INCOME-2026-W30', depsRDA3);
+  assertEqual_('consoleRunDailyAllocation_·Full（非跨月）记录不需要 daily allocation·明确 Skipped', rdaSkipFull.status, 'Skipped', results);
+
+  // Gemini/Drive 在 142 自己的 full-doc + chunk fallback 里全部失败——
+  // runGeminiOrderExtractionWithFallback_ 自己的设计是这种情况不抛例外，
+  // 回一个正常的、allocationStatus 是 Needs_Review 的结果（143 已经测过
+  // 这个 fallback 逻辑本身）。这里验证的是：这次 wiring 正确把这个结果
+  // 转成「不写任何 Daily_Allocation、不误判成功」，不是重新测一次 142
+  // 的 fallback 逻辑。
+  const depsRDA4 = fakeConsoleDeps_();
+  seedNeedsAllocationFixture_(depsRDA4);
+  const rdaAllAttemptsFailed = consoleRunDailyAllocation_('CMP-INCOME-2026-W01', Object.assign({}, depsRDA4, { orderExtractor: fakeOrderExtractor_(new Error('模拟 Drive 读档失败')) }));
+  assertEqual_('consoleRunDailyAllocation_·Gemini/Drive 每次尝试都失败·142 自己的 fallback 接住，回 Done+Needs_Review（不是抛例外）', { status: rdaAllAttemptsFailed.status, allocationStatus: rdaAllAttemptsFailed.allocationStatus }, { status: 'Done', allocationStatus: 'Needs_Review' }, results);
+  assertEqual_('consoleRunDailyAllocation_·全部尝试失败时 rowsWritten 是 0，不写任何 Daily_Allocation', rdaAllAttemptsFailed.rowsWritten, 0, results);
+  assertEqual_('consoleRunDailyAllocation_·全部尝试失败时 Daily_Allocation 确实完全没有被写入', depsRDA4._accessor.getWritten('Daily_Allocation').length, 0, results);
+  assertEqual_('consoleRunDailyAllocation_·全部尝试失败不影响 Verified_Income（还在，状态不变）', depsRDA4.sheetReader.readAll('Verified_Income', VERIFIED_INCOME_COLUMNS).find((r) => r.income_id === 'CMP-INCOME-2026-W01').status, 'Verified', results);
+
+  // 真的有例外逃出 142 自己的 fallback 之外的情况（例如读 Sheet 本身出问题）
+  // ——这才是这个 function 自己那层 try/catch 真正要接住的对象，
+  // 用一个会在读 Daily_Allocation 时直接抛错的假 sheetReader 模拟。
+  const depsRDA6 = fakeConsoleDeps_();
+  seedNeedsAllocationFixture_(depsRDA6);
+  const throwingSheetReader = Object.assign({}, depsRDA6.sheetReader, {
+    readAll(sheetName, columns) {
+      if (sheetName === 'Daily_Allocation') throw new Error('模拟 Sheet API 本身出问题（不是 Gemini/Drive 的错）');
+      return depsRDA6.sheetReader.readAll(sheetName, columns);
+    }
+  });
+  const rdaOuterException = consoleRunDailyAllocation_('CMP-INCOME-2026-W01', Object.assign({}, depsRDA6, { sheetReader: throwingSheetReader, orderExtractor: fakeOrderExtractor_(fakeFullyAllocatedCandidate_) }));
+  assertEqual_('consoleRunDailyAllocation_·142 fallback 之外真的有例外逃出来（这次新加的外层 try/catch）·明确回 Error，不让整个 console 呼叫崩溃', rdaOuterException.status, 'Error', results);
+
+  const depsRDA5a = fakeConsoleDeps_();
+  seedNeedsAllocationFixture_(depsRDA5a);
+  const depsRDA5b = fakeConsoleDeps_();
+  seedNeedsAllocationFixture_(depsRDA5b);
+  assertEqual_(
+    'consoleRunDailyAllocation 公开版本转发结果跟 consoleRunDailyAllocation_ 一致',
+    consoleRunDailyAllocation('CMP-INCOME-2026-W01', Object.assign({}, depsRDA5a, { orderExtractor: fakeOrderExtractor_(fakeFullyAllocatedCandidate_) })),
+    consoleRunDailyAllocation_('CMP-INCOME-2026-W01', Object.assign({}, depsRDA5b, { orderExtractor: fakeOrderExtractor_(fakeFullyAllocatedCandidate_) })),
+    results
+  );
 
   const allPass = results.every((r) => r.pass);
   results.forEach((r) => {
