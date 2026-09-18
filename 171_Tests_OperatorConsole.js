@@ -86,7 +86,13 @@ function runAllOperatorConsoleTests() {
   // ---- Retry 时既有 document_id 有正确带到 Verified_Income（2026-08-21 修正：
   // 以前 consoleImportOneDriveFile_ 查过 Documents 表却没把找到的 document_id
   // 传给 runImportPipeline_，Retry 出来的 source_document_id 永远是 null）----
-  const { DocumentTextExtractor: dte3c } = require('./112_DocumentTextExtractor.js');
+  // 这一行是既有代码（不是这次 wiring 加的），原本没有档 typeof require 这个
+  // Node-only 特性——在真实 GAS 里 require 整个不存在，直接呼叫会
+  // ReferenceError（Steven 真实 GAS 执行时抓到的）。DocumentTextExtractor
+  // 在 GAS 里本来就是 112 载入后留下的全域变量，不需要 require；这里补上
+  // 跟这份文件其余每一处 require 完全一样的 typeof 守卫，只是把这一行原本
+  // 漏掉的守卫补齐，没有改变这个测试原本要验证的行为。
+  const dte3c = (typeof require === 'function') ? require('./112_DocumentTextExtractor.js').DocumentTextExtractor : DocumentTextExtractor;
   const originalExtract3c_ = dte3c.extract;
   const validCandidate3c_ = {
     document_meta: { source: 'Grab', document_type: 'Weekly Statement', currency: 'MYR', period_start_parts: { year: 2026, month: 7, day: 20 }, period_end_parts: { year: 2026, month: 7, day: 26 } },
