@@ -249,7 +249,22 @@ function runDailyOrderAllocationTests_() {
   results.push({ name: 'TEST 跨月投影: W01 正确拆成 2025-12 / 2026-01 两个月份桶，不是整周塞一个月', pass: Math.abs(grouped['2025-12'] - dec2025) < 0.01 && Math.abs(grouped['2026-01'] - jan2026) < 0.01, actual: grouped, expected: { '2025-12': dec2025, '2026-01': jan2026 } });
 
   // ---- Phase 4（2026-08-25）：Gemini candidate 映射 + chunk 合并 + fallback 编排 ----
-  const { candidateFromGeminiOrderRow_, mergeChunkedExtractionResults_, runGeminiOrderExtractionWithFallback_ } = require('./142_DailyOrderAllocation.js');
+  // 2026-09-15：原本这行漏了这份文件其他每一处都有的 typeof require 守卫，
+  // GAS 没有 require，直接 ReferenceError（真实 GAS 执行时抓到的）。这三个
+  // 名字后面在这个函数里被大量引用，不能像 111 那样直接改名——试过用
+  // const {candidateFromGeminiOrderRow_,...} = cond ? require(...) : {同名
+  // shorthand} 这种写法，GAS 分支一样会因为「解构出来的名字在自己初始化
+  // 完成前引用自己」直接 TDZ ReferenceError。改用一个独立的 resolver
+  // function：它内部引用这三个名字时，走的是它自己的 scope chain（GAS 全域
+  // 或这个 function 自己的闭包），不是下面这行 const 解构正在宣告的那个
+  // scope，所以不会有自我引用的问题——没有改变这三个名字后续任何一处用法。
+  function resolveDoalTestDeps143_() {
+    if (typeof require === 'function') {
+      return require('./142_DailyOrderAllocation.js');
+    }
+    return { candidateFromGeminiOrderRow_, mergeChunkedExtractionResults_, runGeminiOrderExtractionWithFallback_ }; // GAS：142 已经载入，直接引用全域
+  }
+  const { candidateFromGeminiOrderRow_, mergeChunkedExtractionResults_, runGeminiOrderExtractionWithFallback_ } = resolveDoalTestDeps143_();
 
   // 用 Phase 1 已经验证过的真实数字构造"如果 Gemini 回报正确"的样子——
   // 这是证明映射逻辑本身对不对，不是证明 Gemini 真的会这样回报（那需要

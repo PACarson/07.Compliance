@@ -228,11 +228,22 @@ function runAllDocumentImportTests() {
   // DocumentTextExtractor 是 110 require 进来、跟真正呼叫方共用同一个物件
   // 实例（模组快取）——直接把它的 .extract 换掉再还原，不用改
   // runImportPipeline_ 的签名多开一个注入口，改动范围维持最小。
-  const { DocumentTextExtractor } = require('./112_DocumentTextExtractor.js');
-  const originalExtract_ = DocumentTextExtractor.extract;
+  // 2026-09-15：原本这行漏了这份文件其他每一处都有的 typeof require 守卫，
+  // GAS 没有 require，直接 ReferenceError（真实 GAS 执行时抓到的）。改名成
+  // dte111_ 而不是沿用 const DocumentTextExtractor = cond ? X : DocumentTextExtractor
+  // 这种写法——试过这个写法，GAS 分支会因为「同一个 const 宣告的名字在自己
+  // 初始化完成前引用自己」直接 TDZ ReferenceError，是另一种崩溃，不是真的
+  // 修好，所以用不同变量名避开，不是随便改名。
+  let dte111_;
+  if (typeof require === 'function') {
+    dte111_ = require('./112_DocumentTextExtractor.js').DocumentTextExtractor;
+  } else {
+    dte111_ = DocumentTextExtractor; // GAS：112 已经载入，直接引用全域
+  }
+  const originalExtract_ = dte111_.extract;
   function withMockedExtractor_(envelope, fn) {
-    DocumentTextExtractor.extract = function () { return envelope; };
-    try { fn(); } finally { DocumentTextExtractor.extract = originalExtract_; }
+    dte111_.extract = function () { return envelope; };
+    try { fn(); } finally { dte111_.extract = originalExtract_; }
   }
 
   const validCandidateForPipeline_ = {
