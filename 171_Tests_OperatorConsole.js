@@ -210,7 +210,25 @@ function runAllOperatorConsoleTests() {
   const deps9b = fakeConsoleDeps_([]);
   assertEqual_('consoleGetDashboard 转发结果跟 consoleGetDashboard_ 一致', consoleGetDashboard(deps9a), consoleGetDashboard_(deps9b), results);
 
-  assertEqual_('consoleGetLastFolderId 公开版本可呼叫、不抛错（Node 下 PropertiesService 不存在，两版本都回 null）', consoleGetLastFolderId(), null, results);
+  // 2026-09-15：这个断言原本直接写死期望 null——名字里自己就写了原因
+  // （Node 环境没有 PropertiesService，所以这个函数在 Node 下必然回 null），
+  // 但这个假设只在 Node 测试环境成立。真实 GAS 里 PropertiesService 是真的
+  // 存在的，如果 Script Property 里本来就存过值（例如 Steven 自己用过
+  // Console 的批次汇入功能，consoleSaveLastFolderId 存过一个真实的 Drive
+  // 资料夹 ID），consoleGetLastFolderId() 回真实字符串是正确、预期的行为，
+  // 不是 bug——"两版本都回 null" 从来就不该是这个函数的通用契约，只是
+  // Node 环境剩下的巧合。这个测试真正想验证的是"这个公开函数能被呼叫、
+  // 不会抛例外"，不是"回传值一定是 null"，改成只测前者，后者（null 或
+  // 真实字符串）两种结果在两个环境都算通过。
+  let consoleGetLastFolderIdThrew_ = false;
+  let consoleGetLastFolderIdResult_ = null;
+  try {
+    consoleGetLastFolderIdResult_ = consoleGetLastFolderId();
+  } catch (e) {
+    consoleGetLastFolderIdThrew_ = true;
+  }
+  assertEqual_('consoleGetLastFolderId 公开版本可呼叫、不抛错', consoleGetLastFolderIdThrew_, false, results);
+  assertEqual_('consoleGetLastFolderId 回传值是 null 或字符串（真实 GAS 若之前存过 Script Property 会是真实字符串，这是预期行为，不是这里要测的东西）', consoleGetLastFolderIdResult_ === null || typeof consoleGetLastFolderIdResult_ === 'string', true, results);
 
   const deps11a = fakeConsoleDeps_([]);
   deps11a._accessor.appendRow('Verified_Income', ['CMP-INCOME-2026-W33', '2026-W33', 'MYR', 1000, 100, 50, 0, -50, 1100, 1100, 'Compliance OS', 'Grab', 'Verified', '2026-08-17T00:00:00Z', null, 'GrabWeeklyParser', '2026-08-10', '2026-08-16']);
