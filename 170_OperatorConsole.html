@@ -452,7 +452,11 @@
       var warningsHtml = (summary.needs_allocation && summary.needs_allocation.length)
         ? '<div class="alloc-warning"><strong>⚠ ' + summary.needs_allocation.length + ' 份 Statement 横跨月份，尚未计入任何月份的 Net Income：</strong>' +
           '<ul class="file-list">' + summary.needs_allocation.map(function (n) {
-            return '<li><span class="file-name">' + n.income_id + '</span><span class="file-detail">' + n.period_start + ' → ' + n.period_end + '（横跨 ' + n.months.join(' / ') + '）</span></li>';
+            return '<li id="da-' + escapeHtml(n.income_id) + '">' +
+              '<span class="file-name">' + escapeHtml(n.income_id) + '</span>' +
+              '<span class="file-detail">' + escapeHtml(n.period_start) + ' → ' + escapeHtml(n.period_end) + '（横跨 ' + n.months.map(escapeHtml).join(' / ') + '）</span>' +
+              '<button class="small secondary" onclick="startDailyAllocationConfirm(\'' + escapeJs(n.income_id) + '\', \'' + escapeJs(n.period_start) + '\', \'' + escapeJs(n.period_end) + '\')">Run Daily Allocation</button>' +
+            '</li>';
           }).join('') + '</ul></div>'
         : '';
 
@@ -645,6 +649,96 @@
         })
         .withFailureHandler(function (err) { showToast('重试失败：' + err.message); })
         .consoleRetryFile(fileId, fileName);
+    }
+
+    // ---- Daily Allocation（2026-09-15，只改这份 .html，consoleRunDailyAllocation
+    // 后端本身未改一行）：needs_allocation 清单里每一笔旁边的 Run 按钮走
+    // 「点击→显示 income_id+确认→确认后才真的呼叫→照实显示后端回传结果」
+    // 三段式，不是点了就直接执行。幂等性完全交给后端既有的 skip-if-已
+    // Fully_Allocated 守卫，这里只用 disabled 按钮防止使用者在同一次呼叫
+    // 还没回来之前又点第二次，不是自己另外发明一套幂等判断。 ----
+    function startDailyAllocationConfirm(incomeId, periodStart, periodEnd) {
+      var li = document.getElementById('da-' + incomeId);
+      if (!li) return;
+      li.innerHTML =
+        '<div style="width:100%">' +
+          '<div class="file-detail">确定要为 <strong>' + escapeHtml(incomeId) + '</strong>（' + escapeHtml(periodStart) + ' → ' + escapeHtml(periodEnd) + '）执行 Daily Allocation 吗？会重新呼叫 Gemini 抽取这份 statement 的逐笔订单，把订单收入正确分到对应月份。</div>' +
+          '<div class="row" style="margin-top:8px">' +
+            '<button class="small" id="da-confirm-' + escapeHtml(incomeId) + '" onclick="runDailyAllocation(\'' + escapeJs(incomeId) + '\', \'' + escapeJs(periodStart) + '\', \'' + escapeJs(periodEnd) + '\')">确认执行</button>' +
+            '<button class="small secondary" onclick="cancelDailyAllocationConfirm(\'' + escapeJs(incomeId) + '\', \'' + escapeJs(periodStart) + '\', \'' + escapeJs(periodEnd) + '\')">取消</button>' +
+          '</div>' +
+        '</div>';
+    }
+
+    function cancelDailyAllocationConfirm(incomeId, periodStart, periodEnd) {
+      var li = document.getElementById('da-' + incomeId);
+      if (!li) return;
+      li.innerHTML =
+        '<span class="file-name">' + escapeHtml(incomeId) + '</span>' +
+        '<span class="file-detail">' + escapeHtml(periodStart) + ' → ' + escapeHtml(periodEnd) + '</span>' +
+        '<button class="small secondary" onclick="startDailyAllocationConfirm(\'' + escapeJs(incomeId) + '\', \'' + escapeJs(periodStart) + '\', \'' + escapeJs(periodEnd) + '\')">Run Daily Allocation</button>';
+    }
+
+    function runDailyAllocation(incomeId, periodStart, periodEnd) {
+      var li = document.getElementById('da-' + incomeId);
+      if (!li) return;
+      // 呼叫期间把这一笔换成明确的「执行中」状态，不留任何按钮可点——
+      // 防止使用者在这次真实呼叫（真的会打 Gemini，可能要几分钟）还没
+      // 回来之前又点一次造成两个重叠的呼叫同时在跑。
+      li.innerHTML = '<div class="file-detail"><span class="spinner"></span> 执行中，会真的呼叫 Gemini 重新抽取，可能需要几分钟…</div>';
+      google.script.run
+        .withSuccessHandler(function (result) {
+          renderDailyAllocationResult(incomeId, periodStart, periodEnd, result);
+        })
+        .withFailureHandler(function (err) {
+          renderDailyAllocationResult(incomeId, periodStart, periodEnd, { status: 'Error', error: err.message });
+        })
+        .consoleRunDailyAllocation(incomeId);
+    }
+
+    function renderDailyAllocationResult(incomeId, periodStart, periodEnd, result) {
+      var li = document.getElementById('da-' + incomeId);
+      if (!li) return;
+      // 照后端实际回传的 status/allocationStatus 显示，不自己推断成功——
+      // 只有 status==='Done' 且 allocationStatus==='Fully_Allocated' 才算
+      // 真正成功；Done+Needs_Review 是「跑完了但没有真的分配成功」，跟
+      // 成功不是同一件事，不能显示成同一种徽章。
+      var badge, detail;
+      if (result.status === 'Error') {
+        badge = '<span class="badge failed">Error</span>';
+        detail = escapeHtml(result.error || '未知错误');
+      } else if (result.status === 'Skipped') {
+        badge = '<span class="badge pending">Skipped</span>';
+        detail = escapeHtml(result.reason || '');
+      } else if (result.status === 'Done' && result.allocationStatus === 'Fully_Allocated') {
+        badge = '<span class="badge stamp">Fully_Allocated</span>';
+        detail = result.skipped
+          ? '之前已经处理过，沿用既有结果，没有重复写入'
+          : '成功写入 ' + (result.rowsWritten != null ? result.rowsWritten : '?') + ' 笔 Daily_Allocation';
+      } else if (result.status === 'Done') {
+        badge = '<span class="badge flagged">' + escapeHtml(result.allocationStatus || 'Needs_Review') + '</span>';
+        detail = '这次执行没有产生 Fully_Allocated 的结果——可能是 Gemini 抽取或 checksum 对不上，需要人工看一下，不是等一下自动就会好';
+      } else {
+        badge = '<span class="badge pending">' + escapeHtml(result.status || '未知') + '</span>';
+        detail = '';
+      }
+      li.innerHTML =
+        '<div style="width:100%">' +
+          '<div class="row" style="justify-content:space-between">' +
+            '<span class="file-name">' + escapeHtml(incomeId) + '</span>' + badge +
+          '</div>' +
+          '<div class="file-detail" style="margin-top:4px">' + detail + '</div>' +
+          '<div class="row" style="margin-top:8px">' +
+            '<button class="small secondary" onclick="startDailyAllocationConfirm(\'' + escapeJs(incomeId) + '\', \'' + escapeJs(periodStart) + '\', \'' + escapeJs(periodEnd) + '\')">重新执行（一样要先确认）</button>' +
+          '</div>' +
+        '</div>';
+      // 真正 Fully_Allocated 才刷新整个 Dashboard——这笔会从 needs_allocation
+      // 移到已经分配的状态，月度 Net Income 的数字也会变，需要重新整个拉一次
+      // 现况。Skipped/Error/Needs_Review 都没有改变任何已汇总的数字，不重刷。
+      if (result.status === 'Done' && result.allocationStatus === 'Fully_Allocated') {
+        showToast(incomeId + ' 已分配，正在刷新月度汇总…');
+        loadDashboard();
+      }
     }
 
     document.getElementById('manualBtn').addEventListener('click', function () {
