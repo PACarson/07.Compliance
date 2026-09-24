@@ -736,25 +736,44 @@ function runGeminiOrderExtractionWithFallback_(document, verifiedIncomeContext, 
     // 一块比较可靠」这个假设——细节交给 Phase 5 真的对真实 Gemini 测试
     // 之后再调，这里先给一个能动、逻辑上站得住的版本。
     const totalPages = document.totalPages;
-    const midpoint = Math.ceil(totalPages / 2);
-    const ranges = [
-      { firstPage: 1, lastPage: Math.min(midpoint + 1, totalPages) },
-      { firstPage: Math.max(midpoint, 1), lastPage: totalPages }
-    ];
+    const hasValidTotalPages = Number.isInteger(totalPages) && totalPages >= 1;
     const chunkResults = [];
     let anyChunkException = false;
-    ranges.forEach((range) => {
-      try {
-        const candidate = deps.extractor.extractOrders(document, range).candidate;
-        const validation = tryValidate(candidate, `chunk_${range.firstPage}-${range.lastPage}`);
-        if (validation.valid) {
-          chunkResults.push({ candidate, pageRange: range });
+
+    if (!hasValidTotalPages) {
+      // 2026-09-24 新增（Runtime Readiness Audit 静态审计发现，非真实 GAS
+      // 触发）：document.totalPages 缺失或不是合法正整数时，绝对不能硬算
+      // midpoint/page range——Math.ceil(undefined/2) 会得到 NaN，range 会变成
+      // {firstPage:1, lastPage:NaN} 这种没有意义的值，却仍然会真的打一次
+      // Gemini（浪费一次真实呼叫，还会让 Gemini 收到"处理到第 NaN 页"这种
+      // 混乱指令，而不是明确失败）。目前唯一的呼叫方（170 的
+      // consoleRunDailyAllocation_）建构 document 时从未提供 totalPages——
+      // 全仓库唯一真的填这个欄位的地方都是手动 hardcode 给已知固定的
+      // debug/observation fixture 用，production 端目前没有任何取得真实
+      // PDF 页数的机制。补一个真正的页数抽取器是新能力、需要新的
+      // architecture 决定，不是这次静态审计可以顺手做的范围——这里只做
+      // CMP-P10 要求的「明确失败，不要用垃圾值继续跑」，走既有的
+      // all_chunks_failed → Needs_Review 路径，不新增回传形状。
+      attempts.push({ label: 'chunk_fallback_skipped', stage: 'Extraction_Failed', errorCount: 1, reason: 'document.totalPages 缺失或不是合法正整数，无法计算 page range（呼叫方尚未提供真实页数，需要新的页数抽取机制才能补上）' });
+    } else {
+      const midpoint = Math.ceil(totalPages / 2);
+      const ranges = [
+        { firstPage: 1, lastPage: Math.min(midpoint + 1, totalPages) },
+        { firstPage: Math.max(midpoint, 1), lastPage: totalPages }
+      ];
+      ranges.forEach((range) => {
+        try {
+          const candidate = deps.extractor.extractOrders(document, range).candidate;
+          const validation = tryValidate(candidate, `chunk_${range.firstPage}-${range.lastPage}`);
+          if (validation.valid) {
+            chunkResults.push({ candidate, pageRange: range });
+          }
+        } catch (err) {
+          anyChunkException = true;
+          attempts.push({ label: `chunk_${range.firstPage}-${range.lastPage}`, stage: 'Extraction_Failed', errorCount: 1, exception: String(err && err.message || err) });
         }
-      } catch (err) {
-        anyChunkException = true;
-        attempts.push({ label: `chunk_${range.firstPage}-${range.lastPage}`, stage: 'Extraction_Failed', errorCount: 1, exception: String(err && err.message || err) });
-      }
-    });
+      });
+    }
 
     if (chunkResults.length > 0) {
       const { merged, errors: mergeErrors } = mergeChunkedExtractionResults_(chunkResults);

@@ -331,6 +331,30 @@ function runDailyOrderAllocationTests_() {
   results.push({ name: 'Phase4.编排: 整份文件跟两个 chunk 全部失败 → Needs_Review，不抛例外中断整个 Statement（Steven 明确要求）', pass: totalFailure.allocationStatus === 'Needs_Review' && Array.isArray(totalFailure.dailyAllocations), actual: totalFailure.allocationStatus, expected: 'Needs_Review（没有抛例外）' });
   results.push({ name: 'Phase4.编排: batchId 带正确前缀跟 verifiedIncomeId，符合已确认的 idempotency 格式', pass: /^CMP-OALB-CMP-VI-TEST-\d+$/.test(totalFailure.batchId), actual: totalFailure.batchId, expected: 'CMP-OALB-CMP-VI-TEST-<timestamp>' });
 
+  // ---- 2026-09-24 新增（Runtime Readiness Audit 静态审计发现）：
+  // document.totalPages 缺失时，绝对不能算出 NaN page range 还真的打去
+  // Gemini——用同一个 mockExtractor_，故意不给 totalPages，让整份文件
+  // 那次尝试失败，确认：(a) 不抛例外、明确落 Needs_Review；(b) attempts
+  // 里看得到 chunk_fallback_skipped 这个明确记录，不是静默跳过；
+  // (c) extractor 只被呼叫一次（整份文件那次），完全没有用 NaN page
+  // range 真的再打第二次——这是这次修复要保证的核心行为。
+  const missingTotalPagesExtractor = mockExtractor_(new Error('schema invalid'), []);
+  const missingTotalPagesResult = runGeminiOrderExtractionWithFallback_(
+    { fileId: 'f1', documentId: 'doc1' }, // 故意不给 totalPages
+    vic,
+    { extractor: missingTotalPagesExtractor, now: new Date('2026-08-25T00:00:00Z') }
+  );
+  results.push({ name: 'totalPages 缺失: 整份文件失败后不产生 NaN page range，明确落 Needs_Review 而不是抛例外', pass: missingTotalPagesResult.allocationStatus === 'Needs_Review', actual: missingTotalPagesResult.allocationStatus, expected: 'Needs_Review' });
+  results.push({ name: 'totalPages 缺失: attempts 里有明确的 chunk_fallback_skipped 记录，不是静默跳过', pass: missingTotalPagesResult.attempts.some((a) => a.label === 'chunk_fallback_skipped'), actual: missingTotalPagesResult.attempts.map((a) => a.label), expected: '包含 chunk_fallback_skipped' });
+  results.push({ name: 'totalPages 缺失: extractor 只被呼叫一次（整份文件），没有用 NaN/undefined page range 真的再打一次', pass: missingTotalPagesExtractor._callCount() === 1, actual: missingTotalPagesExtractor._callCount(), expected: 1 });
+
+  const invalidTotalPagesResult = runGeminiOrderExtractionWithFallback_(
+    { fileId: 'f1', documentId: 'doc1', totalPages: 0 }, // 非法值（不是缺失，是 0）
+    vic,
+    { extractor: mockExtractor_(new Error('schema invalid'), []), now: new Date('2026-08-25T00:00:00Z') }
+  );
+  results.push({ name: 'totalPages=0（非法值，非缺失）: 同样明确落 Needs_Review，不是只防了 undefined 这一种情况', pass: invalidTotalPagesResult.allocationStatus === 'Needs_Review' && invalidTotalPagesResult.attempts.some((a) => a.label === 'chunk_fallback_skipped'), actual: invalidTotalPagesResult.allocationStatus, expected: 'Needs_Review' });
+
   // ---- 7: repeated header / footer 不被误判成订单行 ----
   results.push({ name: 'TEST 7: repeated header/footer 不产生假的 invalid-row 噪音（W01 invalid 数量应该很小，不是几十笔）', pass: w01.invalid.length < 5, actual: w01.invalid.length, expected: '< 5' });
   results.push({ name: 'TEST 7b: repeated header/footer 不产生假的 invalid-row 噪音（W33）', pass: w33.invalid.length < 5, actual: w33.invalid.length, expected: '< 5' });
