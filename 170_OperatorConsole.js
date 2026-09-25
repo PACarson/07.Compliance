@@ -396,8 +396,29 @@ function lazyOrderExtractor_() {
  * @return {{year:number,month:number,day:number}}
  */
 function isoDateStringToParts_(isoDate) {
-  const parts = String(isoDate).split('-').map(Number);
-  return { year: parts[0], month: parts[1], day: parts[2] };
+  // 2026-09-25 修正（真实 GAS 环境触发，Steven 独立诊断+修复+验证）：
+  // Verified_Income 的 period_start/period_end 虽然写入时是 ISO 字符串，
+  // 但 SheetReader.readAll 读回来时，Sheets 会把日期格式的储存格自动转成
+  // 原生 Date 物件——106_Utils.js 里早就记录过同一个教训，108 也已经把
+  // period_start/period_end 强制成 textColumns，但这里读到的仍然是 Date
+  // 物件（时区/显示格式差异，尚未查到 108 的强制格式为何在这个欄位没生效，
+  // 不在这次修复范围内深究）。原本的 String(isoDate).split('-') 遇到 Date
+  // 物件的 toString()（例如 "Mon Dec 29 2025 00:00:00 GMT+0800..."）完全
+  // 拆不出年月日，会静默产生 NaN/undefined，导致 142 的期间判断把所有订单
+  // 都判定成"不在 statement 期间内"而整批拒收——真实环境 173 笔订单全部被拒、
+  // 7 天 net_delivery_income 全部变成 0 就是这样发生的（印刷小计因为是独立
+  // 抽取的栏位，不受影响，加总起来仍然精确等于 1297.60，这也是诊断时用来
+  // 确认「问题不在 Gemini、在这个转换函数」的关键证据）。现在同时支援原生
+  // Date 物件跟 ISO 字符串两种输入。
+  if (isoDate instanceof Date && !isNaN(isoDate.getTime())) {
+    return { year: isoDate.getFullYear(), month: isoDate.getMonth() + 1, day: isoDate.getDate() };
+  }
+  const str = String(isoDate).trim();
+  const m = str.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) {
+    return { year: parseInt(m[1], 10), month: parseInt(m[2], 10), day: parseInt(m[3], 10) };
+  }
+  throw new Error(`isoDateStringToParts_: 无法将值转为 {year,month,day} 日期组件：${isoDate}`);
 }
 
 /**
