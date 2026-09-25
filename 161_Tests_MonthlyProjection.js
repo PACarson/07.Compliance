@@ -281,6 +281,24 @@ function runAllMonthlyProjectionTests() {
   assertEqual_('Test7·没给 dailyAllocationRecords 时落回 needs_allocation', janWithoutAnyDailyAllocation.needs_allocation.map((n) => n.income_id), ['CMP-INCOME-2026-W01'], results);
   assertEqual_('Test7·非跨月的既有测试资料集（julySummary）行为完全不受这次改动影响', computeMonthlyIncomeSummary_(records, '2026-07'), julySummary, results);
 
+  // ---- Test 8（2026-09-25 新增，真实 GAS 触发）：Daily_Allocation.date 从
+  //      Sheet 读回来是原生 Date 物件（不是 sampleDailyAllocationRow_ 手打的
+  //      纯字串）时，yearMonthFromIsoDate_ 不该抛错，月份归属跟金额也要
+  //      算得完全正确——跟 Test2 用一模一样的 W01 ground truth 断言，唯一
+  //      差异是 date 栏位换成 Date 物件，直接对齐真实 SheetReader.readAll
+  //      回传的形状 ----
+  const w01DailyRowsAsDateObjects = w01DailyRowsData.map(([date, count, amt]) => {
+    const [y, mo, d] = date.split('-').map(Number);
+    return Object.assign({}, sampleDailyAllocationRow_('BATCH-W01-1', 'CMP-INCOME-2026-W01', date, count, amt), {
+      date: new Date(y, mo - 1, d) // 本地时间分量建构，对齐 normalizeIsoDateString_ 用 getFullYear/getMonth/getDate 读回的方式，不受跑测试的机器本身时区影响
+    });
+  });
+  const decSummaryFromDateObjects = computeMonthlyIncomeSummary_([w01Income], '2025-12', w01DailyRowsAsDateObjects);
+  const janSummaryFromDateObjects = computeMonthlyIncomeSummary_([w01Income], '2026-01', w01DailyRowsAsDateObjects);
+  assertEqual_('Test8·date 是原生 Date 物件时不抛错，12月 net_delivery_income 仍然算得出 528.60', decSummaryFromDateObjects.net_delivery_income, 528.60, results);
+  assertEqual_('Test8·date 是原生 Date 物件时，1月 net_delivery_income 仍然算得出 769.00', janSummaryFromDateObjects.net_delivery_income, 769.00, results);
+  assertEqual_('Test8·date 是原生 Date 物件时，12+1月合计仍然精确等于 1297.60', round2ForTest_(decSummaryFromDateObjects.net_delivery_income + janSummaryFromDateObjects.net_delivery_income), 1297.60, results);
+
   // ---- YTD 层级：partially_allocated / unallocated_non_order_income 的去重
   //      （用同一年内横跨两月的 W27，不是跨年份的 W01——W01 横跨
   //      2025/2026 两个不同"年"，本来就不会同时出现在同一次 YTD 查询里，

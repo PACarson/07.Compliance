@@ -115,11 +115,21 @@ function sumField_(records, field) {
 
 /** "2026-07-20" -> "2026-07"。UCR4 精神的字符串版：只做格式校验 + 切片，不喂进 Date 构造函数。 */
 function yearMonthFromIsoDate_(isoDateStr) {
-  const m = String(isoDateStr).match(/^(\d{4})-(\d{2})-\d{2}$/);
-  if (!m) {
+  // 2026-09-25 修正：这个函数本来假设 caller 一定会先自己正规化好——
+  // computeMonthlyAllocation_ 确实有做（2026-08-22 那次真实 GAS 崩溃修的），
+  // 但后来新增的 partially_allocated 逻辑（下面读 Daily_Allocation.date 那个
+  // 呼叫点）直接把 Sheet 读回来的原生 Date 物件传进来，没有经过那层防护，
+  // 在真实 GAS 上重现了同一种「Sheets 自动把日期栏位转成 Date 物件」的
+  // 崩溃——跟 Steven 在 isoDateStringToParts_ 里独立定位到的问题完全同源。
+  // 与其要求每一个未来的 caller 都记得自己先呼叫 normalizeIsoDateString_，
+  // 不如把这个防御做进函数本身——反正 normalizeIsoDateString_ 本来就同时
+  // 支援 Date 物件跟 ISO 字串。原本「格式不合法就抛错」的既有 contract不变，
+  // computeMonthlyAllocation_ 那边已经做过的正规化不会被这里重做而改变行为。
+  const normalized = normalizeIsoDateString_(isoDateStr);
+  if (!normalized) {
     throw new Error(`不是合法的 ISO 日期字符串（YYYY-MM-DD）：${isoDateStr}`);
   }
-  return `${m[1]}-${m[2]}`;
+  return normalized.slice(0, 7);
 }
 
 /**
