@@ -71,7 +71,20 @@ var BUTIRAN_TEMPAHAN_EXTRACTION_SCHEMA_ = {
             description: '这个日期分组在你实际看到的页面范围内是否完整（有看到它的开头也看到它自己的 "RM x,xxx.xx" 小计）。如果这个日期分组的内容看起来延伸到你看到的页面范围以外（开头或结尾被切断），填 false。'
           },
           printed_daily_subtotal: {
-            type: ['number', 'null'],
+            // 2026-09-27 修复（真实 GAS：每次呼叫 Gemini 都立刻回 HTTP 400
+            // "Unknown name \"type\"...Proto field is not repeating, cannot
+            // start list"，2.74 秒内就失败，连 PDF 都还没真的开始处理）：
+            // Gemini 的 Schema.type 是单一 enum 欄位（protobuf 非 repeating），
+            // 不支援 JSON Schema 常见的 type: [x, 'null'] 联合类型写法——不管
+            // 换哪个 gemini-*-flash 模型、额度够不够，这个请求本身在到达
+            // 模型推理之前就会被 API 拒绝，不是模型或额度问题。改用 Gemini
+            // 自己支援的 nullable: true + 单一 type，语意完全不变（仍然允许
+            // null，仍然是 days.items 的 required 欄位——required 只规定这个
+            // key 要存在，不规定值不能是 null，125_ExtractionValidation.js
+            // 的 validateOrderExtractionCandidate_ 本来就是 !== null 才检查
+            // 是不是数字，这里不用跟着改）。
+            type: 'number',
+            nullable: true,
             description: '该日期分组结尾印出来的 "RM x,xxx.xx"，逐字读出这个数字本身，不要自己加总 orders 算出来；如果这个分组不完整、看不到它自己的小计，填 null。'
           },
           orders: {

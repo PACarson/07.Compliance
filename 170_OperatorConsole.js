@@ -447,7 +447,10 @@ function isoDateStringToParts_(isoDate) {
  * @param {string} incomeId 例如 "CMP-INCOME-2026-W01"
  * @param {Object} [deps]
  * @return {Object} 明确的结果状态（status: 'Done'|'Skipped'|'Error'），不是
- *   Boolean 或裸例外
+ *   Boolean 或裸例外。status 是 'Done' 时额外带 attempts/errors（2026-09-27
+ *   新增，来自 142 的 runGeminiOrderExtractionWithFallback_，只有
+ *   allocationStatus 不是 Fully_Allocated 时才有实质内容，方便真实 GAS
+ *   环境排查是卡在 schema/额度/Drive 哪一层，不用每次都重新手动加 log）
  */
 function consoleRunDailyAllocation_(incomeId, deps) {
   const d = deps || buildConsoleDeps_();
@@ -496,6 +499,19 @@ function consoleRunDailyAllocation_(incomeId, deps) {
     const orderExtractor = d.orderExtractor || lazyOrderExtractor_();
     const batchResult = runGeminiOrderExtractionWithFallback_(document, verifiedIncomeContext, { extractor: orderExtractor, now: d.now });
 
+    // 2026-09-27 新增：142 其实早就算出了完整的 attempts/nonRetryableErrors
+    // （每一次 full_document/chunk 尝试实际失败的原因——schema 被拒绝、
+    // HTTP 429/503、Drive 读档失败……），但原本这里直接丢弃，只留一个
+    // allocationStatus 字符串。真实 GAS 环境下这代表 Steven 只看得到
+    // "Needs_Review"，看不到底层真正卡在哪一层，每次都要重新手动加 log 才能
+    // 排查。这里原样带出来，纯诊断用途，不影响既有行为一个字——
+    // allocationStatus/skipped/reason/rowsWritten 完全不变，143/171 既有测试
+    // 也都是抓特定欄位或用两次独立呼叫互相比对，不是比对整个物件形状，
+    // 不受新增欄位影响。
+    if (batchResult.allocationStatus !== 'Fully_Allocated') {
+      console.warn('[DailyAllocation] 未能完全分配，详情:', JSON.stringify({ attempts: batchResult.attempts, nonRetryableErrors: batchResult.nonRetryableErrors }, null, 2));
+    }
+
     const existingDailyAllocationRows = d.sheetReader.readAll('Daily_Allocation', DAILY_ALLOCATION_COLUMNS);
     const writeResult = writeDailyAllocationBatch_(d.truthWriter, batchResult, incomeId, d.now, existingDailyAllocationRows);
 
@@ -505,7 +521,9 @@ function consoleRunDailyAllocation_(incomeId, deps) {
       allocationStatus: batchResult.allocationStatus,
       skipped: !!writeResult.skipped,
       reason: writeResult.reason,
-      rowsWritten: (writeResult.written || []).length
+      rowsWritten: (writeResult.written || []).length,
+      attempts: batchResult.attempts,
+      errors: batchResult.nonRetryableErrors
     };
   } catch (err) {
     return { incomeId, status: 'Error', error: String((err && err.message) || err) };
