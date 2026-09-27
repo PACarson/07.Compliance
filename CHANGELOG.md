@@ -18,6 +18,13 @@
 
 ---
 
+## 2026-09-24～26 — Phase-B 历史脚本清理 + Date-object-from-Sheets 缺陷群修复 + ADR-004/005 首次真实端到端证据
+
+- **类型**: Production code changes（142/160/170/143/161）+ Verification-only changes
+- **流程**: Code → Verify → Governance（真实 GAS 执行触发 3 项缺陷 → 诊断 → 修复 → 持久化；999_PhaseB_Baseline 清理为 Steven 明确授权后执行）
+- 详见 `900_Constitution.js` 的 `changelog` 数组同日期条目、`VERIFICATION_STATUS.md` 新增章节、2026-09-26 checkpoint/handoff 文件
+- Schema changes: NONE　Extraction-contract changes: NONE（127/125 全程未改动）
+
 ## 2026-09-15 — Governance Foundation 建立（本次）
 
 - **类型**: Governance changes

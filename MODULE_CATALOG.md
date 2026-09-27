@@ -84,8 +84,8 @@
 - **Responsibility**: 订单层级抽取编排（`runGeminiOrderExtractionWithFallback_`，内部呼叫 `extractOrders()`）、逐日汇总与持久化（`writeDailyAllocationBatch_`）、幂等（skip-if-已 Fully_Allocated，`force:true` 可覆盖）
 - **Owned data**: `Daily_Allocation`、`Non_Order_Income_Allocation`
 - **Execution entry points**: 2026-09-15 前**无任何生产呼叫方**，只有自己的测试文件调用；2026-09-15 起由 170 的 `consoleRunDailyAllocation_` 调用
-- **Verification status**: 见 ADR-004/005 全文——本次治理建设 Strict Scope Boundary 明确禁止修改，未重新审阅代码本身
-- **Known limitations**: Order_Allocation/Monthly_Allocation 未实作；Insentif/Tip/Bayaran lain-lain 逐笔日期抽取未实作（`matchInsentifLineDate_` 等只做日期判定，判不出完整一行）
+- **Verification status**: **真实 GAS 已验证 PASS**（2026-09-25，`consoleRunDailyAllocation_` 真实呼叫 `extractOrders()`，针对 `CMP-INCOME-2026-W01` 173/173 笔正确映射，见 VERIFICATION_STATUS.md）。2026-09-24 修复一处真实缺陷：`runGeminiOrderExtractionWithFallback_` 原本未验证 `document.totalPages` 合法性，chunk fallback 会算出 `NaN` page range 仍然真实呼叫 Gemini——已加 guard，非法值直接落 `Needs_Review`
+- **Known limitations**: Order_Allocation/Monthly_Allocation 未实作；Insentif/Tip/Bayaran lain-lain 逐笔日期抽取未实作（`matchInsentifLineDate_` 等只做日期判定，判不出完整一行，ADR-005 明确排除范围，非缺陷）；`parseOrderRowCandidate_`/`splitIntoDayBlocks_`/`parseDayBlock_` 为 Phase 1-3 遗留死代码，grep 确认生产路径零引用，只有自己的测试文件调用
 
 ### 150_ComplianceCalendar.js
 - **Responsibility**: 义务/提醒引擎（`computeObligationStatus_`/Upcoming-Due_Soon-Overdue 查询时即算，不存栏位）
@@ -96,14 +96,14 @@
 ### 160_MonthlyProjection.js
 - **Responsibility**: 月度/YTD 收入汇总（compute-on-demand，不存 rollup），Compliance Projection（SOCSO/EPF/Tax）
 - **Dependencies**: 142（`getLatestDailyAllocationRowsSafe_`，2026-09-15 新增，call-time lazy require 避免循环依赖）
-- **Verification status**: **真实 GAS 已验证 PASS**（2026-09-15，`161_Tests_MonthlyProjection` 全数通过）
+- **Verification status**: **真实 GAS 已验证 PASS**（2026-09-15，`161_Tests_MonthlyProjection` 全数通过；2026-09-25，`consoleGetDashboard()` 真实输出正确的 Dec/Jan/YTD 汇总，见 VERIFICATION_STATUS.md）。2026-09-25 修复一处真实缺陷：`yearMonthFromIsoDate_` 未处理 Sheets 读回的原生 Date 物件（`computeMonthlyAllocation_` 早在 2026-08-22 就修过同一根因，但这个函式本身没有一并加固）——已改为函式内部直接呼叫既有的 `normalizeIsoDateString_`
 - **Known limitations**: `unallocated_non_order_income` 在同一周横跨的两个月各自查询时都会看到（跟既有 `needs_allocation` 同一逻辑），YTD 层级已正确去重，逐月数字本身不去重（设计如此，非缺陷）
 
 ### 170_OperatorConsole.js（+ .html）
 - **Responsibility**: HTMLService Console，唯一的人工操作入口（批次汇入、Retry、Dashboard、Drill-down、2026-09-15 新增 Daily Allocation 触发）
 - **Execution entry points**: 全部 `consoleXxx`（公开，无底线）转发到 `consoleXxx_`（私有，CMP-CR5）
-- **Verification status**: **真实 GAS 部分验证**——2026-09-15 起两轮真实 GAS 执行发现并修复了环境相容性问题（见 VERIFICATION_STATUS.md），修复后版本待重新确认
-- **Known limitations**: 新增的 `consoleRunDailyAllocation_` 尚未在真实 GAS 环境实际跑过（只跑过本地 Node 假 extractor 测试）
+- **Verification status**: **真实 GAS 已验证 PASS**——2026-09-15 两轮真实 GAS 执行发现并修复环境相容性问题后第三轮 PASS；2026-09-25，`consoleRunDailyAllocation_` 真实端到端跑通（详见 VERIFICATION_STATUS.md）
+- **Known limitations**: `isoDateStringToParts_` 曾未处理 Sheets 读回的原生 Date 物件（Steven 2026-09-25 真实执行独立诊断+修复，已同步）；`.html` 至今没有任何代码呈现 `partially_allocated`/`unallocated_non_order_income`（2026-09-15 已知缺口，持续未处理，见 VERIFICATION_STATUS.md）
 
 ### 190_Tests_Contracts.js
 - **Responsibility**: 验证每个 Parser/Adapter 是否满足其文档化的接口形状
@@ -111,7 +111,7 @@
 
 ### 195_Tests_GasLoadSimulation.js
 - **Responsibility**: 用 Node vm 模块模拟 GAS 按字母序把全部文件载入同一个共享全域作用域，抓撞名/载入顺序问题
-- **Verification status**: 2 项已知失败（`999_PhaseB_Baseline_v2/v3/v4.js` 三份历史快照互相宣告同名 const/function）——**pre-existing，与 2026-09-15 之后的改动无关**，逐字比对确认改动前后输出完全相同，未修复（不在任何一次治理/实作授权范围内）
+- **Verification status**: **PASS**（2 项曾经的已知失败已清除，2026-09-24 Steven 授权移除 `999_PhaseB_Baseline_v2/v3.js` 后确认——见下方 999_PhaseB_Baseline 条目）
 
 ### 900_Constitution.js / 901_System_Architecture.js
 - **Responsibility**: 专案自己的 UEF/Blueprint 等价物——原则、编码规则、ADR、changelog（900）；模块清单、架构分层映射、验证历史（901）
@@ -121,6 +121,6 @@
 - **Responsibility**: 观测/验证专用脚本，非生产路径
 - **Known limitations**: `LATENCY_OBS_W01_FILE_ID` 是 hardcode 常量，历史上出现过 9 个不同值，成因未确认（见 ADR-005）
 
-### 999_PhaseB_Baseline.js / _v2 / _v3 / _v4
-- **Responsibility**: 历史快照，Gate 1/2 早期真实环境测试脚本
-- **Known limitations**: 三份 v2/v3/v4 互相宣告同名 top-level const/function，会让 195 的 GAS 载入模拟失败（见上）；**UNKNOWN — REQUIRES VERIFICATION**：是否可以安全归档/移除，本次治理建设未评估，只记录 discrepancy
+### 999_PhaseB_Baseline.js / _v4
+- **Responsibility**: 历史快照，Gate 1/2 早期真实环境测试脚本。`_v2`/`_v3` 于 2026-09-24 经 Steven 明确授权移除（跟 `_v4` 共用同名 top-level const/function，会让 195 的 GAS 载入模拟失败——已解决，见 VERIFICATION_STATUS.md「Phase-B Historical Baseline Cleanup」一节）
+- **Known limitations**: repository/source 层级已确认解决；Steven 真实 GAS 项目里 `_v2`/`_v3` 是否也已同步删除，未经确认（Claude 无法从这个开发环境验证 live deployment 状态）
