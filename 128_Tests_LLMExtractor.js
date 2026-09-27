@@ -104,13 +104,13 @@ function runAllLLMExtractorTests() {
   const drive1 = fakeDriveService_('pdf-bytes-1');
   const http1 = fakeHttpClient_(fakeGeminiSuccessResponse_(goodCandidate));
   const extractor1 = createLLMExtractor_(
-    { apiKey: 'k', model: 'gemini-3.7-flash', evidenceFolderId: 'folder-1' },
+    { apiKey: 'k', model: 'gemini-3.5-flash', evidenceFolderId: 'folder-1' },
     { driveService: drive1, httpClient: http1, now: new Date('2026-08-21T10:00:00.000Z') }
   );
   const extractResult1 = extractor1.extract({ fileId: 'file-1', documentId: 'CMP-DOC-1' });
   assertEqual_('extract() 回传 mode=structured', extractResult1.mode, 'structured', results);
   assertEqual_('extract() 回传的 candidate 就是 provider 给的那份', extractResult1.candidate, goodCandidate, results);
-  assertEqual_('extract() evidence 带 extractorId', extractResult1.evidence.extractorId, 'LLMExtractor:gemini-3.7-flash', results);
+  assertEqual_('extract() evidence 带 extractorId', extractResult1.evidence.extractorId, 'LLMExtractor:gemini-3.5-flash', results);
   assertEqual_('extract() 成功时也写了一份证据档', drive1._written.length, 1, results);
   assertEqual_('证据档名带 document_id', drive1._written[0].fileName.indexOf('CMP-DOC-1') === 0, true, results);
 
@@ -119,7 +119,7 @@ function runAllLLMExtractorTests() {
   const drive2 = fakeDriveService_('pdf-bytes-2');
   const http2 = fakeHttpClient_({ candidates: [{ finishReason: 'SAFETY', content: { parts: [{ text: '{}' }] } }] });
   const extractor2 = createLLMExtractor_(
-    { apiKey: 'k', model: 'gemini-3.7-flash', evidenceFolderId: 'folder-1' },
+    { apiKey: 'k', model: 'gemini-3.5-flash', evidenceFolderId: 'folder-1' },
     { driveService: drive2, httpClient: http2, now: new Date('2026-08-21T10:00:00.000Z') }
   );
   let extract2Threw = false;
