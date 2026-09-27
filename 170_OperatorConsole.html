@@ -369,6 +369,15 @@
 
     function renderDashboard(d) {
       var el = document.getElementById('dashboard');
+      // 2026-09-27：防御性 guard——理论上 loadDashboard() 已经把
+      // consoleGetDashboard 回传的 JSON 字符串解析回物件了，这里只防真的
+      // 收到 null/undefined 的情况（例如以后又发生类似的传输问题），让
+      // Console 显示明确提示，而不是整个白屏卡在"载入中"却没有任何线索。
+      if (!d) {
+        showToast('读取现况失败：后端未回传有效资料（dashboard 为 null）');
+        el.innerHTML = '<div class="empty-state">未能读取到现况数据，请重新整理页面再试一次。</div>';
+        return;
+      }
       var summaries = d.monthlySummaries || [];
       var currentYm = new Date().toISOString().slice(0, 7);
       var currentMonth = summaries.find(function (m) { return m.year_month === currentYm; });
@@ -593,7 +602,15 @@
     }
 
     function loadDashboard() {
-      google.script.run.withSuccessHandler(renderDashboard).withFailureHandler(function (err) {
+      // 2026-09-27：consoleGetDashboard 现在回传 JSON 字符串，不是物件本身
+      // （见 170_OperatorConsole.js 同日修复说明——真实 GAS 环境下
+      // google.script.run 直接传物件会静默变成 null）。这里解析回物件再
+      // 交给 renderDashboard；同时兼容 raw 万一本来就是物件的情况，不
+      // 假设一定是字符串。
+      google.script.run.withSuccessHandler(function (raw) {
+        var d = (typeof raw === 'string') ? JSON.parse(raw) : raw;
+        renderDashboard(d);
+      }).withFailureHandler(function (err) {
         showToast('读取现况失败：' + err.message);
       }).consoleGetDashboard();
     }

@@ -557,10 +557,30 @@ function doGet(e) {
  * 认的是编译期看得到的具名 function 声明，不是运行时动态挂上去的属性，
  * 用循环生成在这个平台上有没有效我没有把握，这个环节已经在你那边卡过一次
  * 真实的坑，没必要在这里赌一个我没法验证的写法。
+ *
+ * 例外：consoleGetDashboard 从 2026-09-27 起不再是纯转发——见该函数正上方
+ * 的说明，这是目前唯一的例外。
  */
 
+/**
+ * 2026-09-27 修复（真实 GAS：Console 白屏卡在"载入中"，前端
+ * Cannot read properties of null (reading 'monthlySummaries')）：
+ * google.script.run 把 consoleGetDashboard_ 回传的物件传给前端时会
+ * 静默失败，successHandler 收到的是 null，不是真正的资料——不是这里漏了
+ * return（原本就有)，也不是回传物件里藏了 Sheets 原生 Date 物件（诊断时
+ * JSON.stringify 该物件完全成功、长度正常、不含 Date 字符串表示）。根因
+ * 未查明，但目前唯一验证有效的解法：不透过 google.script.run 直接传物件，
+ * 改成回传纯 JSON 字符串，前端 loadDashboard() 收到后自己 JSON.parse
+ * 还原（见 170_OperatorConsole.html 同日修改）。怀疑跟 compliance_projection
+ * 底下恒为 null 的 epf.amount/tax.amount（160 的 computeComplianceProjection_，
+ * Not_Configured 状态）有关，但这只是观察到的关联，不是已证实的根因。
+ * consoleGetDashboard_ 本身完全不变，仍回传物件——只有这层公开 wrapper
+ * 改变契约，171 对应的测试断言已同步更新（比对 JSON.parse 还原后的内容，
+ * 不是原始回传值本身）。
+ */
 function consoleGetDashboard(deps) {
-  return consoleGetDashboard_(deps);
+  const result = consoleGetDashboard_(deps);
+  return JSON.stringify(result);
 }
 
 function consoleGetLastFolderId() {
