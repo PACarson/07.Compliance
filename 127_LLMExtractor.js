@@ -313,6 +313,47 @@ function buildEvidenceRecord_(params) {
 }
 
 /**
+ * 2026-09-28：没有任何设定时用的默认模型——单一来源，createLLMExtractor_ 的
+ * 最终防线跟 resolveLLMExtractorConfig_ 都读这一个，不要各写一份。原本是
+ * gemini-3.7-flash；真实 GAS 环境实测 3.5-flash 免费额度（除错记录里的 429
+ * 写着 free_tier_requests, limit: 20）很快用完、又常遇到 503，改成目前最新
+ * 一代的 gemini-3.8-flash（2026-09-02 发布；Steven 2026-09-28 确认用它在真实 GAS
+ * 跑通了 daily allocation，含 PDF 输入 + responseSchema）。这只是「Script Properties 没设定时」的默认值，
+ * 正常情况下 model 应该由 LLM_EXTRACTOR_MODEL 决定，见下面
+ * resolveLLMExtractorConfig_。
+ */
+var DEFAULT_LLM_EXTRACTOR_MODEL_ = 'gemini-3.8-flash';
+
+/**
+ * 2026-09-28 新增——纯函数，Node 可测。从 Script Properties（传进来的只要有
+ * getProperty(key) 就行）解析出 createLLMExtractor_ 要的 config。
+ *
+ * 优先序：LLM_EXTRACTOR_MODEL 有设（去掉前后空白后非空）就用它，否则用
+ * DEFAULT_LLM_EXTRACTOR_MODEL_。这是这个文件开头就讲清楚的设计原则——模型名称
+ * 汰换比部署周期快，不写死进代码，换模型只要改 Script Properties。真实 GAS
+ * 环境曾经把 realLLMExtractor_ 改成写死 model: 'gemini-3.8-flash'（能动，但
+ * 违反这个原则，下次 Google 换代又要改代码重新部署）；这里改回读设定，并且
+ * 处理原本没处理的「设定值是空白/只有空格」——那种值会是 truthy，`||` 不会
+ * 落到默认值，模型名变成空白，URL 直接 404。
+ *
+ * modelSource 只是给人看的（'ScriptProperty:LLM_EXTRACTOR_MODEL' 或
+ * 'default'），createLLMExtractor_ 不读它；用来在 GAS 里一眼确认到底用的是
+ * 哪个来源的模型，不用再猜。
+ * @param {{getProperty: function(string): (string|null)}} props
+ * @return {{apiKey: (string|null), model: string, modelSource: string, evidenceFolderId: (string|null)}}
+ */
+function resolveLLMExtractorConfig_(props) {
+  const rawModel = props.getProperty('LLM_EXTRACTOR_MODEL');
+  const propertyModel = (typeof rawModel === 'string') ? rawModel.trim() : '';
+  return {
+    apiKey: props.getProperty('GEMINI_API_KEY'),
+    model: propertyModel || DEFAULT_LLM_EXTRACTOR_MODEL_,
+    modelSource: propertyModel ? 'ScriptProperty:LLM_EXTRACTOR_MODEL' : 'default',
+    evidenceFolderId: props.getProperty('EXTRACTION_EVIDENCE_FOLDER_ID')
+  };
+}
+
+/**
  * @param {{apiKey: string, model: string, evidenceFolderId: string}} config
  * @param {{driveService: Object, httpClient: Object, now: (Date|undefined)}} deps
  *   driveService: { getFileBytes(fileId), bytesToBase64(bytes), writeJsonFile(folderId, fileName, obj) }
@@ -326,7 +367,7 @@ function createLLMExtractor_(config, deps) {
   if (!config.evidenceFolderId) {
     throw new Error('createLLMExtractor_: 缺少 evidenceFolderId（Script Properties 需要设定 EXTRACTION_EVIDENCE_FOLDER_ID）');
   }
-  const model = config.model || 'gemini-3.7-flash';
+  const model = config.model || DEFAULT_LLM_EXTRACTOR_MODEL_;
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 
   return {
@@ -445,6 +486,107 @@ function createLLMExtractor_(config, deps) {
   };
 }
 
+/**
+ * 2026-09-28 新增——纯函数，Node 可测。从 Gemini 429 错误的 response body
+ * 里解析出建议等待秒数：优先读结构化的 details[].retryDelay（RetryInfo，
+ * 例如 "52s"），读不到就退回 message 文字里人看得懂的 "Please retry in
+ * Xs"（同一个数字通常两个地方都有，结构化的比较不会因为 Google 改了措辞
+ * 就解析失败）。两个都没有、或 responseText 根本不是合法 JSON，回传 null，
+ * 呼叫方自己决定 fallback（不在这里假设一个数字）。
+ * @param {string} responseText postJson 收到的原始 response body 文字
+ * @return {(number|null)} 建议等待秒数，解析不出来回传 null
+ */
+function parseRetryDelaySeconds_(responseText) {
+  try {
+    const parsed = JSON.parse(responseText);
+    const details = (parsed.error && parsed.error.details) || [];
+    const retryInfo = details.find((d) => d['@type'] && String(d['@type']).indexOf('RetryInfo') !== -1);
+    if (retryInfo && retryInfo.retryDelay) {
+      const match = String(retryInfo.retryDelay).match(/^([\d.]+)s$/);
+      if (match) return parseFloat(match[1]);
+    }
+    const message = (parsed.error && parsed.error.message) || '';
+    const messageMatch = message.match(/retry in ([\d.]+)s/i);
+    if (messageMatch) return parseFloat(messageMatch[1]);
+  } catch (err) {
+    // responseText 不是合法 JSON，或形状跟预期不一样——回 null，不要让这层
+    // 新增的解析本身出错反而害原本能重试的请求也失败。
+  }
+  return null;
+}
+
+/**
+ * 2026-09-28：重试等待的上限。
+ * - 单次等待最多 55 秒：Gemini 429 有时会回报很长的建议等待时间，不能整个照睡。
+ * - 单次 postJson 累计最多等 60 秒：GAS Web App 一次执行只有 6 分钟，而一次成功的
+ *   整份订单抽取本身就要跑 100 秒以上；consoleRunDailyAllocation_ 最坏会连打三次
+ *   （整份 + 两段 chunk）。超过就不再重试、直接把最后一次的错误抛出去，让
+ *   142 记进 attempts，也比整个执行被 GAS 硬杀、连结构化的失败结果都回不来好。
+ */
+var MAX_SINGLE_RETRY_SLEEP_MS_ = 55000;
+var MAX_TOTAL_RETRY_SLEEP_MS_ = 60000;
+
+/**
+ * 组出带重试的 postJson。I/O 从参数注入（真实环境是 UrlFetchApp.fetch /
+ * Utilities.sleep，Node 测试用假的），重试策略本身因此可以在 Node 里测——原本
+ * 这段整个躲在 realLLMExtractorDeps_ 里面，「只能在真实 GAS 环境跑，Node 测不了」。
+ *
+ * 2026-08-23 修正（审计报告 HIGH-4）：以前一有非 2xx 就直接抛错，429（Rate
+ * Limit）、502/503 等短暂性服务端问题在批次汇入几十份文件时并不罕见，一次偶发
+ * 就中断当次那个文件的处理。现在对这两类可重试的状态码做退避重试，非 2xx 但不可
+ * 重试的（例如 400/401，请求本身有问题，重试不会变好）维持原本直接抛错。
+ * UrlFetchApp 本身没有可调的逾时设定（GAS 平台限制，不是这里能修的），重试次数
+ * 因此也要有上限——不能让单一文件的重试吃光整批的 6 分钟预算（见 170 的
+ * consoleBatchImport_ 时间预算）。
+ *
+ * 2026-09-28 加固（真实撞过：429 明确回 "Please retry in 52.712601335s"，但原本
+ * 固定 1s/2s/4s 的 exponential backoff 总共只等 7 秒就用完 3 次重试——quota 窗口
+ * 根本还没到，等于全部重试都在浪费，3 次都还是同一个 429）：429 优先读 Gemini
+ * 自己回报的建议等待秒数（RetryInfo.retryDelay，见 parseRetryDelaySeconds_，读不
+ * 到就退回原本的 exponential backoff）；503 维持原本的 exponential backoff（503
+ * 是容量问题，Google 没给明确等待秒数）。等待有上限，见 MAX_*_RETRY_SLEEP_MS_。
+ *
+ * @param {{fetch: function(string, Object): {getResponseCode: function(): number, getContentText: function(): string}, sleep: function(number): void}} io
+ * @return {function(string, Object, Object): Object} postJson(url, headers, body)
+ */
+function createRetryingPostJson_(io) {
+  return function postJson(url, headers, body) {
+    const maxAttempts = 4; // 第一次 + 最多 3 次重试
+    let lastError;
+    let totalSleptMs = 0;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const response = io.fetch(url, {
+        method: 'post',
+        contentType: 'application/json',
+        headers,
+        payload: JSON.stringify(body),
+        muteHttpExceptions: true
+      });
+      const code = response.getResponseCode();
+      const text = response.getContentText();
+      if (code >= 200 && code < 300) {
+        return JSON.parse(text);
+      }
+      lastError = new Error(`LLM API 回传 HTTP ${code}：${text.slice(0, 500)}`);
+      const isRetryable = code === 429 || code >= 500;
+      if (!isRetryable || attempt === maxAttempts) {
+        throw lastError;
+      }
+      const suggestedDelaySeconds = code === 429 ? parseRetryDelaySeconds_(text) : null;
+      const rawDelayMs = suggestedDelaySeconds != null
+        ? suggestedDelaySeconds * 1000 + 500 // +500ms 缓冲，避免卡在窗口边界又撞一次
+        : 1000 * Math.pow(2, attempt - 1); // 没有建议秒数时的原有 1s/2s/4s
+      const delayMs = Math.min(rawDelayMs, MAX_SINGLE_RETRY_SLEEP_MS_);
+      if (totalSleptMs + delayMs > MAX_TOTAL_RETRY_SLEEP_MS_) {
+        throw new Error(`${lastError.message}（已累计等待 ${Math.round(totalSleptMs / 1000)} 秒，再等会逼近 GAS 单次执行上限，不再重试）`);
+      }
+      io.sleep(delayMs);
+      totalSleptMs += delayMs;
+    }
+    throw lastError;
+  };
+}
+
 /** 真的调 DriveApp/UrlFetchApp/Utilities 的那一层——只能在真实 GAS 环境跑，Node 测不了。 */
 function realLLMExtractorDeps_(now) {
   return {
@@ -462,41 +604,13 @@ function realLLMExtractorDeps_(now) {
       }
     },
     httpClient: {
-      /**
-       * 2026-08-23 修正（审计报告 HIGH-4）：以前一有非 2xx 就直接抛错，
-       * 429（Rate Limit）、502/503 等短暂性服务端问题在批次汇入几十份
-       * 文件时并不罕见，一次偶发就中断当次那个文件的处理。现在对这两类
-       * 可重试的状态码做指数退避重试（1s/2s/4s），非 2xx 但不可重试的
-       * （例如 400/401，请求本身有问题，重试不会变好）维持原本直接抛错。
-       * UrlFetchApp 本身没有可调的逾时设定（GAS 平台限制，不是这里能修的），
-       * 重试次数因此也要有上限——不能让单一文件的重试吃光整批的 6 分钟
-       * 预算（见 170_OperatorConsole.js 的 consoleBatchImport_ 时间预算）。
-       */
-      postJson(url, headers, body) {
-        const maxAttempts = 4; // 第一次 + 最多 3 次重试
-        let lastError;
-        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-          const response = UrlFetchApp.fetch(url, {
-            method: 'post',
-            contentType: 'application/json',
-            headers,
-            payload: JSON.stringify(body),
-            muteHttpExceptions: true
-          });
-          const code = response.getResponseCode();
-          const text = response.getContentText();
-          if (code >= 200 && code < 300) {
-            return JSON.parse(text);
-          }
-          lastError = new Error(`LLM API 回传 HTTP ${code}：${text.slice(0, 500)}`);
-          const isRetryable = code === 429 || code >= 500;
-          if (!isRetryable || attempt === maxAttempts) {
-            throw lastError;
-          }
-          Utilities.sleep(1000 * Math.pow(2, attempt - 1)); // 1s, 2s, 4s
-        }
-        throw lastError;
-      }
+      // 重试策略本身（含 429 依 Gemini 回报的秒数等待、累计等待上限）在
+      // createRetryingPostJson_ 里，Node 用假的 fetch/sleep 测过；这里只接真的
+      // UrlFetchApp / Utilities.sleep，没有别的逻辑。
+      postJson: createRetryingPostJson_({
+        fetch: (url, options) => UrlFetchApp.fetch(url, options),
+        sleep: (ms) => Utilities.sleep(ms)
+      })
     },
     now: now || new Date()
   };
@@ -508,13 +622,13 @@ function realLLMExtractorDeps_(now) {
  * @return {{extract: function(Object): Object}}
  */
 function realLLMExtractor_() {
-  const props = PropertiesService.getScriptProperties();
-  const config = {
-    apiKey: props.getProperty('GEMINI_API_KEY'),
-    model: props.getProperty('LLM_EXTRACTOR_MODEL'), // 没设定时 createLLMExtractor_ 会 fallback 到默认值
-    evidenceFolderId: props.getProperty('EXTRACTION_EVIDENCE_FOLDER_ID')
-  };
-  return createLLMExtractor_(config, realLLMExtractorDeps_());
+  // 2026-09-28 加固：模型来自 Script Properties 的 LLM_EXTRACTOR_MODEL，没设才用
+  // DEFAULT_LLM_EXTRACTOR_MODEL_（gemini-3.8-flash）——见 resolveLLMExtractorConfig_。
+  // ⚠️ 部署这版之前先确认 Script Properties：如果 LLM_EXTRACTOR_MODEL 还设成
+  // 'gemini-3.5-flash'（2026-09-27 除错记录里看到的值），这里会照旧读到
+  // 3.5-flash，不会自动变成 3.8-flash。要用 3.8-flash：把该 key 的值改成
+  // gemini-3.8-flash，或整个删掉这个 key。
+  return createLLMExtractor_(resolveLLMExtractorConfig_(PropertiesService.getScriptProperties()), realLLMExtractorDeps_());
 }
 
 if (typeof module !== 'undefined') {
@@ -527,6 +641,12 @@ if (typeof module !== 'undefined') {
     buildGeminiOrderExtractionRequestBody_,
     parseGeminiResponse_,
     buildEvidenceRecord_,
+    parseRetryDelaySeconds_,
+    createRetryingPostJson_,
+    MAX_SINGLE_RETRY_SLEEP_MS_,
+    MAX_TOTAL_RETRY_SLEEP_MS_,
+    DEFAULT_LLM_EXTRACTOR_MODEL_,
+    resolveLLMExtractorConfig_,
     createLLMExtractor_,
     realLLMExtractorDeps_,
     realLLMExtractor_

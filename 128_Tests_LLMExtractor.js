@@ -11,7 +11,9 @@ if (typeof require === 'function') {
   var {
     LLM_EXTRACTION_SCHEMA_, buildGeminiRequestBody_, parseGeminiResponse_,
     buildEvidenceRecord_, createLLMExtractor_,
-    BUTIRAN_TEMPAHAN_EXTRACTION_SCHEMA_, buildButiranTempahanPrompt_, buildGeminiOrderExtractionRequestBody_
+    BUTIRAN_TEMPAHAN_EXTRACTION_SCHEMA_, buildButiranTempahanPrompt_, buildGeminiOrderExtractionRequestBody_,
+    parseRetryDelaySeconds_, resolveLLMExtractorConfig_, DEFAULT_LLM_EXTRACTOR_MODEL_,
+    createRetryingPostJson_, MAX_SINGLE_RETRY_SLEEP_MS_, MAX_TOTAL_RETRY_SLEEP_MS_
   } = require('./127_LLMExtractor.js');
   var { assertEqual_ } = require('./105_TestUtils.js');
 }
@@ -51,6 +53,66 @@ function fakeGeminiSuccessResponse_(candidateObj) {
       }
     ]
   };
+}
+
+/**
+ * 2026-09-28 新增：Gemini responseSchema 的形状检查。2026-09-27 真实 GAS 撞到
+ * printed_daily_subtotal 的 type: ['number','null']——Gemini 的 Schema.type 是
+ * 单一 enum，写成阵列会在到达模型推理之前就被 API 以 HTTP 400 拒绝，每次呼叫
+ * 都失败，跟模型、额度都无关；而且 Node 测试完全看不到（原本没有任何东西检查
+ * schema 本身长什么样）。这里只检查「已经在真实环境证实会炸」的规则，加上纯结构
+ * 一致性（required 的欄位真的存在、array 有 items），不去猜 Gemini 其他没被
+ * 证实的限制。
+ * @return {string[]} 违规描述；空阵列代表没问题
+ */
+function lintGeminiResponseSchema_(node, path, problems) {
+  const here = path || 'schema';
+  const errs = problems || [];
+  if (node === null || typeof node !== 'object') { errs.push(`${here}: 不是物件`); return errs; }
+  if (typeof node.type !== 'string') {
+    errs.push(`${here}.type 必须是单一字符串（真实撞过：type: ['number','null'] 会被 Gemini 以 HTTP 400 拒绝，要允许 null 请用 nullable: true），现在是 ${JSON.stringify(node.type)}`);
+  } else if (['object', 'array', 'string', 'number', 'integer', 'boolean'].indexOf(node.type) === -1) {
+    errs.push(`${here}.type=${node.type} 不是已知的 schema type`);
+  }
+  if ('nullable' in node && typeof node.nullable !== 'boolean') errs.push(`${here}.nullable 必须是 boolean`);
+  if (node.type === 'object') {
+    const props = node.properties || {};
+    Object.keys(props).forEach((k) => lintGeminiResponseSchema_(props[k], `${here}.properties.${k}`, errs));
+    (node.required || []).forEach((r) => { if (!(r in props)) errs.push(`${here}.required 里的 "${r}" 不在 properties 里`); });
+  }
+  if (node.type === 'array') {
+    if (!node.items) errs.push(`${here}: type=array 必须有 items`);
+    else lintGeminiResponseSchema_(node.items, `${here}.items`, errs);
+  }
+  return errs;
+}
+
+/** 假的 UrlFetchApp/Utilities.sleep：依序回传预设的 HTTP 回应，记录每次 fetch 跟每次 sleep。 */
+function fakeHttpIo_(responses) {
+  const calls = [];
+  const sleeps = [];
+  let i = 0;
+  return {
+    calls, sleeps,
+    fetch(url, options) {
+      calls.push({ url, options });
+      const r = responses[Math.min(i, responses.length - 1)];
+      i++;
+      return { getResponseCode() { return r.code; }, getContentText() { return r.text; } };
+    },
+    sleep(ms) { sleeps.push(ms); }
+  };
+}
+function quota429Body_(retryDelay) {
+  return JSON.stringify({ error: { code: 429, message: 'You exceeded your current quota.', status: 'RESOURCE_EXHAUSTED', details: [{ '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay }] } });
+}
+function tryPost_(postJson) {
+  try { return { value: postJson('https://example.test/x', { 'Content-Type': 'application/json' }, { a: 1 }) }; }
+  catch (e) { return { error: e.message }; }
+}
+
+function fakeScriptProps_(map) {
+  return { getProperty(key) { return Object.prototype.hasOwnProperty.call(map, key) ? map[key] : null; } };
 }
 
 function runAllLLMExtractorTests() {
@@ -104,13 +166,13 @@ function runAllLLMExtractorTests() {
   const drive1 = fakeDriveService_('pdf-bytes-1');
   const http1 = fakeHttpClient_(fakeGeminiSuccessResponse_(goodCandidate));
   const extractor1 = createLLMExtractor_(
-    { apiKey: 'k', model: 'gemini-3.5-flash', evidenceFolderId: 'folder-1' },
+    { apiKey: 'k', model: 'gemini-3.7-flash', evidenceFolderId: 'folder-1' },
     { driveService: drive1, httpClient: http1, now: new Date('2026-08-21T10:00:00.000Z') }
   );
   const extractResult1 = extractor1.extract({ fileId: 'file-1', documentId: 'CMP-DOC-1' });
   assertEqual_('extract() 回传 mode=structured', extractResult1.mode, 'structured', results);
   assertEqual_('extract() 回传的 candidate 就是 provider 给的那份', extractResult1.candidate, goodCandidate, results);
-  assertEqual_('extract() evidence 带 extractorId', extractResult1.evidence.extractorId, 'LLMExtractor:gemini-3.5-flash', results);
+  assertEqual_('extract() evidence 带 extractorId', extractResult1.evidence.extractorId, 'LLMExtractor:gemini-3.7-flash', results);
   assertEqual_('extract() 成功时也写了一份证据档', drive1._written.length, 1, results);
   assertEqual_('证据档名带 document_id', drive1._written[0].fileName.indexOf('CMP-DOC-1') === 0, true, results);
 
@@ -119,7 +181,7 @@ function runAllLLMExtractorTests() {
   const drive2 = fakeDriveService_('pdf-bytes-2');
   const http2 = fakeHttpClient_({ candidates: [{ finishReason: 'SAFETY', content: { parts: [{ text: '{}' }] } }] });
   const extractor2 = createLLMExtractor_(
-    { apiKey: 'k', model: 'gemini-3.5-flash', evidenceFolderId: 'folder-1' },
+    { apiKey: 'k', model: 'gemini-3.7-flash', evidenceFolderId: 'folder-1' },
     { driveService: drive2, httpClient: http2, now: new Date('2026-08-21T10:00:00.000Z') }
   );
   let extract2Threw = false;
@@ -175,6 +237,71 @@ function runAllLLMExtractorTests() {
   const chunkResult = chunkExtractor.extractOrders({ fileId: 'file-1', documentId: 'doc-1' }, { firstPage: 1, lastPage: 12 });
   assertEqual_('extractOrders：chunk 模式 evidence 标出实际用的页码范围', chunkResult.evidence.pageRange, { firstPage: 1, lastPage: 12 }, results);
   assertEqual_('extractOrders：chunk 模式 extractorId 带页码范围，方便事后从证据文件分辨这是哪一次呼叫', chunkResult.evidence.extractorId.indexOf('p1-12') !== -1, true, results);
+
+  // ============ 2026-09-28 加固：schema 形状检查（Node 就能抓到「Gemini 会直接 HTTP 400」这类错）============
+  assertEqual_('schema lint·statement 层级 schema 没有违规', lintGeminiResponseSchema_(LLM_EXTRACTION_SCHEMA_), [], results);
+  assertEqual_('schema lint·Butiran Tempahan 订单层级 schema 没有违规', lintGeminiResponseSchema_(BUTIRAN_TEMPAHAN_EXTRACTION_SCHEMA_), [], results);
+  const badSchema = { type: 'object', properties: { printed_daily_subtotal: { type: ['number', 'null'] } }, required: ['printed_daily_subtotal', 'missing_field'] };
+  const badProblems = lintGeminiResponseSchema_(badSchema);
+  assertEqual_('schema lint·真的抓得到 2026-09-27 那个 bug（type 用阵列）', badProblems.some((p) => p.indexOf('printed_daily_subtotal.type') !== -1), true, results);
+  assertEqual_('schema lint·也抓得到 required 指到不存在的欄位', badProblems.some((p) => p.indexOf('missing_field') !== -1), true, results);
+  const dayItems = BUTIRAN_TEMPAHAN_EXTRACTION_SCHEMA_.properties.days.items;
+  assertEqual_('printed_daily_subtotal 是单一 type + nullable: true（不能退回阵列写法），而且仍是 required', { type: dayItems.properties.printed_daily_subtotal.type, nullable: dayItems.properties.printed_daily_subtotal.nullable, required: dayItems.required.indexOf('printed_daily_subtotal') !== -1 }, { type: 'number', nullable: true, required: true }, results);
+
+  // ============ parseRetryDelaySeconds_：429 的建议等待秒数 ============
+  const quota429Structured = JSON.stringify({ error: { code: 429, message: 'You exceeded your current quota', status: 'RESOURCE_EXHAUSTED', details: [{ '@type': 'type.googleapis.com/google.rpc.QuotaFailure' }, { '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '52s' }] } });
+  assertEqual_('parseRetryDelaySeconds_·读结构化 RetryInfo.retryDelay', parseRetryDelaySeconds_(quota429Structured), 52, results);
+  assertEqual_('parseRetryDelaySeconds_·retryDelay 带小数秒', parseRetryDelaySeconds_(JSON.stringify({ error: { details: [{ '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '1.218196528s' }] } })), 1.218196528, results);
+  assertEqual_('parseRetryDelaySeconds_·没有 RetryInfo 时退回 message 里的 "Please retry in Xs."（2026-09-27 真实撞过的写法）', parseRetryDelaySeconds_(JSON.stringify({ error: { code: 429, message: 'You exceeded your current quota.\nPlease retry in 52.712601335s.', status: 'RESOURCE_EXHAUSTED' } })), 52.712601335, results);
+  assertEqual_('parseRetryDelaySeconds_·503 容量错误没有等待秒数 → null（呼叫方退回 exponential backoff）', parseRetryDelaySeconds_(JSON.stringify({ error: { code: 503, message: 'This model is currently experiencing high demand.', status: 'UNAVAILABLE' } })), null, results);
+  assertEqual_('parseRetryDelaySeconds_·不是合法 JSON → null，不抛错', parseRetryDelaySeconds_('<html>Bad Gateway</html>'), null, results);
+  assertEqual_('parseRetryDelaySeconds_·空字符串/undefined/字面 null → null，不抛错', [parseRetryDelaySeconds_(''), parseRetryDelaySeconds_(undefined), parseRetryDelaySeconds_('null')], [null, null, null], results);
+
+  // ============ createRetryingPostJson_：重试策略（原本躲在 GAS-only 的函数里，Node 测不到）============
+  const ioOk = fakeHttpIo_([{ code: 200, text: '{"ok":true}' }]);
+  const okResult = tryPost_(createRetryingPostJson_(ioOk));
+  assertEqual_('postJson·2xx 直接回传解析后的 JSON，不睡、只打一次', [okResult.value, ioOk.calls.length, ioOk.sleeps], [{ ok: true }, 1, []], results);
+  assertEqual_('postJson·送给 fetch 的选项跟原本一致（post/json/headers/payload/muteHttpExceptions）', ioOk.calls[0].options, { method: 'post', contentType: 'application/json', headers: { 'Content-Type': 'application/json' }, payload: '{"a":1}', muteHttpExceptions: true }, results);
+
+  const io429 = fakeHttpIo_([{ code: 429, text: quota429Body_('52s') }, { code: 200, text: '{"ok":1}' }]);
+  const r429 = tryPost_(createRetryingPostJson_(io429));
+  assertEqual_('postJson·429 带 retryDelay=52s → 等 52.5 秒（不是原本的 1 秒）再重试，然后成功', [r429.value, io429.sleeps], [{ ok: 1 }, [52500]], results);
+
+  const io429Frac = fakeHttpIo_([{ code: 429, text: quota429Body_('1.2s') }, { code: 200, text: '{"ok":1}' }]);
+  tryPost_(createRetryingPostJson_(io429Frac));
+  assertEqual_('postJson·retryDelay=1.2s → 等 1.7 秒', io429Frac.sleeps, [1700], results);
+
+  const io503 = fakeHttpIo_([{ code: 503, text: '{"error":{"code":503,"status":"UNAVAILABLE"}}' }, { code: 503, text: '{}' }, { code: 200, text: '{"ok":2}' }]);
+  const r503 = tryPost_(createRetryingPostJson_(io503));
+  assertEqual_('postJson·503 沿用原本的 exponential backoff（1s、2s），然后成功', [r503.value, io503.sleeps], [{ ok: 2 }, [1000, 2000]], results);
+
+  const io429NoHint = fakeHttpIo_([{ code: 429, text: 'not json' }]);
+  const r429NoHint = tryPost_(createRetryingPostJson_(io429NoHint));
+  assertEqual_('postJson·429 但读不到建议秒数 → 退回 1s/2s/4s，最后一次失败照旧抛出 HTTP 429（总共打 4 次）', [io429NoHint.sleeps, io429NoHint.calls.length, /HTTP 429/.test(r429NoHint.error)], [[1000, 2000, 4000], 4, true], results);
+
+  const io400 = fakeHttpIo_([{ code: 400, text: '{"error":{"code":400,"message":"Invalid JSON payload"}}' }]);
+  const r400 = tryPost_(createRetryingPostJson_(io400));
+  assertEqual_('postJson·400（请求本身有问题）不重试、不睡，直接抛错', [io400.calls.length, io400.sleeps, /HTTP 400/.test(r400.error)], [1, [], true], results);
+
+  const ioHuge = fakeHttpIo_([{ code: 429, text: quota429Body_('300s') }]);
+  const rHuge = tryPost_(createRetryingPostJson_(ioHuge));
+  assertEqual_('postJson·建议等 300 秒也只睡单次上限，累计超过总上限就不再重试（保护 GAS 6 分钟上限）', [ioHuge.sleeps, ioHuge.calls.length, /HTTP 429/.test(rHuge.error), /不再重试/.test(rHuge.error)], [[MAX_SINGLE_RETRY_SLEEP_MS_], 2, true, true], results);
+  assertEqual_('postJson·单次上限小于累计上限（否则累计上限永远碰不到、形同虚设）', MAX_SINGLE_RETRY_SLEEP_MS_ <= MAX_TOTAL_RETRY_SLEEP_MS_, true, results);
+
+  const ioWorst = fakeHttpIo_([{ code: 429, text: quota429Body_('52s') }]);
+  tryPost_(createRetryingPostJson_(ioWorst));
+  assertEqual_('postJson·每次都 429 的最坏情况：一次 postJson 累计睡眠不超过总上限', ioWorst.sleeps.reduce((a, b) => a + b, 0) <= MAX_TOTAL_RETRY_SLEEP_MS_, true, results);
+
+  // ============ resolveLLMExtractorConfig_：模型来自 Script Properties，没设才用默认 ============
+  const cfgSet = resolveLLMExtractorConfig_(fakeScriptProps_({ LLM_EXTRACTOR_MODEL: 'gemini-2.5-flash', GEMINI_API_KEY: 'key-1', EXTRACTION_EVIDENCE_FOLDER_ID: 'folder-1' }));
+  assertEqual_('resolve·有设 LLM_EXTRACTOR_MODEL 就用它（换模型改设定，不用改代码）', [cfgSet.model, cfgSet.modelSource], ['gemini-2.5-flash', 'ScriptProperty:LLM_EXTRACTOR_MODEL'], results);
+  assertEqual_('resolve·apiKey/evidenceFolderId 原样带过来', [cfgSet.apiKey, cfgSet.evidenceFolderId], ['key-1', 'folder-1'], results);
+  const cfgUnset = resolveLLMExtractorConfig_(fakeScriptProps_({}));
+  assertEqual_('resolve·没设就用默认模型', [cfgUnset.model, cfgUnset.modelSource], [DEFAULT_LLM_EXTRACTOR_MODEL_, 'default'], results);
+  const cfgBlank = resolveLLMExtractorConfig_(fakeScriptProps_({ LLM_EXTRACTOR_MODEL: '   ' }));
+  assertEqual_('resolve·设成空白/只有空格也当没设（否则模型名变空白，URL 直接 404）', [cfgBlank.model, cfgBlank.modelSource], [DEFAULT_LLM_EXTRACTOR_MODEL_, 'default'], results);
+  assertEqual_('resolve·前后空白/换行会去掉', resolveLLMExtractorConfig_(fakeScriptProps_({ LLM_EXTRACTOR_MODEL: '  gemini-2.5-flash \n' })).model, 'gemini-2.5-flash', results);
+  assertEqual_('resolve·默认模型是 gemini-3.8-flash（2026-09-28 定的）', DEFAULT_LLM_EXTRACTOR_MODEL_, 'gemini-3.8-flash', results);
 
   const allPass = results.every((r) => r.pass);
   results.forEach((r) => {

@@ -3,7 +3,8 @@ if (typeof require === 'function') {
     buildConsoleDeps_, consoleScanFolder_, consoleImportOneDriveFile_, consoleBatchImport_,
     consoleRetryFile_, consoleManualImport_, consoleRebuildProjections_, consoleGetDashboard_,
     consoleGetIncomeDetail_, consoleRunDailyAllocation_, consoleGetDashboard, consoleGetLastFolderId, consoleScanFolder,
-    consoleManualImport, consoleGetIncomeDetail, consoleRunDailyAllocation
+    consoleManualImport, consoleGetIncomeDetail, consoleRunDailyAllocation,
+    sanitizeForClient_, ASSUMED_STATEMENT_TOTAL_PAGES_
   } = require('./170_OperatorConsole.js');
   var { createTruthWriter_ } = require('./115_TruthWriter.js');
   var { createSheetReader_ } = require('./117_SheetReader.js');
@@ -198,6 +199,8 @@ function runAllOperatorConsoleTests() {
   // Node 测不了，见文件最后的人工清单。这里只测「给一样的 fake deps，
   // 公开版本（consoleXxx）产出的结果跟私有版本（consoleXxx_）一模一样」
   // ——两边各自灌一份独立、起始状态相同的 fake deps，比对回传值。
+  // consoleGetDashboard 是这里唯一的例外（2026-09-27 起），见它自己那行
+  // 断言旁的说明。
   const deps7a = fakeConsoleDeps_([{ id: 'f1', name: 'a.pdf' }]);
   const deps7b = fakeConsoleDeps_([{ id: 'f1', name: 'a.pdf' }]);
   assertEqual_('consoleScanFolder 转发结果跟 consoleScanFolder_ 一致', consoleScanFolder('folder1', deps7a), consoleScanFolder_('folder1', deps7b), results);
@@ -208,7 +211,13 @@ function runAllOperatorConsoleTests() {
 
   const deps9a = fakeConsoleDeps_([]);
   const deps9b = fakeConsoleDeps_([]);
-  assertEqual_('consoleGetDashboard 转发结果跟 consoleGetDashboard_ 一致', consoleGetDashboard(deps9a), consoleGetDashboard_(deps9b), results);
+  // 2026-09-27：consoleGetDashboard 不再是纯转发——真实 GAS 环境下
+  // google.script.run 会把这个物件静默传成 null，改成回传 JSON 字符串解决
+  // （见 170_OperatorConsole.js 同日修复说明）。这里改成比对
+  // JSON.parse(consoleGetDashboard(...)) 是否跟 consoleGetDashboard_(...)
+  // 一致——验证的还是「内容没有被破坏」，只是多一层 JSON 字符串往返，不是
+  // 原封不动比对回传值本身。
+  assertEqual_('consoleGetDashboard 转发内容（还原 JSON 字符串后）跟 consoleGetDashboard_ 一致', JSON.parse(consoleGetDashboard(deps9a)), consoleGetDashboard_(deps9b), results);
 
   // 2026-09-15：这个断言原本直接写死期望 null——名字里自己就写了原因
   // （Node 环境没有 PropertiesService，所以这个函数在 Node 下必然回 null），
@@ -351,6 +360,75 @@ function runAllOperatorConsoleTests() {
     consoleRunDailyAllocation_('CMP-INCOME-2026-W01', Object.assign({}, depsRDA5b, { orderExtractor: fakeOrderExtractor_(fakeFullyAllocatedCandidate_) })),
     results
   );
+
+  // ============ 2026-09-28 加固：真实 GAS 形状的 fixture（Sheets 日期栏读回来是原生 Date）============
+  // 上面所有 fixture 的 period_start/period_end 都是 ISO 字符串——Node 里的假 Sheet
+  // 不会像真实 Sheets 那样把日期栏读成 Date，「Date 传不过 google.script.run」这类
+  // 问题在 Node 永远测不到，只会在真实 GAS 才炸（2026-09-27 dashboard 白屏更可能
+  // 就是这个）。这里刻意用 Date 型 fixture，把这个盲区补起来。
+  function collectDatePaths_(value, path, found) {
+    if (value instanceof Date) { found.push(path); return found; }
+    if (value !== null && typeof value === 'object') {
+      Object.keys(value).forEach((k) => collectDatePaths_(value[k], `${path}.${k}`, found));
+    }
+    return found;
+  }
+  function seedDateTypedCrossMonthRow_(deps) {
+    deps._accessor.appendRow('Verified_Income', ['CMP-INCOME-2026-W01', '2026-W01', 'MYR', 1297.60, 566.20, 50.00, 19.00, 0, 1932.80, 1932.80, 'Compliance OS', 'Grab', 'Verified', '2026-01-05T00:00:00Z', 'DOC-2026-W01', 'test', new Date(2025, 11, 29), new Date(2026, 0, 4)]);
+  }
+
+  const depsDate1 = fakeConsoleDeps_();
+  seedDateTypedCrossMonthRow_(depsDate1);
+  const dateFixtureRow = depsDate1.sheetReader.readAll('Verified_Income', VERIFIED_INCOME_COLUMNS)[0];
+  assertEqual_('Date fixture·假 Sheet 读回来确实是原生 Date（不是字符串，不然这组测试等于没测）', dateFixtureRow.period_start instanceof Date && dateFixtureRow.period_end instanceof Date, true, results);
+
+  const dashDate = consoleGetDashboard_(depsDate1);
+  assertEqual_('Date fixture·consoleGetDashboard_ 的 payload 里没有任何原生 Date（google.script.run 传不过 Date）', collectDatePaths_(dashDate, 'dashboard', []), [], results);
+  const needsAllocationDate = dashDate.monthlySummaries[0].needs_allocation[0];
+  assertEqual_('Date fixture·跨月记录的 period_start/period_end 转成本地日期字符串（不是 UTC 偏移后差一天）', { start: needsAllocationDate.period_start, end: needsAllocationDate.period_end }, { start: '2025-12-29', end: '2026-01-04' }, results);
+  const depsDate2 = fakeConsoleDeps_();
+  seedDateTypedCrossMonthRow_(depsDate2);
+  assertEqual_('Date fixture·公开 consoleGetDashboard 回传的 JSON 字符串里日期也是本地日期', JSON.parse(consoleGetDashboard(depsDate2)).monthlySummaries[0].needs_allocation[0].period_start, '2025-12-29', results);
+
+  const depsDate3 = fakeConsoleDeps_([]);
+  seedDateTypedCrossMonthRow_(depsDate3);
+  const batchDate = consoleBatchImport_('any-folder', depsDate3);
+  assertEqual_('Date fixture·consoleBatchImport_ 的 rebuild 欄位也没有原生 Date（批次汇入/重试/手动汇入的 rebuild 共用同一处转换）', collectDatePaths_(batchDate, 'batch', []), [], results);
+
+  const detailDate = consoleGetIncomeDetail_('CMP-INCOME-2026-W01', depsDate1);
+  assertEqual_('Date fixture·consoleGetIncomeDetail_ 的 income（原始一行）没有原生 Date', collectDatePaths_(detailDate, 'detail', []), [], results);
+  assertEqual_('Date fixture·consoleGetIncomeDetail_ 的 income.period_start 是本地日期字符串', detailDate.income.period_start, '2025-12-29', results);
+
+  // ============ sanitizeForClient_：纯函数 ============
+  assertEqual_('sanitizeForClient_·本地午夜的 Date → YYYY-MM-DD', sanitizeForClient_(new Date(2026, 0, 4)), '2026-01-04', results);
+  assertEqual_('sanitizeForClient_·带时间的 Date → ISO 字符串（带 Z，不会被误读成本地日期）', sanitizeForClient_(new Date('2026-01-05T03:04:05.000Z')), '2026-01-05T03:04:05.000Z', results);
+  assertEqual_('sanitizeForClient_·无效 Date → null', sanitizeForClient_(new Date('not a date')), null, results);
+  assertEqual_('sanitizeForClient_·嵌在物件/阵列里的 Date 也转', sanitizeForClient_({ a: [new Date(2026, 0, 4)], b: { c: new Date(2025, 11, 29) } }), { a: ['2026-01-04'], b: { c: '2025-12-29' } }, results);
+  assertEqual_('sanitizeForClient_·一般资料原样通过（null/数字/字符串/布尔/巢状）', sanitizeForClient_({ n: null, x: 1.5, s: 'a', t: true, arr: [1, { k: null }] }), { n: null, x: 1.5, s: 'a', t: true, arr: [1, { k: null }] }, results);
+  const sanitizedOdd = sanitizeForClient_({ keep: 1, drop: undefined, fn: function () {}, arr: [undefined, 2] });
+  assertEqual_('sanitizeForClient_·undefined/function 属性略过，阵列里的 undefined → null（跟 JSON 语意一致）', { hasDrop: 'drop' in sanitizedOdd, hasFn: 'fn' in sanitizedOdd, arr: sanitizedOdd.arr }, { hasDrop: false, hasFn: false, arr: [null, 2] }, results);
+  assertEqual_('sanitizeForClient_·NaN/Infinity → null', sanitizeForClient_([NaN, Infinity, -Infinity, 3]), [null, null, null, 3], results);
+  const circularRef = {};
+  circularRef.self = circularRef;
+  let circularThrewClearly = false;
+  try { sanitizeForClient_(circularRef); } catch (e) { circularThrewClearly = /50 层/.test(e.message); }
+  assertEqual_('sanitizeForClient_·循环参照明确抛错（不是无限递归、也不是回给前端一个 null）', circularThrewClearly, true, results);
+
+  // ============ consoleRunDailyAllocation_：失败时不再是黑盒 + totalPages 假设值 ============
+  const depsRDA7 = fakeConsoleDeps_();
+  seedNeedsAllocationFixture_(depsRDA7);
+  const seenByExtractor = [];
+  const recordingFailingExtractor = {
+    extractOrders(document, pageRange) {
+      seenByExtractor.push({ totalPages: document.totalPages, pageRange });
+      throw new Error('模拟 Gemini HTTP 400');
+    }
+  };
+  const rdaDiag = consoleRunDailyAllocation_('CMP-INCOME-2026-W01', Object.assign({}, depsRDA7, { orderExtractor: recordingFailingExtractor }));
+  assertEqual_('consoleRunDailyAllocation_·失败时带回 142 的 attempts（整份、两段 chunk、all_chunks_failed）', rdaDiag.attempts.map((a) => a.label), ['full_document', 'chunk_1-13', 'chunk_12-24', 'all_chunks_failed'], results);
+  assertEqual_('consoleRunDailyAllocation_·失败时 errors 带着底层例外文字（不再是没有线索的黑盒 Needs_Review）', rdaDiag.errors.some((e) => String(e.exception || '').indexOf('模拟 Gemini HTTP 400') !== -1), true, results);
+  assertEqual_('consoleRunDailyAllocation_·extractor 被呼叫三次（整份 + 两段），每次收到的 document.totalPages 都是那个具名假设值', { calls: seenByExtractor.length, allUseAssumedTotalPages: seenByExtractor.every((c) => c.totalPages === ASSUMED_STATEMENT_TOTAL_PAGES_) }, { calls: 3, allUseAssumedTotalPages: true }, results);
+  assertEqual_('consoleRunDailyAllocation_·成功时 attempts/errors 也是阵列（回传形状固定，前端不用判断有没有这两个欄位）', { attempts: Array.isArray(rdaResult.attempts), errors: Array.isArray(rdaResult.errors) }, { attempts: true, errors: true }, results);
 
   const allPass = results.every((r) => r.pass);
   results.forEach((r) => {

@@ -35,6 +35,62 @@ if (typeof require === 'function') {
   var { computeMonthlyIncomeSummary_, computeYearToDateIncomeSummary_, computeMonthlyAllocation_, computeComplianceProjection_, findInvalidPeriodIncomeIds_ } = require('./160_MonthlyProjection.js');
   var { DAILY_ALLOCATION_COLUMNS, runGeminiOrderExtractionWithFallback_, writeDailyAllocationBatch_ } = require('./142_DailyOrderAllocation.js');
   var { realLLMExtractor_ } = require('./127_LLMExtractor.js');
+var { normalizeIsoDateString_ } = require('./106_Utils.js');
+}
+
+/**
+ * 2026-09-28 新增——纯函数，Node 可测。把要经过 google.script.run 回传给前端的
+ * 资料整理成「只含 primitive／物件／阵列」的形状：原生 Date 转成字符串，
+ * 其他资料照旧。
+ *
+ * 背景（更正 2026-09-27 consoleGetDashboard 那次对根因的判断）：Apps Script
+ * 官方文件明写，google.script.run 的参数/回传值里出现 Date——包含嵌在物件、
+ * 阵列里面的——请求会失败，前端 successHandler 收到 null。160_MonthlyProjection.js
+ * 的 needs_allocation / partially_allocated 清单原样带出 Verified_Income 的
+ * period_start/period_end；真实 GAS 下 SheetReader.readAll 读回来这两栏是原生
+ * Date（106_Utils.js normalizeIsoDateString_ 与 isoDateStringToParts_ 的注解都
+ * 已经记录过），所以只要 Sheet 里有跨月/已分月的记录，dashboard payload 就会带着
+ * Date 出去——这才是那次白屏更可能的真根因（Node 里用 Date 型 fixture 可以重现，
+ * 见 171），不是我当时怀疑的 epf/tax 的 null（null 是 google.script.run 明确
+ * 合法的值）。当时用来「排除 Date」的诊断（JSON.stringify 之后找 "GMT"）本来
+ * 就抓不到 Date：JSON.stringify 把 Date 写成 UTC ISO 字符串（"...Z"），从来
+ * 不含 "GMT"，那个诊断的结论无效。回传 JSON 字符串之所以「有效」，是因为
+ * JSON.stringify 顺手把 Date 转掉了——但转成的是 UTC 时间：GMT+8 的 2025-12-29
+ * 会变成 "2025-12-28T16:00:00.000Z"，前端只要取前 10 码显示就差一天。
+ *
+ * 转换规则：本地时间刚好 00:00:00.000 的 Date（Sheets 日期栏的典型样子）→
+ * "YYYY-MM-DD"（用 106 的 normalizeIsoDateString_，跟 160/isoDateStringToParts_
+ * 同一套本地日期读法）；带时间的 Date → toISOString()（带 Z，不会被误读成
+ * 本地日期）；无效 Date → null。其余跟 JSON 语意一致：值是 undefined/function 的
+ * 属性略过、阵列里的 undefined/function → null、NaN/Infinity → null。巢状超过
+ * 50 层直接抛错（通常是循环参照——google.script.run 一样传不出去，早点在后端
+ * 抛出明确错误，比前端收到 null 好查）。
+ * @param {*} value
+ * @return {*}
+ */
+function sanitizeForClient_(value, depth) {
+  const level = depth || 0;
+  if (level > 50) throw new Error('sanitizeForClient_: 巢状超过 50 层，可能有循环参照——google.script.run 也传不出去');
+  if (value instanceof Date) {
+    if (isNaN(value.getTime())) return null;
+    const isLocalMidnight = value.getHours() === 0 && value.getMinutes() === 0 &&
+      value.getSeconds() === 0 && value.getMilliseconds() === 0;
+    return isLocalMidnight ? normalizeIsoDateString_(value) : value.toISOString();
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => (item === undefined || typeof item === 'function') ? null : sanitizeForClient_(item, level + 1));
+  }
+  if (value !== null && typeof value === 'object') {
+    const out = {};
+    Object.keys(value).forEach((key) => {
+      const item = value[key];
+      if (item === undefined || typeof item === 'function') return;
+      out[key] = sanitizeForClient_(item, level + 1);
+    });
+    return out;
+  }
+  if (typeof value === 'number' && !isFinite(value)) return null;
+  return value;
 }
 
 /** 真的去调用 Drive API 的那一层——只能在真实 GAS 环境跑，Node 测不了。 */
@@ -331,7 +387,12 @@ function consoleRebuildProjections_(deps) {
   // 或残留旧资料，Steven 该去清资料，不是等系统帮他猜。明确列出来，不要
   // 让它们悄悄消失在 Missing_Period 分类里只有 160 自己知道。
   const invalidPeriodIncomeIds = findInvalidPeriodIncomeIds_(verifiedIncomeRecords);
-  return { monthlySummaries, ytd, totalVerifiedCount: verifiedIncomeRecords.length, invalidPeriodIncomeIds };
+  // 2026-09-28：这个物件会被 consoleGetDashboard/consoleBatchImport_/
+  // consoleRetryFile_/consoleManualImport_ 各自经 google.script.run 回传给前端
+  // （后三者放在 rebuild 欄位）。needs_allocation/partially_allocated 里的
+  // period_start/period_end 在真实 GAS 是原生 Date，google.script.run 传不出去
+  // ——统一在这里转掉，四个出口一次处理，不各自补。见 sanitizeForClient_。
+  return sanitizeForClient_({ monthlySummaries, ytd, totalVerifiedCount: verifiedIncomeRecords.length, invalidPeriodIncomeIds });
 }
 
 /** 页面载入时呼叫一次，显示目前已有的状态（不用先跑一次批次汇入）。 */
@@ -357,11 +418,31 @@ function consoleGetIncomeDetail_(incomeId, deps) {
     ? (d.sheetReader.readAll('Documents', DOCUMENTS_COLUMNS).find((r) => r.document_id === income.source_document_id) || null)
     : null;
 
-  return {
+  // 2026-09-28：income 是 Verified_Income 的原始一行，period_start/period_end/
+  // verified_at 这类日期栏在真实 GAS 可能是原生 Date——同 consoleRebuildProjections_，
+  // 经 google.script.run 前先转掉。
+  return sanitizeForClient_({
     income,
     document: doc ? { documentId: doc.document_id, driveFileId: doc.drive_file_id, drivePath: doc.drive_path, status: doc.status } : null
-  };
+  });
 }
+
+/**
+ * 2026-09-28：consoleRunDailyAllocation_ 传给 142 的 document.totalPages。
+ * 这是「假设值」，不是从 PDF 读出来的真实页数——production 端至今没有取得真实
+ * PDF 页数的机制（142 runGeminiOrderExtractionWithFallback_ 2026-09-24 那段
+ * 注解讲过）。2026-09-27 真实 GAS 除错时写死成 24。
+ *
+ * 只有整份文件一次抽取（full_document）失败、退到 chunk fallback 时才会用到；
+ * full_document 成功就完全碰不到这个数字。就算假设错了（真实页数不是 24），
+ * chunk 的结果仍然要过 125 的验证、逐日 printed subtotal 的 checksum、整周
+ * 总额对 Verified_Income 的 checksum，全部对得上才会是 Fully_Allocated——
+ * 页码切错造成的漏单/重复只会落在 Needs_Review（fail-closed），不会静默写进
+ * 错的数字；代价是白花几次 API 呼叫。chunk 合并逻辑（mergeChunkedExtraction
+ * Results_）至今没有用真实 Gemini 输出验证过，这点不变。真正的解法（读真实
+ * 页数）仍是 142 那段注解说的、需要另外做的 architecture 决定，不在这次范围。
+ */
+var ASSUMED_STATEMENT_TOTAL_PAGES_ = 24;
 
 /**
  * 112_DocumentTextExtractor.js 的 DocumentTextExtractor 单例只往外传
@@ -480,7 +561,12 @@ function consoleRunDailyAllocation_(incomeId, deps) {
       return { incomeId, status: 'Error', error: `找不到 source_document_id=${incomeRecord.source_document_id} 对应的 Documents 记录` };
     }
 
-    const document = { fileId: documentRow.drive_file_id, mimeType: 'application/pdf', documentId: documentRow.document_id };
+    const document = {
+      fileId: documentRow.drive_file_id,
+      mimeType: 'application/pdf',
+      documentId: documentRow.document_id,
+      totalPages: ASSUMED_STATEMENT_TOTAL_PAGES_ // 假设值，见该常数上方说明
+    };
     const verifiedIncomeContext = {
       verifiedIncomeId: incomeId,
       periodStartParts: isoDateStringToParts_(incomeRecord.period_start),
@@ -582,19 +668,24 @@ function doGet(e) {
 
 /**
  * 2026-09-27 修复（真实 GAS：Console 白屏卡在"载入中"，前端
- * Cannot read properties of null (reading 'monthlySummaries')）：
- * google.script.run 把 consoleGetDashboard_ 回传的物件传给前端时会
- * 静默失败，successHandler 收到的是 null，不是真正的资料——不是这里漏了
- * return（原本就有)，也不是回传物件里藏了 Sheets 原生 Date 物件（诊断时
- * JSON.stringify 该物件完全成功、长度正常、不含 Date 字符串表示）。根因
- * 未查明，但目前唯一验证有效的解法：不透过 google.script.run 直接传物件，
- * 改成回传纯 JSON 字符串，前端 loadDashboard() 收到后自己 JSON.parse
- * 还原（见 170_OperatorConsole.html 同日修改）。怀疑跟 compliance_projection
- * 底下恒为 null 的 epf.amount/tax.amount（160 的 computeComplianceProjection_，
- * Not_Configured 状态）有关，但这只是观察到的关联，不是已证实的根因。
- * consoleGetDashboard_ 本身完全不变，仍回传物件——只有这层公开 wrapper
- * 改变契约，171 对应的测试断言已同步更新（比对 JSON.parse 还原后的内容，
- * 不是原始回传值本身）。
+ * Cannot read properties of null (reading 'monthlySummaries')），
+ * 2026-09-28 更正根因说明：
+ * google.script.run 把 consoleGetDashboard_ 回传的物件传给前端时静默失败，
+ * successHandler 收到 null。更可能的真根因是 payload 里带着原生 Date——
+ * needs_allocation/partially_allocated 原样带出的 period_start/period_end，
+ * 真实 GAS 下是 Sheets 读回来的 Date，Apps Script 官方文件明写 Date 传不过
+ * google.script.run（详见 sanitizeForClient_ 的说明，Node 里用 Date 型
+ * fixture 可以重现，171 有对应测试）。2026-09-27 当时的判断（怀疑
+ * compliance_projection 底下恒为 null 的 epf.amount/tax.amount）是错的：null
+ * 是合法值；当时「排除 Date」用的 JSON.stringify + 找 "GMT" 诊断本来就抓不到
+ * Date（JSON 把 Date 写成 "...Z"，从不含 "GMT"）。
+ *
+ * 现在的做法（两层）：consoleGetDashboard_ 的输出已经过 sanitizeForClient_
+ * （在源头把 Date 转成本地日期字符串，不会再有 UTC 差一天的问题）；这里仍然
+ * 保留回传 JSON 字符串——它在真实 GAS 已验证有效，前端 loadDashboard() 也
+ * 已经会 JSON.parse，不动已验证过的行为，当作额外保险。consoleGetDashboard_
+ * 本身仍回传物件——只有这层公开 wrapper 改变契约，171 对应的测试断言比对
+ * JSON.parse 还原后的内容，不是原始回传值本身。
  */
 function consoleGetDashboard(deps) {
   const result = consoleGetDashboard_(deps);
@@ -649,6 +740,8 @@ if (typeof module !== 'undefined') {
     consoleGetIncomeDetail_,
     consoleRunDailyAllocation_,
     lazyOrderExtractor_,
+    sanitizeForClient_,
+    ASSUMED_STATEMENT_TOTAL_PAGES_,
     consoleGetDashboard,
     consoleGetLastFolderId,
     consoleSaveLastFolderId,
