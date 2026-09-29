@@ -720,16 +720,32 @@ function runGeminiOrderExtractionWithFallback_(document, verifiedIncomeContext, 
   // 第一次尝试：整份文件一次呼叫（首选路径）
   let fullCandidate = null;
   let fullValidation = null;
+  let fullQuotaExhausted = false;
   try {
     fullCandidate = deps.extractor.extractOrders(document, null).candidate;
     fullValidation = tryValidate(fullCandidate, 'full_document');
   } catch (err) {
+    fullQuotaExhausted = !!(err && err.isQuotaExhausted);
     attempts.push({ label: 'full_document', stage: 'Extraction_Failed', errorCount: 1, exception: String(err && err.message || err) });
   }
 
   let finalCandidate = null;
   if (fullValidation && fullValidation.valid) {
     finalCandidate = fullCandidate;
+  } else if (fullQuotaExhausted) {
+    // 2026-09-29 新增（真实 GAS：同一天 4 次真实 consoleRunDailyAllocation，
+    // full_document 撞 HTTP 429 RESOURCE_EXHAUSTED、依建议秒数重试后仍然
+    // 用尽额度，接着 chunk_1-13 又立刻撞同一个 429——同一把 API key 的同一个
+    // quota，切页重打不会得到不同结果，chunking 原本是为了解决「内容太
+    // 复杂/太长单次读不完」，不是为了绕过额度限制）：full_document 因额度
+    // 用尽（127 的 createRetryingPostJson_ 设的 err.isQuotaExhausted）而失败
+    // 时，直接跳过整个 chunk fallback，不再多打 2 次几乎注定失败的呼叫——
+    // Gemini 免费层额度非常小（真实撞过 limit: 20 次），省下来的呼叫留给
+        // 接下来手动重试用，比硬着头皮把额度耗光更有价值。这个判断只看
+    // extractor 抛出的结构化旗标，不解析任何 provider 特定的错误文字，不
+    // 违反 ADR-005/127 开头讲的 Adapter 边界——换 provider 时，新的 adapter
+    // 只要在它自己的额度用尽时同样设这个旗标，这里完全不用改。
+    attempts.push({ label: 'chunk_fallback_skipped_quota_exhausted', stage: 'Extraction_Failed', errorCount: 1, reason: 'full_document 因 Gemini 额度用尽（HTTP 429 RESOURCE_EXHAUSTED，依建议等待时间重试后仍未恢复）而失败——chunk fallback 用的是同一把 API key 的同一个额度，重打没有意义，跳过以保留额度' });
   } else {
     // Fallback：切成两个有 1 页重叠的 page range 各打一次。用这么简单的
     // 二分而不是更细的分块，是因为目前完全没有真实证据支持「细到几页
@@ -761,7 +777,8 @@ function runGeminiOrderExtractionWithFallback_(document, verifiedIncomeContext, 
         { firstPage: 1, lastPage: Math.min(midpoint + 1, totalPages) },
         { firstPage: Math.max(midpoint, 1), lastPage: totalPages }
       ];
-      ranges.forEach((range) => {
+      for (let i = 0; i < ranges.length; i++) {
+        const range = ranges[i];
         try {
           const candidate = deps.extractor.extractOrders(document, range).candidate;
           const validation = tryValidate(candidate, `chunk_${range.firstPage}-${range.lastPage}`);
@@ -771,8 +788,15 @@ function runGeminiOrderExtractionWithFallback_(document, verifiedIncomeContext, 
         } catch (err) {
           anyChunkException = true;
           attempts.push({ label: `chunk_${range.firstPage}-${range.lastPage}`, stage: 'Extraction_Failed', errorCount: 1, exception: String(err && err.message || err) });
+          // 2026-09-29：同一个理由——这个 chunk 已经证明额度用尽了，剩下还
+          // 没打的 chunk 用的是同一个额度，不会有不同结果，直接跳过，不要
+          // 为了「至少两个都试过」这种表面上的齐全而多浪费一次呼叫。
+          if (err && err.isQuotaExhausted && i < ranges.length - 1) {
+            attempts.push({ label: 'remaining_chunks_skipped_quota_exhausted', stage: 'Extraction_Failed', errorCount: 1, reason: `chunk_${range.firstPage}-${range.lastPage} 因额度用尽而失败，跳过剩下 ${ranges.length - 1 - i} 个 page range，同一个额度重打没有意义` });
+            break;
+          }
         }
-      });
+      }
     }
 
     if (chunkResults.length > 0) {

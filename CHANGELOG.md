@@ -18,6 +18,14 @@
 
 ---
 
+## 2026-09-27～29 — Gemini Schema 缺陷修复 + Dashboard Date-leak（第四次同根因）修复 + 重试加固 + Free-tier Quota 现实
+
+- **类型**: Production code changes（127/142/170）+ Verification-only changes（真实 GAS 执行揭露 quota 现实）
+- **流程**: Code → Verify → Governance（真实 GAS 执行触发/揭露 → 诊断 → 修复 → 持久化；Steven 2026-09-29 明确指示先更新治理文件再动代码）
+- 详见 `900_Constitution.js` 的 `changelog` 数组同日期条目、`VERIFICATION_STATUS.md` 新增的两节（Date-object 缺陷群第 4 项、Gemini API Defects & Operational Blockers）、`ADR-005` 新增 2026-09-29 段落
+- Schema changes: NONE　Extraction-contract changes: `127` 的 `printed_daily_subtotal` 欄位 `type` 写法修正（语意不变，见 VERIFICATION_STATUS.md）
+- **本条目包含一次诚实更正**：2026-09-27 对 dashboard 白屏根因的诊断（归咎于 epf/tax 的 null）是错的，2026-09-28 查明更可能的真根因（Date 物件）并更正——过程写在 `VERIFICATION_STATUS.md`，不是事后删掉重写
+
 ## 2026-09-24～26 — Phase-B 历史脚本清理 + Date-object-from-Sheets 缺陷群修复 + ADR-004/005 首次真实端到端证据
 
 - **类型**: Production code changes（142/160/170/143/161）+ Verification-only changes

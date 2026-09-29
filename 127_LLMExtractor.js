@@ -568,6 +568,13 @@ function createRetryingPostJson_(io) {
         return JSON.parse(text);
       }
       lastError = new Error(`LLM API 回传 HTTP ${code}：${text.slice(0, 500)}`);
+      // 2026-09-29：HTTP 429 明确代表额度/频率限制用尽（RFC 6585），不是内容或
+      // 请求本身的问题——真的放弃重试时（不管是自然用完 maxAttempts 还是撞到
+      // 下面的累计等待上限）在 Error 上挂一个结构化旗标，让呼叫方（142 的
+      // fallback 编排）不用去解析这段中文/英文错误文字猜是不是额度问题就能
+      // 判断「重试同一个 quota 没有意义」。503（容量）、400（请求本身有问题）
+      // 都不设这个旗标——只有 429 明确代表 quota/rate-limit。
+      if (code === 429) lastError.isQuotaExhausted = true;
       const isRetryable = code === 429 || code >= 500;
       if (!isRetryable || attempt === maxAttempts) {
         throw lastError;
@@ -578,7 +585,18 @@ function createRetryingPostJson_(io) {
         : 1000 * Math.pow(2, attempt - 1); // 没有建议秒数时的原有 1s/2s/4s
       const delayMs = Math.min(rawDelayMs, MAX_SINGLE_RETRY_SLEEP_MS_);
       if (totalSleptMs + delayMs > MAX_TOTAL_RETRY_SLEEP_MS_) {
-        throw new Error(`${lastError.message}（已累计等待 ${Math.round(totalSleptMs / 1000)} 秒，再等会逼近 GAS 单次执行上限，不再重试）`);
+        // 2026-09-29 修正可读性缺陷（真实 Cloud logs 发现）：原本把这句中文
+        // 直接接在 lastError.message 后面——lastError.message 本身已经是
+        // 「HTTP 429：」加上被 slice(0,500) 截断到一半的原始 JSON，两段直接
+        // 黏在一起，读起来像是接在 JSON 结构中间的乱码（例如
+        // `"status": "RESOURCE_EXHAUSTED",\n    "（已累计等待 9 秒...）"`）。
+        // 改成中文说明放最前面、自成一句，原始错误文字放冒号后面，读的时候
+        // 一眼就知道两段是分开的。isQuotaExhausted 沿用上面已经判断过的值
+        // （这里一定是 429 才会走到，因为 503 的 delayMs 来自 exponential
+        // backoff，1s/2s/4s 不可能超过 55 秒的单次上限、更不会撞到这里）。
+        const capped = new Error(`重试已达累计等待上限（已睡 ${Math.round(totalSleptMs / 1000)} 秒，再等会逼近 GAS 单次执行上限）——不再重试，最后一次错误：${lastError.message}`);
+        capped.isQuotaExhausted = lastError.isQuotaExhausted === true;
+        throw capped;
       }
       io.sleep(delayMs);
       totalSleptMs += delayMs;

@@ -1,6 +1,6 @@
 # ADR-005: Butiran Tempahan（订单层级）抽取改用 Gemini Extraction Adapter + 确定性验证
 
-- **Status**: **CLOSED**（Gate 2 完整验证链完成，2026-09-15；见下方"含义"说明，`CLOSED` 不等于 `VERIFIED` 或 `IMPLEMENTED` 覆盖全部范围——本 ADR 只对锁定的 W01 fixture 做过完整验证）
+- **Status**: **CLOSED**（Gate 2 完整验证链完成，2026-09-15；见下方"含义"说明，`CLOSED` 不等于 `VERIFIED` 或 `IMPLEMENTED` 覆盖全部范围——本 ADR 只对锁定的 W01 fixture 做过完整验证）。**2026-09-29 新增一个独立于此状态的 open item**：Gemini 免费额度是目前的 availability 瓶颈，不影响这里的 accuracy CLOSED 判定——见下方同日期段落
 - **Historical date**: 2026-08-25（方向决定），Gate 2 验证链 2026-09-06～2026-09-15
 - **Recovery evidence**: `compliance-os-governance-draft.md` §2.8、§8（原始决策）；`900_Constitution.js` ADR-005 条目全文（changelog 多笔，2026-08-21/25、2026-09-06/09/10/15）；`Gate2_ReClose_Evidence_Proposal_2026-09-10.md`；`Gate2_Independent_Source_Verification_v2_2026-09-14.md`
 
@@ -40,6 +40,18 @@ POC 证实确定性解析逻辑本身没问题（干净文字下 98.5% 精确匹
 ## Non-Order Income — 明确排除范围
 
 Insentif/Tip/Bayaran lain-lain 目前没有逐笔可靠日期抽取能力——这是 ADR-005 抽取范围本身就没有涵盖的部分（Gemini 的 statement 层级 `extract()` 只回报这三类的周总额），不是 Gate 2 的失败项，也不在 2026-09-15 Production Wiring Slice 的范围内（见 ADR-004）。
+
+## 2026-09-29 新增（独立于 CLOSED 状态，不是 accuracy 问题，不重开 Gate 2）——Free-tier quota 是一个未解决的 availability 限制
+
+**跟上面的 CLOSED 判定完全无关**：Gate 2 关的是"Gemini 抽出来的答案准不准"，这里发现的是"Gemini 到底愿不愿意接这次呼叫"——两个是不同的轴，这次发现不影响、也不重开 accuracy 的 CLOSED 状态。
+
+2026-09-25 那次真实端到端成功（173/173）之后，2026-09-29 同一个早上再跑了 4 次真实 `consoleRunDailyAllocation`（同一笔 `CMP-INCOME-2026-W01`），4 次全部因为 Gemini 免费额度用完（`generate_content_free_tier_requests, limit: 20`，HTTP 429 RESOURCE_EXHAUSTED）或伴随的 503 而落回 `Needs_Review`，`rowsWritten: 0`——完整证据见 `VERIFICATION_STATUS.md` 新增的"Gemini API Defects & Operational Blockers"一节。
+
+**2026-09-27 曾经有个未经查证的假设**：把 `LLM_EXTRACTOR_MODEL` 从 `gemini-3.5-flash` 换成较新的 `gemini-3.8-flash` 可以「彻底摆脱限流与拥堵」。**2026-09-29 的真实证据推翻了这个假设**：429 错误文字明确写着 `model: gemini-3.8-flash`、`limit: 20`——免费层的这个 20 次上限看起来是跟着专案/API key 走的计费层级限制，不是某个特定旧模型才有的问题，换模型不解决这个问题。
+
+**这不是本 ADR 决定要解决的范围**——是否要开通 Gemini 计费拿掉这个上限，是 Steven 的商业/预算决定，不是架构决定，不在这份 ADR 授权范围内。已经做的、单纯避免浪费而不解决额度本身的缓解：`142_DailyOrderAllocation.js` 的 `runGeminiOrderExtractionWithFallback_` 现在会在 `full_document` 因为额度用完而失败时，直接跳过 chunk fallback（同一个已经用完的 quota，切页重打不会有不同结果，只会多浪费 2 次本来就稀缺的当日额度）——这是效率修正，不是新的 accuracy 判准，不影响上面 Gate 2 的 CLOSED 状态或验证范围。
+
+**Open（留给 Steven）**：要不要开通计费；如果不开通，日常操作上大概要怎么控制呼叫频率才不会一天之内就把 20 次用完（目前没有任何用量追踪或节流机制）。
 
 ## Related
 

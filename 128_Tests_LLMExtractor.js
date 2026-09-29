@@ -108,7 +108,7 @@ function quota429Body_(retryDelay) {
 }
 function tryPost_(postJson) {
   try { return { value: postJson('https://example.test/x', { 'Content-Type': 'application/json' }, { a: 1 }) }; }
-  catch (e) { return { error: e.message }; }
+  catch (e) { return { error: e.message, errorObj: e }; }
 }
 
 function fakeScriptProps_(map) {
@@ -275,7 +275,26 @@ function runAllLLMExtractorTests() {
   const r503 = tryPost_(createRetryingPostJson_(io503));
   assertEqual_('postJson·503 沿用原本的 exponential backoff（1s、2s），然后成功', [r503.value, io503.sleeps], [{ ok: 2 }, [1000, 2000]], results);
 
+  // ============ isQuotaExhausted 旗标（2026-09-29，供 142 的 fallback 编排判断要不要跳过 chunk）============
+  const io429Exhausted = fakeHttpIo_([{ code: 429, text: quota429Body_('1s') }, { code: 429, text: quota429Body_('1s') }, { code: 429, text: quota429Body_('1s') }, { code: 429, text: quota429Body_('1s') }]);
+  const r429Exhausted = tryPost_(createRetryingPostJson_(io429Exhausted));
+  assertEqual_('isQuotaExhausted·自然用完 4 次 attempts、最后一次还是 429 → 旗标为 true', !!(r429Exhausted.errorObj && r429Exhausted.errorObj.isQuotaExhausted), true, results);
+
+  const io429Capped = fakeHttpIo_([{ code: 429, text: quota429Body_('52s') }]);
+  const r429Capped = tryPost_(createRetryingPostJson_(io429Capped));
+  assertEqual_('isQuotaExhausted·撞到累计等待上限而放弃 → 旗标也是 true（不是只有自然用完次数才算）', !!(r429Capped.errorObj && r429Capped.errorObj.isQuotaExhausted), true, results);
+  assertEqual_('isQuotaExhausted·撞到累计上限的错误讯息把中文说明放最前面、自成一句，不是接在被截断的原始 JSON 后面（可读性修复）', /^重试已达累计等待上限/.test(r429Capped.error), true, results);
+
+  const io503Exhausted = fakeHttpIo_([{ code: 503, text: '{}' }, { code: 503, text: '{}' }, { code: 503, text: '{}' }, { code: 503, text: '{}' }]);
+  const r503Exhausted = tryPost_(createRetryingPostJson_(io503Exhausted));
+  assertEqual_('isQuotaExhausted·503（容量问题，不是额度）用完重试 → 旗标不是 true（503 不代表 quota，chunking 换个 range 打说不定真的有机会）', !!(r503Exhausted.errorObj && r503Exhausted.errorObj.isQuotaExhausted), false, results);
+
+  const io400b = fakeHttpIo_([{ code: 400, text: '{}' }]);
+  const r400b = tryPost_(createRetryingPostJson_(io400b));
+  assertEqual_('isQuotaExhausted·400（请求本身有问题）不重试、旗标也不是 true', !!(r400b.errorObj && r400b.errorObj.isQuotaExhausted), false, results);
+
   const io429NoHint = fakeHttpIo_([{ code: 429, text: 'not json' }]);
+
   const r429NoHint = tryPost_(createRetryingPostJson_(io429NoHint));
   assertEqual_('postJson·429 但读不到建议秒数 → 退回 1s/2s/4s，最后一次失败照旧抛出 HTTP 429（总共打 4 次）', [io429NoHint.sleeps, io429NoHint.calls.length, /HTTP 429/.test(r429NoHint.error)], [[1000, 2000, 4000], 4, true], results);
 

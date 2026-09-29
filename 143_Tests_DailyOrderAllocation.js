@@ -355,6 +355,44 @@ function runDailyOrderAllocationTests_() {
   );
   results.push({ name: 'totalPages=0（非法值，非缺失）: 同样明确落 Needs_Review，不是只防了 undefined 这一种情况', pass: invalidTotalPagesResult.allocationStatus === 'Needs_Review' && invalidTotalPagesResult.attempts.some((a) => a.label === 'chunk_fallback_skipped'), actual: invalidTotalPagesResult.allocationStatus, expected: 'Needs_Review' });
 
+  // ---- 2026-09-29 新增（真实 GAS 触发）：额度用尽时跳过 chunk fallback。
+  // 同一天 4 次真实 consoleRunDailyAllocation，full_document 撞 HTTP 429
+  // RESOURCE_EXHAUSTED、依建议秒数重试后仍未恢复，接着 chunk_1-13 立刻撞
+  // 同一个 429——同一把 API key 的同一个额度，切页重打不会有不同结果，
+  // chunking 是为了处理「内容太复杂/太长单次读不完」，不是为了绕过额度
+  // 限制。127 的 createRetryingPostJson_ 在这种情况下会在 Error 上设
+  // isQuotaExhausted = true；这里只测 142 收到这个旗标之后的编排行为，
+  // 不重新测 127 那层怎么判断（128 测那个）。 ----
+  function quotaExhaustedError_(msg) {
+    const e = new Error(msg || 'LLM API 回传 HTTP 429：RESOURCE_EXHAUSTED');
+    e.isQuotaExhausted = true;
+    return e;
+  }
+
+  const quotaFullExtractor = mockExtractor_(quotaExhaustedError_(), []);
+  const quotaFullResult = runGeminiOrderExtractionWithFallback_(
+    { fileId: 'f1', documentId: 'doc1', totalPages: 24 }, vic,
+    { extractor: quotaFullExtractor, now: new Date('2026-08-25T00:00:00Z') }
+  );
+  results.push({ name: '额度用尽(full_document): 明确落 Needs_Review，不抛例外', pass: quotaFullResult.allocationStatus === 'Needs_Review', actual: quotaFullResult.allocationStatus, expected: 'Needs_Review' });
+  results.push({ name: '额度用尽(full_document): attempts 有明确的 chunk_fallback_skipped_quota_exhausted 记录，不是静默跳过', pass: quotaFullResult.attempts.some((a) => a.label === 'chunk_fallback_skipped_quota_exhausted'), actual: quotaFullResult.attempts.map((a) => a.label), expected: '包含 chunk_fallback_skipped_quota_exhausted' });
+  results.push({ name: '额度用尽(full_document): extractor 只被呼叫一次，完全没有再打 2 次几乎注定失败的 chunk（省下额度）', pass: quotaFullExtractor._callCount() === 1, actual: quotaFullExtractor._callCount(), expected: 1 });
+
+  const nonQuotaFullExtractor = mockExtractor_(new Error('network down'), [chunkA.candidate, chunkB.candidate]);
+  const nonQuotaFullResult = runGeminiOrderExtractionWithFallback_(
+    { fileId: 'f1', documentId: 'doc1', totalPages: 24 }, vic,
+    { extractor: nonQuotaFullExtractor, now: new Date('2026-08-25T00:00:00Z') }
+  );
+  results.push({ name: '非额度问题(full_document 普通例外，没有 isQuotaExhausted): 不受这次新增逻辑影响，照样正常尝试两个 chunk（不是被新逻辑跳过）', pass: nonQuotaFullExtractor._callCount() === 3 && nonQuotaFullResult.attempts.some((a) => a.label === 'chunk_1-13') && nonQuotaFullResult.attempts.some((a) => a.label === 'chunk_12-24') && !nonQuotaFullResult.attempts.some((a) => a.label === 'chunk_fallback_skipped_quota_exhausted'), actual: { calls: nonQuotaFullExtractor._callCount(), labels: nonQuotaFullResult.attempts.map((a) => a.label) }, expected: '呼叫 3 次（1 full + 2 chunk），两个 chunk 都真的打了' });
+
+  const quotaChunkExtractor = mockExtractor_(new Error('schema invalid'), [quotaExhaustedError_(), chunkB.candidate]);
+  const quotaChunkResult = runGeminiOrderExtractionWithFallback_(
+    { fileId: 'f1', documentId: 'doc1', totalPages: 24 }, vic,
+    { extractor: quotaChunkExtractor, now: new Date('2026-08-25T00:00:00Z') }
+  );
+  results.push({ name: '额度用尽(第一个 chunk): 剩下的 chunk 被跳过，attempts 有明确的 remaining_chunks_skipped_quota_exhausted 记录', pass: quotaChunkResult.attempts.some((a) => a.label === 'remaining_chunks_skipped_quota_exhausted') && !quotaChunkResult.attempts.some((a) => a.label.indexOf('chunk_12') === 0), actual: quotaChunkResult.attempts.map((a) => a.label), expected: '包含 remaining_chunks_skipped_quota_exhausted，不包含第二个 chunk（chunk_12-24）的 label' });
+  results.push({ name: '额度用尽(第一个 chunk): extractor 只被呼叫 2 次（1 full + 1 chunk），第二个 chunk 完全没打', pass: quotaChunkExtractor._callCount() === 2, actual: quotaChunkExtractor._callCount(), expected: 2 });
+
   // ---- 7: repeated header / footer 不被误判成订单行 ----
   results.push({ name: 'TEST 7: repeated header/footer 不产生假的 invalid-row 噪音（W01 invalid 数量应该很小，不是几十笔）', pass: w01.invalid.length < 5, actual: w01.invalid.length, expected: '< 5' });
   results.push({ name: 'TEST 7b: repeated header/footer 不产生假的 invalid-row 噪音（W33）', pass: w33.invalid.length < 5, actual: w33.invalid.length, expected: '< 5' });
