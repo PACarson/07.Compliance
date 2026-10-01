@@ -18,6 +18,13 @@
 
 ---
 
+## 2026-10-01 — Gemini 503 自动切模型 + 第二份真实 statement（W05）accuracy 证据 + gemini-2.5-flash 查证更正
+
+- **类型**: Production code changes（127）+ Verification-only changes（第二份真实 statement 的 accuracy 证据）+ 查证更正（非代码）
+- **流程**: Code → Verify → Governance（真实 GAS 执行触发 → 诊断 → 修复 → 持久化；本次未额外要求先动治理文件，沿用默认流程）
+- 详见 `900_Constitution.js` 的 `changelog` 数组同日期条目、`VERIFICATION_STATUS.md` 新增第 4-6 项、`ADR-005` 新增 2026-10-01 段落
+- 本条目包含一次对先前除错记录的更正：反复出现的"`gemini-2.5-flash` 是稳定选项"建议，经 2026-10-01 查证 Google 官方页面证实已经不适用于新专案
+
 ## 2026-09-27～29 — Gemini Schema 缺陷修复 + Dashboard Date-leak（第四次同根因）修复 + 重试加固 + Free-tier Quota 现实
 
 - **类型**: Production code changes（127/142/170）+ Verification-only changes（真实 GAS 执行揭露 quota 现实）

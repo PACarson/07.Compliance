@@ -61,6 +61,12 @@
 
 **Additive skip 行为新增测试**：`143` 新增测试情境（`full_document` 因 `err.isQuotaExhausted` 为真而失败时，两个 chunk 完全不会被呼叫；只有其中一个 chunk 遇到同样情况时，剩下的 chunk 也会被跳过），`128` 新增测试确认 `createRetryingPostJson_` 只在最终真的因 429 放弃时才设定 `isQuotaExhausted`（503/400 不会设定）。
 
+| # | 类别 | 内容 | 发现方式 | 状态 |
+|---|---|---|---|---|
+| 4 | 加固（新能力） | 2026-09-27/29/30 三次真实执行都撞到同一个模式：首选模型高峰期回 HTTP 503，换一个不同模型立刻就通，但每次都要 Steven 另外请一次外部除错助手手写一次性诊断脚本才做到，production 代码本身没有这个能力 | 真实 GAS 执行（09-27 gemini-3.7-flash/09-29 gemini-3.8-flash/09-30 gemini-3.7-flash，三次首选模型不完全一样，但模式相同） | 已实作：`127_LLMExtractor.js` 新增 `postJsonWithModelFallback_`，`createLLMExtractor_` 的 `extract()`/`extractOrders()` 都套用——主模型因 `isCapacityIssue`（503）失败且设定了不同的 `fallbackModel` 时自动换模型重打一次，`extractorId`/证据档的 `fallback_note` 如实反映实际成功的模型。只在 503 触发，429（`isQuotaExhausted`）不触发（换模型对额度问题有没有用尚未证实，维持第 2 项已有的"跳过、不浪费"处理，两者不混用）。Node 新增 15 项测试（mutation-checked），真实 GAS 尚未重新执行确认 |
+| 5 | 查证发现（非缺陷，但更正了多次除错记录里的错误建议） | 2026-09-27/29 的除错记录里，外部除错助手反复建议 `gemini-2.5-flash` 是"稳定、无容量挤兑"的选项——2026-10-01 查证 Google 官方 deprecations 页面：2.5 系列目前限制成只有以前真的用过的专案才能继续用，官方原文明确建议新专案改用 3.5-flash 或 3.8-flash，这个专案从未真的呼叫过 2.5-flash | Web 查证（非真实 GAS 执行），起因是要替新增的 fallback 模型选一个默认值，没有照单全收之前的建议 | 默认 `fallbackModel` 定为 `gemini-3.5-flash`（官方页面未列出下线日期，09-30 真实测试也确认这个模型当时可用且成功）——不是 `gemini-2.5-flash`。**提醒**：如果未来又有除错建议"换成 gemini-2.5-flash"，先查证当时的官方状态，不要照抄这几份记录里的旧建议 |
+| 6 | 额外 accuracy 证据（不影响、不重开 Gate 2） | 2026-01-26～02-01 真实周结单（Steven 称"2026-W05"，Jumlah Mingguan RM1,833.80，逐笔订单小计 RM1,233.50）经真实 Gemini 原始抽取，7 天逐日小计全数精确匹配（207.30/219.60/206.80/151.40/129.00/154.00/165.40，加总 1233.50） | 真实 GAS：外部一次性诊断脚本直接调用 Gemini + 手动逐日比对（详见 ADR-005 2026-10-01 段落） | 记录在案，作为 W01 之外第二份独立真实 statement 的 accuracy 佐证。**范围限定**：这是"Gemini 原始抽取准"的证据，不是"完整管线（125 验证 + 142 checksum + Daily_Allocation 写入）跑通"的证据——没有经过 `consoleRunDailyAllocation_`，不得比照 09-25 W01 那次的"完整链路"说法引用 |
+
 ## GAS Compatibility Bugs Found During Real Verification（2026-09-15）
 
 | 位置 | 性质 | 发现方式 | 状态 |
