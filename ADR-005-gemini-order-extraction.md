@@ -61,6 +61,18 @@ Insentif/Tip/Bayaran lain-lain 目前没有逐笔可靠日期抽取能力——�
 
 **一个连带查证发现，值得记录**：这几次除错记录里，外部除错助手反复建议 `gemini-2.5-flash` 是"稳定不挤兑"的选项。2026-10-01 查证 Google 官方 deprecations 页面：2.5 系列（含 `gemini-2.5-flash`）目前**限制成只有以前真的呼叫过的专案才能继续用**，官方原文明确写"新专案请改用 3.5 Flash-Lite 或 3.8 Flash"——这个专案从未真的呼叫过 2.5-flash，选它当 fallback 默认值很可能直接连不上（跟 09-27 把模型写死进代码、事后才发现有问题是同一类教训：外部建议的模型名字，没有查证是不是现在还真的能用就采用）。默认 fallback 模型定为 `gemini-3.5-flash`（官方页面未列出任何下线日期，且 09-30 这次真实成功正是用它）。
 
+## 2026-10-02 新增——模型链从两层扩成三层（Steven 明确要求）+ consoleBatchImport 真实被 GAS 平台硬杀，拆成两种重试预算
+
+**(a) 三层模型链，取代上面 2026-10-01 段落描述的两层版本**：Steven 明确要求"如果 `LLM_EXTRACTOR_MODEL`/`LLM_EXTRACTOR_FALLBACK_MODEL` 都失败了，还要有第三个可以用，没设定就默认用 `gemini-3.5-flash`"。`postJsonWithModelFallback_` 的签名从 `(primaryModel, fallbackModel, ...)` 改成 `(models[], ...)`，依序尝试、只在 `isCapacityIssue`（503）才换下一个；新增 `allModelsCapacityExhausted` 旗标（全部候选模型都因为 503 失败才是 true，中途撞到非 503 的例外——例如 429——会立刻停止，这个旗标维持 false）。`resolveLLMExtractorConfig_` 新增 `LLM_EXTRACTOR_FALLBACK_MODEL_2`（Script Property）/`fallbackModel2`/`modelChain`（去重后的完整尝试顺序）。默认值链：`gemini-3.8-flash` → `gemini-3.6-flash`（原本两层版本的 fallback 默认值是 `gemini-3.5-flash`，现在让给第三层，第二层改用 `gemini-3.6-flash`——2026-07-21 发布、官方页面同样没有列出下线日期）→ `gemini-3.5-flash`。Node 新增约 15 项测试覆盖三层链的各种分支（mutation-checked）。
+
+**(b) 真实 GAS 事故**：2026-10-01 20:25:11～20:31:11（真实 Executions 记录），`consoleBatchImport` 被 GAS 平台硬杀——"Exceeded maximum execution time"，耗时 360.418 秒，正好卡在 6 分钟上限。这不是 catchable 的例外，`consoleImportOneDriveFile_` 的 try/catch 完全接不住，连一个干净的失败结果都救不回来，是这次新增三层模型链之后才会显著放大的风险：`consoleBatchImport_`/`consoleRetryFile_`/`consoleManualImport_`（经 `112` 的 `lazyLLMExtractor_`）在同一次 GAS 执行里要处理多份文件、6 分钟要分给全部文件，但沿用的是跟 `consoleRunDailyAllocation_`（一次只处理一笔、整个 6 分钟都是它的）一样有耐心的重试+换模型预算——模型链从两层扩成三层只会让这个风险更大，不是更小。
+
+**已修复**：`realLLMExtractor_(profile)` 新增 `profile` 参数——`'single'`（默认，170 的 `lazyOrderExtractor_` 用）保留完整三层链 + 原本的耐心预算（`SINGLE_RETRY_BUDGET_`：单次最长 55 秒／累计最长 60 秒）；`'batch'`（112 的 `lazyLLMExtractor_` 明确传入）收窄成只用主模型（不换模型）+ 收紧的 `BATCH_RETRY_BUDGET_`（单次 8 秒／累计 10 秒）——高峰期没算力就让这一份文件快速、干净地失败，下一份文件才有机会在剩下的时间内处理。`createRetryingPostJson_`/`realLLMExtractorDeps_` 新增可选的 `retryBudget` 参数，不传就照旧用模组层级默认值（既有呼叫方行为不变）。Node 新增测试验证 `retryBudget` 覆盖值确实生效、`BATCH_RETRY_BUDGET_` 确实比 `SINGLE_RETRY_BUDGET_` 收紧（mutation-checked）。
+
+**未完全解决的部分，诚实记录**：这是缓解（大幅降低风险），不是数学上证明过的绝对上限——`consoleRunDailyAllocation_` 经 `142` 最坏情况仍可能呼叫三次 `extractOrders()`（full_document + 两个 chunk），每次都可能走完整三层模型链，理论最坏情况的总耗时仍有可能逼近甚至超过 6 分钟，只是 `BATCH_RETRY_BUDGET_` 单独解决了已经真实发生过的那个事故（consoleBatchImport 多文件情境）。`'single'` 情境尚未真实复现过类似的硬杀，这次没有进一步收紧，留作已知、未解决的理论风险。
+
+**真实 GAS 重新验证**：PENDING——这整段修复目前只有 Node 测试验证过，`consoleBatchImport`/`consoleRunDailyAllocation` 都还没有在真实 GAS 环境重新跑过确认。
+
 ## Related
 
-ADR-002, ADR-004
+ADR-002, ADR-004, ADR-006

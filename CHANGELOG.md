@@ -18,6 +18,20 @@
 
 ---
 
+## 2026-10-04 — PDF Import Recovery Center：审计 + 后端实作（ADR-006 新增，UI 未开始）+ 本窗口完整核对 checkpoint
+
+- **类型**: Governance changes（新增 ADR-006）+ Production code changes（170：`consoleGetRecoveryStatus_`/`summarizeEvidenceFailure_`/`consoleRetrySelectedFiles_`/`realEvidenceScanner_`）+ Verification-only changes（Node 测试，非真实 GAS）
+- **流程**: Governance → Authorized Implementation（外部 AI 起草的 Implementation Authorization Prompt 要求先审计、Steven 采纳；后端实作完成后，Steven 2026-10-04 明确指示暂停 coding、全窗口核对、治理/ADR 持久化、产出 checkpoint）
+- 详见 `ADR-006-pdf-import-recovery-center.md`（新文件，完整审计发现+决定+已知限制+实作范围逐项状态）、`VERIFICATION_STATUS.md` 新增"PDF Import Recovery Center"一节、`900_Constitution.js` 的 `changelog` 数组同日期条目
+- **诚实记录**：这批新增的后端逻辑已 Node 测试（全部 PASS）但未做 mutation testing、未经真实 GAS 验证；UI（`170_OperatorConsole.html`）完全未开始；`2026-W06.pdf` 这个促成本次工作的真实案例，目前仍无法透过 Console UI 实际验证是否解决
+
+## 2026-10-02 — 模型链两层扩成三层（Steven 要求）+ consoleBatchImport 真实被 GAS 平台硬杀，拆分批次/单笔重试预算
+
+- **类型**: Production code changes（127/112/170）+ Verification-only changes（真实 GAS Executions 记录揭露的硬杀事故）
+- **流程**: Code → Verify → Governance（Steven 真实撞到 `consoleBatchImport` 被硬杀 + 明确要求第三层模型 → 诊断 → 修复 → 持久化，本次未额外要求先动治理文件，沿用默认流程；这一条延迟到 2026-10-04 才补写进治理文件，见上方同日期条目）
+- 详见 `900_Constitution.js` 的 `changelog` 数组同日期条目、`VERIFICATION_STATUS.md` 新增第 7 项、`ADR-005` 新增 2026-10-02 段落（含诚实记录的未完全解决部分）
+- **本条目包含一次架构补强，不是新的 accuracy 判准**：`realLLMExtractor_` 新增 `profile` 参数区分 `'batch'`（112 用，收紧预算、不换模型）/`'single'`（170 用，维持原本的三层链+耐心预算）
+
 ## 2026-10-01 — Gemini 503 自动切模型 + 第二份真实 statement（W05）accuracy 证据 + gemini-2.5-flash 查证更正
 
 - **类型**: Production code changes（127）+ Verification-only changes（第二份真实 statement 的 accuracy 证据）+ 查证更正（非代码）
