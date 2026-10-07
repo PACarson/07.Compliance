@@ -14,7 +14,8 @@ if (typeof require === 'function') {
     BUTIRAN_TEMPAHAN_EXTRACTION_SCHEMA_, buildButiranTempahanPrompt_, buildGeminiOrderExtractionRequestBody_,
     parseRetryDelaySeconds_, resolveLLMExtractorConfig_, DEFAULT_LLM_EXTRACTOR_MODEL_,
     createRetryingPostJson_, MAX_SINGLE_RETRY_SLEEP_MS_, MAX_TOTAL_RETRY_SLEEP_MS_,
-    postJsonWithModelFallback_, DEFAULT_LLM_EXTRACTOR_FALLBACK_MODEL_
+    SINGLE_RETRY_BUDGET_, BATCH_RETRY_BUDGET_,
+    postJsonWithModelFallback_, DEFAULT_LLM_EXTRACTOR_FALLBACK_MODEL_, DEFAULT_LLM_EXTRACTOR_FALLBACK_MODEL_2_
   } = require('./127_LLMExtractor.js');
   var { assertEqual_ } = require('./105_TestUtils.js');
 }
@@ -284,6 +285,15 @@ function runAllLLMExtractorTests() {
   const ioOk = fakeHttpIo_([{ code: 200, text: '{"ok":true}' }]);
   const okResult = tryPost_(createRetryingPostJson_(ioOk));
   assertEqual_('postJson·2xx 直接回传解析后的 JSON，不睡、只打一次', [okResult.value, ioOk.calls.length, ioOk.sleeps], [{ ok: true }, 1, []], results);
+
+  // ---- 2026-10-02 新增：retryBudget 覆盖值（BATCH_RETRY_BUDGET_ 修 consoleBatchImport 2026-10-01 真实被硬杀的问题）----
+  const ioTightBudget429 = fakeHttpIo_([{ code: 429, text: quota429Body_('52s') }, { code: 200, text: '{"ok":1}' }]);
+  tryPost_(createRetryingPostJson_(ioTightBudget429, { maxSingleRetrySleepMs: 5000, maxTotalRetrySleepMs: 5000 }));
+  assertEqual_('postJson·带 retryBudget 覆盖值：Gemini 建议等 52 秒，但收紧成单次/累计都只有 5 秒 → 真的只睡 5 秒，不是 52.5 秒（批次汇入情境用，不能沿用单笔执行的耐心预算）', ioTightBudget429.sleeps, [5000], results);
+  const ioDefaultBudget429 = fakeHttpIo_([{ code: 429, text: quota429Body_('52s') }, { code: 200, text: '{"ok":1}' }]);
+  tryPost_(createRetryingPostJson_(ioDefaultBudget429)); // 不传 retryBudget
+  assertEqual_('postJson·不传 retryBudget（既有呼叫方的既有行为）→ 照旧用模组层级默认值，睡 52.5 秒，不受这次新增参数影响', ioDefaultBudget429.sleeps, [52500], results);
+  assertEqual_('SINGLE_RETRY_BUDGET_/BATCH_RETRY_BUDGET_·批次情境的预算明确比单笔情境收紧（consoleBatchImport 一次要分给很多份文件，consoleRunDailyAllocation 一次只处理一笔，整个 6 分钟都是它的）', BATCH_RETRY_BUDGET_.maxTotalRetrySleepMs < SINGLE_RETRY_BUDGET_.maxTotalRetrySleepMs, true, results);
   assertEqual_('postJson·送给 fetch 的选项跟原本一致（post/json/headers/payload/muteHttpExceptions）', ioOk.calls[0].options, { method: 'post', contentType: 'application/json', headers: { 'Content-Type': 'application/json' }, payload: '{"a":1}', muteHttpExceptions: true }, results);
 
   const io429 = fakeHttpIo_([{ code: 429, text: quota429Body_('52s') }, { code: 200, text: '{"ok":1}' }]);
@@ -334,42 +344,51 @@ function runAllLLMExtractorTests() {
   tryPost_(createRetryingPostJson_(ioWorst));
   assertEqual_('postJson·每次都 429 的最坏情况：一次 postJson 累计睡眠不超过总上限', ioWorst.sleeps.reduce((a, b) => a + b, 0) <= MAX_TOTAL_RETRY_SLEEP_MS_, true, results);
 
-  // ============ postJsonWithModelFallback_（2026-10-01，真实撞过两次 503 换模型就通）============
+  // ============ postJsonWithModelFallback_（2026-10-01 两层，2026-10-02 扩成任意长度的模型链）============
   const httpFallbackOk = fakeHttpClientPerModel_({ 'gemini-3.8-flash': capacityError_(), 'gemini-3.5-flash': { ok: 'from-fallback' } });
-  const fbOk = postJsonWithModelFallback_('gemini-3.8-flash', 'gemini-3.5-flash', 'key1', httpFallbackOk, { q: 1 });
-  assertEqual_('postJsonWithModelFallback_·主模型 503 → 换 fallback 模型成功，回传 modelUsed=fallback', { rawResponse: fbOk.rawResponse, modelUsed: fbOk.modelUsed, hasPrimaryError: !!fbOk.primaryError }, { rawResponse: { ok: 'from-fallback' }, modelUsed: 'gemini-3.5-flash', hasPrimaryError: true }, results);
+  const fbOk = postJsonWithModelFallback_(['gemini-3.8-flash', 'gemini-3.5-flash'], 'key1', httpFallbackOk, { q: 1 });
+  assertEqual_('postJsonWithModelFallback_·主模型 503 → 换第二个模型成功，回传 modelUsed=第二个', { rawResponse: fbOk.rawResponse, modelUsed: fbOk.modelUsed, attemptedCount: fbOk.attemptedModelErrors.length }, { rawResponse: { ok: 'from-fallback' }, modelUsed: 'gemini-3.5-flash', attemptedCount: 1 }, results);
   assertEqual_('postJsonWithModelFallback_·两次呼叫送的是同一个 requestBody（换模型不用换 schema/prompt）', httpFallbackOk._calls.map((c) => c.body), [{ q: 1 }, { q: 1 }], results);
+
+  // ---- 2026-10-02 新增：三层都设定，前两层都 503、第三层才成功 ----
+  const httpThreeTier = fakeHttpClientPerModel_({ 'gemini-3.8-flash': capacityError_('tier1 down'), 'gemini-3.6-flash': capacityError_('tier2 down'), 'gemini-3.5-flash': { ok: 'from-tier3' } });
+  const fbTier3 = postJsonWithModelFallback_(['gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3.5-flash'], 'key1', httpThreeTier, { q: 1 });
+  assertEqual_('postJsonWithModelFallback_·三层模型链：前两层都 503，第三层成功 → modelUsed 是第三层，三个模型都真的打过', { rawResponse: fbTier3.rawResponse, modelUsed: fbTier3.modelUsed, calls: httpThreeTier._calls.map((c) => c.modelName) }, { rawResponse: { ok: 'from-tier3' }, modelUsed: 'gemini-3.5-flash', calls: ['gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3.5-flash'] }, results);
+  assertEqual_('postJsonWithModelFallback_·三层都试过：allModelsCapacityExhausted 不适用于"成功"的情况（这个旗标只在全部失败时才有意义），attemptedModelErrors 记了前两层各自的失败', fbTier3.attemptedModelErrors.map((a) => a.model), ['gemini-3.8-flash', 'gemini-3.6-flash'], results);
 
   const httpFallbackAlsoFails = fakeHttpClientPerModel_({ 'gemini-3.8-flash': capacityError_('primary down'), 'gemini-3.5-flash': capacityError_('fallback also down') });
   let fbBothFailErr = null;
-  try { postJsonWithModelFallback_('gemini-3.8-flash', 'gemini-3.5-flash', 'key1', httpFallbackAlsoFails, {}); } catch (e) { fbBothFailErr = e; }
-  assertEqual_('postJsonWithModelFallback_·两个模型都 503 → 抛出 fallback 那次的例外，并附上主模型当时的错误讯息（不是直接吞掉，方便回头查两边各自的状况）', { thrown: !!fbBothFailErr, message: fbBothFailErr && fbBothFailErr.message, primaryModelError: fbBothFailErr && fbBothFailErr.primaryModelError }, { thrown: true, message: 'fallback also down', primaryModelError: 'gemini-3.8-flash: primary down' }, results);
+  try { postJsonWithModelFallback_(['gemini-3.8-flash', 'gemini-3.5-flash'], 'key1', httpFallbackAlsoFails, {}); } catch (e) { fbBothFailErr = e; }
+  assertEqual_('postJsonWithModelFallback_·两个模型都 503 → 抛出最后一个的例外，并附上更早那层的错误讯息（不是直接吞掉，方便回头查每一层各自的状况）', { thrown: !!fbBothFailErr, message: fbBothFailErr && fbBothFailErr.message, primaryModelError: fbBothFailErr && fbBothFailErr.primaryModelError }, { thrown: true, message: 'fallback also down', primaryModelError: 'gemini-3.8-flash: primary down' }, results);
+  assertEqual_('postJsonWithModelFallback_·全部模型都因为 503 失败 → allModelsCapacityExhausted=true（142 可以用这个判断「不是单一模型偶发，是全部候选模型当下都没算力」）', fbBothFailErr.allModelsCapacityExhausted, true, results);
+
+  // ---- 2026-10-02 新增：三层都设定，但中途撞到非 503（429）→ 立刻停止，不会继续试第三层，allModelsCapacityExhausted 不该是 true ----
+  const httpMixedFailure = fakeHttpClientPerModel_({ 'gemini-3.8-flash': capacityError_('tier1 down'), 'gemini-3.6-flash': (function () { const e = new Error('429 quota'); e.isQuotaExhausted = true; return e; })() });
+  let mixedErr = null;
+  try { postJsonWithModelFallback_(['gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3.5-flash'], 'key1', httpMixedFailure, {}); } catch (e) { mixedErr = e; }
+  assertEqual_('postJsonWithModelFallback_·第二层撞 429（不是 503）→ 立刻停止，完全不会去试第三层', { thrown: !!mixedErr, calls: httpMixedFailure._calls.map((c) => c.modelName) }, { thrown: true, calls: ['gemini-3.8-flash', 'gemini-3.6-flash'] }, results);
+  assertEqual_('postJsonWithModelFallback_·混合失败原因（一个 503、一个 429）→ allModelsCapacityExhausted 是 false，不是全部都是容量问题', mixedErr.allModelsCapacityExhausted, false, results);
 
   const httpNoFallbackConfigured = fakeHttpClientPerModel_({ 'gemini-3.8-flash': capacityError_() });
   let noFbErr = null;
-  try { postJsonWithModelFallback_('gemini-3.8-flash', null, 'key1', httpNoFallbackConfigured, {}); } catch (e) { noFbErr = e; }
-  assertEqual_('postJsonWithModelFallback_·没有设定 fallbackModel（null）→ 直接把主模型的例外丢出去，完全不会多打一次', { thrown: !!noFbErr, calls: httpNoFallbackConfigured._calls.length }, { thrown: true, calls: 1 }, results);
-
-  const httpSameModel = fakeHttpClientPerModel_({ 'gemini-3.8-flash': capacityError_() });
-  let sameFbErr = null;
-  try { postJsonWithModelFallback_('gemini-3.8-flash', 'gemini-3.8-flash', 'key1', httpSameModel, {}); } catch (e) { sameFbErr = e; }
-  assertEqual_('postJsonWithModelFallback_·fallbackModel 跟主模型同名 → 视同没有 fallback，不会打两次一样的请求', { thrown: !!sameFbErr, calls: httpSameModel._calls.length }, { thrown: true, calls: 1 }, results);
+  try { postJsonWithModelFallback_(['gemini-3.8-flash'], 'key1', httpNoFallbackConfigured, {}); } catch (e) { noFbErr = e; }
+  assertEqual_('postJsonWithModelFallback_·models 只有一个（没有设定任何 fallback）→ 直接把它的例外丢出去，完全不会多打一次', { thrown: !!noFbErr, calls: httpNoFallbackConfigured._calls.length }, { thrown: true, calls: 1 }, results);
 
   const httpQuota = fakeHttpClientPerModel_({ 'gemini-3.8-flash': (function () { const e = new Error('429'); e.isQuotaExhausted = true; return e; })() });
   let quotaErr = null;
-  try { postJsonWithModelFallback_('gemini-3.8-flash', 'gemini-3.5-flash', 'key1', httpQuota, {}); } catch (e) { quotaErr = e; }
+  try { postJsonWithModelFallback_(['gemini-3.8-flash', 'gemini-3.5-flash'], 'key1', httpQuota, {}); } catch (e) { quotaErr = e; }
   assertEqual_('postJsonWithModelFallback_·429（isQuotaExhausted，不是 isCapacityIssue）→ 不切模型，直接丢出去（额度问题换模型有没有用未证实，这里不假设有用）', { thrown: !!quotaErr, calls: httpQuota._calls.length }, { thrown: true, calls: 1 }, results);
 
   const httpPlain400 = fakeHttpClientPerModel_({ 'gemini-3.8-flash': new Error('LLM API 回传 HTTP 400：Invalid JSON payload') });
   let plain400Err = null;
-  try { postJsonWithModelFallback_('gemini-3.8-flash', 'gemini-3.5-flash', 'key1', httpPlain400, {}); } catch (e) { plain400Err = e; }
+  try { postJsonWithModelFallback_(['gemini-3.8-flash', 'gemini-3.5-flash'], 'key1', httpPlain400, {}); } catch (e) { plain400Err = e; }
   assertEqual_('postJsonWithModelFallback_·400（请求本身有问题，没有 isCapacityIssue）→ 不切模型（换模型不会让 schema 错误变好）', { thrown: !!plain400Err, calls: httpPlain400._calls.length }, { thrown: true, calls: 1 }, results);
 
   // ---- createLLMExtractor_ 整合：主模型 503、有设定 fallback → extractOrders() 实际成功，用 fallback 的结果 ----
   const fallbackOrderCandidate = { extraction_scope: { first_page_seen: 1, last_page_seen: 2 }, days: [], notes: '' };
   const driveFb = fakeDriveService_();
   const httpFbExtractor = fakeHttpClientPerModel_({ 'gemini-3.8-flash': capacityError_(), 'gemini-3.5-flash': fakeGeminiSuccessResponse_(fallbackOrderCandidate) });
-  const extractorWithFallback = createLLMExtractor_({ apiKey: 'k', model: 'gemini-3.8-flash', fallbackModel: 'gemini-3.5-flash', evidenceFolderId: 'folder-1' }, { driveService: driveFb, httpClient: httpFbExtractor, now: new Date('2026-10-01T00:00:00Z') });
+  const extractorWithFallback = createLLMExtractor_({ apiKey: 'k', model: 'gemini-3.8-flash', modelChain: ['gemini-3.8-flash', 'gemini-3.5-flash'], evidenceFolderId: 'folder-1' }, { driveService: driveFb, httpClient: httpFbExtractor, now: new Date('2026-10-01T00:00:00Z') });
   const fbExtractResult = extractorWithFallback.extractOrders({ fileId: 'f1', documentId: 'doc1' }, null);
   assertEqual_('createLLMExtractor_·主模型 503、有 fallback → extractOrders() 正常成功（呼叫方完全不用知道切换过模型）', fbExtractResult.candidate, fallbackOrderCandidate, results);
   assertEqual_('createLLMExtractor_·evidence.extractorId 反映真正成功的模型（gemini-3.5-flash），不是设定档里的主模型', fbExtractResult.evidence.extractorId, 'LLMExtractor:gemini-3.5-flash:orders:full', results);
@@ -383,16 +402,23 @@ function runAllLLMExtractorTests() {
   try { extractorNoFallback.extract({ fileId: 'f1', documentId: 'doc1' }); } catch (e) { noFbExtractErr = e; }
   assertEqual_('createLLMExtractor_·config 没给 fallbackModel（既有呼叫方的既有行为）→ 503 照样直接失败，不受这次新增功能影响', !!noFbExtractErr, true, results);
 
-  // ============ resolveLLMExtractorConfig_ 的 fallbackModel 解析 ============
+  // ============ resolveLLMExtractorConfig_ 的 fallbackModel/fallbackModel2/modelChain 解析（2026-10-02 扩成三层，Steven 明确要求）============
   const fbCfgDefault = resolveLLMExtractorConfig_(fakeScriptProps_({}));
-  assertEqual_('resolve·fallbackModel 没设定 → 用默认值 gemini-3.5-flash', [fbCfgDefault.fallbackModel, fbCfgDefault.fallbackModelSource], [DEFAULT_LLM_EXTRACTOR_FALLBACK_MODEL_, 'default'], results);
-  assertEqual_('resolve·默认 fallback 模型明确不是 gemini-2.5-flash（2026-10-01 查证：2.5 系列已限制成只有先前真的用过的专案才能用，Google 官方建议新专案改用 3.5-flash 或 3.8-flash——这个专案从未真的呼叫过 2.5-flash，拿它当默认很可能直接连不上）', DEFAULT_LLM_EXTRACTOR_FALLBACK_MODEL_ === 'gemini-2.5-flash', false, results);
-  const fbCfgSet = resolveLLMExtractorConfig_(fakeScriptProps_({ LLM_EXTRACTOR_FALLBACK_MODEL: 'gemini-2.0-flash' }));
-  assertEqual_('resolve·fallbackModel 有设定 → 用设定值（就算是已经下线的旧模型也不在这层拦——GAS 真的打下去才会知道，不在这里猜哪些模型还活着）', [fbCfgSet.fallbackModel, fbCfgSet.fallbackModelSource], ['gemini-2.0-flash', 'ScriptProperty:LLM_EXTRACTOR_FALLBACK_MODEL'], results);
-  const fbCfgSameAsPrimary = resolveLLMExtractorConfig_(fakeScriptProps_({ LLM_EXTRACTOR_MODEL: 'gemini-3.5-flash', LLM_EXTRACTOR_FALLBACK_MODEL: 'gemini-3.5-flash' }));
-  assertEqual_('resolve·fallbackModel 跟主模型设成同一个名字 → 视同没有 fallback（null），不会真的切换成同一个模型重打', fbCfgSameAsPrimary.fallbackModel, null, results);
-  const fbCfgBlank = resolveLLMExtractorConfig_(fakeScriptProps_({ LLM_EXTRACTOR_FALLBACK_MODEL: '  ' }));
-  assertEqual_('resolve·fallbackModel 设成空白 → 当没设，用默认值', fbCfgBlank.fallbackModel, DEFAULT_LLM_EXTRACTOR_FALLBACK_MODEL_, results);
+  assertEqual_('resolve·三层都没设定 → 各自用默认值，modelChain 是三个默认值依序排列', { fallbackModel: fbCfgDefault.fallbackModel, fallbackModelSource: fbCfgDefault.fallbackModelSource, fallbackModel2: fbCfgDefault.fallbackModel2, fallbackModel2Source: fbCfgDefault.fallbackModel2Source, modelChain: fbCfgDefault.modelChain }, { fallbackModel: DEFAULT_LLM_EXTRACTOR_FALLBACK_MODEL_, fallbackModelSource: 'default', fallbackModel2: DEFAULT_LLM_EXTRACTOR_FALLBACK_MODEL_2_, fallbackModel2Source: 'default', modelChain: [DEFAULT_LLM_EXTRACTOR_MODEL_, DEFAULT_LLM_EXTRACTOR_FALLBACK_MODEL_, DEFAULT_LLM_EXTRACTOR_FALLBACK_MODEL_2_] }, results);
+  assertEqual_('resolve·第三层默认值明确是 gemini-3.5-flash（Steven 2026-10-02 明确要求：前两个都失败还有第三个，没设定就用这个）', DEFAULT_LLM_EXTRACTOR_FALLBACK_MODEL_2_, 'gemini-3.5-flash', results);
+  assertEqual_('resolve·默认的 fallback/fallbackModel2 都明确不是 gemini-2.5-flash（2026-10-01 查证：2.5 系列已限制成只有先前真的用过的专案才能用，Google 官方建议新专案改用 3.5-flash 或 3.8-flash——这个专案从未真的呼叫过 2.5-flash，拿它当默认很可能直接连不上）', [DEFAULT_LLM_EXTRACTOR_FALLBACK_MODEL_, DEFAULT_LLM_EXTRACTOR_FALLBACK_MODEL_2_].indexOf('gemini-2.5-flash') !== -1, false, results);
+
+  const fbCfgSet = resolveLLMExtractorConfig_(fakeScriptProps_({ LLM_EXTRACTOR_FALLBACK_MODEL: 'gemini-2.0-flash', LLM_EXTRACTOR_FALLBACK_MODEL_2: 'gemini-3.1-flash-lite' }));
+  assertEqual_('resolve·fallbackModel/fallbackModel2 都有设定 → 各自用设定值（就算是已经下线的旧模型也不在这层拦——GAS 真的打下去才会知道，不在这里猜哪些模型还活着），modelChain 依序是三个设定值', { fallbackModel: fbCfgSet.fallbackModel, fallbackModelSource: fbCfgSet.fallbackModelSource, fallbackModel2: fbCfgSet.fallbackModel2, fallbackModel2Source: fbCfgSet.fallbackModel2Source, modelChain: fbCfgSet.modelChain }, { fallbackModel: 'gemini-2.0-flash', fallbackModelSource: 'ScriptProperty:LLM_EXTRACTOR_FALLBACK_MODEL', fallbackModel2: 'gemini-3.1-flash-lite', fallbackModel2Source: 'ScriptProperty:LLM_EXTRACTOR_FALLBACK_MODEL_2', modelChain: [DEFAULT_LLM_EXTRACTOR_MODEL_, 'gemini-2.0-flash', 'gemini-3.1-flash-lite'] }, results);
+
+  const fbCfgSameAsPrimary = resolveLLMExtractorConfig_(fakeScriptProps_({ LLM_EXTRACTOR_MODEL: 'gemini-3.5-flash', LLM_EXTRACTOR_FALLBACK_MODEL: 'gemini-3.5-flash', LLM_EXTRACTOR_FALLBACK_MODEL_2: 'gemini-3.5-flash' }));
+  assertEqual_('resolve·三层都设成同一个名字 → fallbackModel/fallbackModel2 都视为没有（null），modelChain 去重后只剩一个元素，不会真的切换成同一个模型重打', { fallbackModel: fbCfgSameAsPrimary.fallbackModel, fallbackModel2: fbCfgSameAsPrimary.fallbackModel2, modelChain: fbCfgSameAsPrimary.modelChain }, { fallbackModel: null, fallbackModel2: null, modelChain: ['gemini-3.5-flash'] }, results);
+
+  const fbCfgPartialDup = resolveLLMExtractorConfig_(fakeScriptProps_({ LLM_EXTRACTOR_MODEL: 'gemini-3.8-flash', LLM_EXTRACTOR_FALLBACK_MODEL: 'gemini-3.6-flash', LLM_EXTRACTOR_FALLBACK_MODEL_2: 'gemini-3.8-flash' }));
+  assertEqual_('resolve·第三层设成跟第一层一样（第二层不同）→ 第三层视为没有，modelChain 只有两个元素，不会把第一层排第二次', { fallbackModel2: fbCfgPartialDup.fallbackModel2, modelChain: fbCfgPartialDup.modelChain }, { fallbackModel2: null, modelChain: ['gemini-3.8-flash', 'gemini-3.6-flash'] }, results);
+
+  const fbCfgBlank = resolveLLMExtractorConfig_(fakeScriptProps_({ LLM_EXTRACTOR_FALLBACK_MODEL: '  ', LLM_EXTRACTOR_FALLBACK_MODEL_2: '' }));
+  assertEqual_('resolve·fallbackModel/fallbackModel2 设成空白/空字符串 → 都当没设，各自用默认值', [fbCfgBlank.fallbackModel, fbCfgBlank.fallbackModel2], [DEFAULT_LLM_EXTRACTOR_FALLBACK_MODEL_, DEFAULT_LLM_EXTRACTOR_FALLBACK_MODEL_2_], results);
 
   // ============ resolveLLMExtractorConfig_：模型来自 Script Properties，没设才用默认 ============
   const cfgSet = resolveLLMExtractorConfig_(fakeScriptProps_({ LLM_EXTRACTOR_MODEL: 'gemini-2.5-flash', GEMINI_API_KEY: 'key-1', EXTRACTION_EVIDENCE_FOLDER_ID: 'folder-1' }));

@@ -114,6 +114,36 @@ function realFolderScanner_() {
 }
 
 /**
+ * 2026-10-02 新增（PDF Import Recovery Center，见 consoleGetRecoveryStatus_
+ * 的完整说明）——真的去调用 Drive API 列出/读取证据资料夹内容的那一层，
+ * 跟 realFolderScanner_ 同一个道理：只能在真实 GAS 环境跑，Node 测不了。
+ * 证据档名规则见 127_LLMExtractor.js 的 extract()/extractOrders()：
+ * statement 层级是 `${documentId}__${timestamp}.json`，order 层级多一段
+ * scope tag（`orders:full`/`orders:pX-Y`）——用 documentId + '__' 当前缀去找，
+ * 两种都抓得到，Recovery Center 目前只关心 statement 层级（Document Import
+ * 阶段），但不假设未来不会用到 order 层级那些。
+ */
+function realEvidenceScanner_() {
+  return {
+    listFilesWithPrefix(folderId, prefix) {
+      const folder = DriveApp.getFolderById(folderId);
+      const it = folder.getFiles();
+      const files = [];
+      while (it.hasNext()) {
+        const f = it.next();
+        if (f.getName().indexOf(prefix) === 0) {
+          files.push({ id: f.getId(), name: f.getName(), lastUpdated: f.getLastUpdated() });
+        }
+      }
+      return files;
+    },
+    readJsonFile(fileId) {
+      return JSON.parse(DriveApp.getFileById(fileId).getBlob().getDataAsString());
+    }
+  };
+}
+
+/**
  * 组装 Console 编排要用的全部依赖。GAS 环境下自动接真的服务；Node 环境
  * 这几个模块级单例本来就是 null（跟 TruthWriter/SheetReader/RiderOSAdapter
  * 一样），测试改用自己组的假 deps，不叫这个函数。
@@ -124,6 +154,11 @@ function buildConsoleDeps_() {
     sheetReader: SheetReader,
     riderOSAdapter: RiderOSAdapter,
     folderScanner: (typeof DriveApp !== 'undefined') ? realFolderScanner_() : null,
+    // 2026-10-02 新增：evidenceScanner/evidenceFolderId 给 consoleGetRecoveryStatus_
+    // 用。跟 127 读同一个 Script Property（EXTRACTION_EVIDENCE_FOLDER_ID）——
+    // 不新开一个设定值，证据资料夹只有一个，127 写、这里读。
+    evidenceScanner: (typeof DriveApp !== 'undefined') ? realEvidenceScanner_() : null,
+    evidenceFolderId: (typeof PropertiesService !== 'undefined') ? PropertiesService.getScriptProperties().getProperty('EXTRACTION_EVIDENCE_FOLDER_ID') : null,
     now: new Date()
   };
 }
@@ -324,6 +359,206 @@ function consoleRetryFile_(fileId, fileName, deps) {
 }
 
 /**
+ * 2026-10-02 新增——PDF Import Recovery Center 的核心读取。
+ *
+ * 背景（Steven 真实撞到：2026-W06.pdf 汇入后 Documents 有记录、却一直
+ * 没出现在 Included Statements，要手动删除 Documents 记录重新汇入才会再
+ * 出现在汇入结果里）。追完整条 Drive file → Documents registration → PDF
+ * reading → extraction → validation → Verified Income → Included
+ * Statements 后确认：
+ *
+ * 1. Documents.status 这个欄位（110_DocumentImport.js 的
+ *    buildDocumentRecord_）写入后永远是 'Imported'——TruthWriter 只增不改
+ *    （append-only），从来没有、也不可能被改写成 'Failed'/'Verified' 之类
+ *    的其他状态。Documents 这个 sheet 本身完全没有能力记录「这份文件后来
+ *    到底发生了什么」。
+ * 2. runImportPipeline_（110）回传的 stage（Extraction_Failed/
+ *    Needs_Review/Parse_Failed/Verify_Failed/Verified…）只存在于那一次
+ *    呼叫的回传值里，从来没有被写进任何 Sheet——consoleBatchImport_/
+ *    consoleRetryFile_ 的回传结果只有发起那次 google.script.run 呼叫的
+ *    页面看得到，刷新页面（consoleGetDashboard 重新呼叫）就看不到了，不是
+ *    「问题解决了」，是这份资料本来就没有要长期保留。
+ * 3. Included Statements（170.html）严格只显示 Verified_Income 里、完整
+ *    落在该月的记录（160 computeMonthlyIncomeSummary_ 算出的
+ *    _computed_from）——没进 Verified_Income 的文件，不管是还没处理、还是
+ *    处理失败，都「正确地」不会出现在这里，这是设计使然，不能把「不在
+ *    Included Statements」直接当成某个特定失败阶段的证据（CMP-P10 的同一
+ *    个精神：不确定的事不要用猜的填上去）。
+ * 4. consoleScanFolder_ 的 needsRetry 分类（审计报告 HIGH-3，2026-08-23）
+ *    逻辑本身是对的：Documents 有记录但查无对应 Verified_Income 时标成
+ *    needsRetry: true，下一次 consoleBatchImport_ 的候选清单
+ *    （scan.files.filter(f => !f.alreadyImported)）会自动包含它、自动重试
+ *    ——不需要手动删除 Documents 记录，自动重试机制本身没有坏。
+ * 5. 真正的缺口：consoleScanFolder_ 依赖一次即时的 Drive 资料夹扫描，
+ *    而且它的结果只活在那一次 google.script.run 呼叫的回传值里——操作者
+ *    没有一个可以几小时后回来、不用重新扫描资料夹、不用重新触发一次昂贵
+ *    批次抽取，就能看到「哪些文件还卡着、卡在哪里」的持续性检视画面。
+ *    Steven 手动删除 Documents 记录，实际上是在用「强迫它变成全新文件」
+ *    这个笨办法，换取一个他知道一定看得到结果的重新汇入——不是自动重试
+ *    逻辑真的坏掉，是没有一个地方可以不动声色地回去看现状。这个函数要
+ *    解决的正是这一点。
+ *
+ * Pending 跟 Failed 的区分：目前的资料模型完全没有栏位记录「最后处理到
+ * 哪一步/为什么失败」（见上面第 1、2 点）——这是一个真实的 schema 缺口，
+ * 不该顺手新增一个新的持久化欄位或新的 sheet 去填（不发明新的
+ * lifecycle、不开新的 database）。沿用既有架构的替代做法：127 对每一次
+ * 抽取尝试，不管成功失败，都会把证据写进 Drive（buildEvidenceRecord_，
+ * 档名 `${document_id}__${timestamp}.json`）——这份证据档案本身就是「这
+ * 份文件至少被真的尝试过一次」的既有信号，不需要新增任何欄位：
+ * - 有 Documents 记录、证据资料夹里完全找不到对应档案 → Pending（还没
+ *   真的被抽取尝试过——可能还没扫描重试过，也可能上一次执行在走到抽取
+ *   这一步之前就被 GAS 平台终止）
+ * - 有 Documents 记录、证据资料夹里找得到至少一个对应档案 → Failed（真的
+ *   打过 Gemini，但没能走到 Verified_Income）；读最新一份证据档的内容摘出
+ *   一句人看得懂的原因（见 summarizeEvidenceFailure_）；attemptCount 是
+ *   数出几份证据档，不是新发明的持久化计数欄位。
+ *
+ * attemptCount/lastError「如果 evidenceScanner 没接上（Node 测试环境，或
+ * Script Properties 没设定 EXTRACTION_EVIDENCE_FOLDER_ID）就一律归 Pending
+ * 并标注 evidenceUnavailable: true」——老实说判断不出来，不要假装判断得出来
+ * （同一个 CMP-P10 精神）。
+ *
+ * Completed（Section 3C）刻意只带最少欄位（documentId/incomeIds/period），
+ * 不复制 Verified_Income 的完整内容——Included Statements 本来就是这些资料
+ * 的权威呈现，这里只是给 Recovery Center 一个「这份不是卡住的」确认。
+ * @param {Object} [deps]
+ * @return {{pending: Array, failed: Array, completed: Array, evidenceFolderConfigured: boolean}}
+ */
+function consoleGetRecoveryStatus_(deps) {
+  const d = deps || buildConsoleDeps_();
+  const documentsRows = d.sheetReader.readAll('Documents', DOCUMENTS_COLUMNS);
+  const verifiedIncomeRows = d.sheetReader.readAll('Verified_Income', VERIFIED_INCOME_COLUMNS);
+  const verifiedByDocId = {};
+  verifiedIncomeRows.forEach((v) => {
+    if (!v.source_document_id) return;
+    if (!verifiedByDocId[v.source_document_id]) verifiedByDocId[v.source_document_id] = [];
+    verifiedByDocId[v.source_document_id].push(v);
+  });
+
+  const pending = [];
+  const failed = [];
+  const completed = [];
+  const evidenceFolderConfigured = !!(d.evidenceScanner && d.evidenceFolderId);
+
+  documentsRows.forEach((doc) => {
+    const matches = verifiedByDocId[doc.document_id];
+    if (matches && matches.length > 0) {
+      completed.push({
+        documentId: doc.document_id,
+        driveFileId: doc.drive_file_id,
+        drivePath: doc.drive_path,
+        incomeIds: matches.map((v) => v.income_id),
+        period: matches.map((v) => v.period).join(', ')
+      });
+      return;
+    }
+    const base = {
+      documentId: doc.document_id,
+      driveFileId: doc.drive_file_id,
+      drivePath: doc.drive_path, // 缓存，不是权威来源（CMP-P11）——Drive 里真实文件名可能已经不同
+      source: doc.source,
+      documentType: doc.document_type,
+      period: doc.period
+    };
+    if (!evidenceFolderConfigured) {
+      pending.push(Object.assign({}, base, { status: 'Pending', evidenceUnavailable: true }));
+      return;
+    }
+    const evidenceFiles = d.evidenceScanner.listFilesWithPrefix(d.evidenceFolderId, `${doc.document_id}__`)
+      .filter((f) => f.name.indexOf('orders:') === -1); // 只看 statement 层级的证据；order 层级（Daily Allocation）不在这个 Recovery Center 范围内
+    if (evidenceFiles.length === 0) {
+      pending.push(Object.assign({}, base, { status: 'Pending', attemptCount: 0 }));
+      return;
+    }
+    evidenceFiles.sort((a, b) => (a.lastUpdated instanceof Date && b.lastUpdated instanceof Date) ? b.lastUpdated.getTime() - a.lastUpdated.getTime() : 0);
+    const latest = evidenceFiles[0];
+    let lastError;
+    try {
+      lastError = summarizeEvidenceFailure_(d.evidenceScanner.readJsonFile(latest.id));
+    } catch (err) {
+      lastError = `证据档案读取/解析失败：${err.message}`;
+    }
+    failed.push(Object.assign({}, base, {
+      status: 'Failed',
+      lastError,
+      lastAttemptAt: latest.lastUpdated,
+      attemptCount: evidenceFiles.length
+    }));
+  });
+
+  return sanitizeForClient_({ pending, failed, completed, evidenceFolderConfigured });
+}
+
+/**
+ * 2026-10-02 新增——纯函数，Node 可测。从一份 127 写的证据档案内容摘出
+ * 一句人看得懂的失败原因。优先序：API 本身回报的错误（最明确，例如
+ * 2026-W06.pdf 真实撞过的 "This model is currently experiencing high
+ * demand"）> finishReason 不是 STOP（被安全过滤器挡下或输出被截断）>
+ * candidate 是 null（没能解析出候选资料）> 都没有就说候选资料有抽出来、
+ * 但后续验证没过（125 的验证结果没有记在证据档里，只能说到这个颗粒度）。
+ * @param {Object} evidence buildEvidenceRecord_ 写出来的那个物件
+ * @return {string}
+ */
+function summarizeEvidenceFailure_(evidence) {
+  if (!evidence) return '证据档案是空的';
+  const apiError = evidence.raw_response && evidence.raw_response.error && evidence.raw_response.error.message;
+  if (apiError) return `LLM API 回传错误：${apiError}`;
+  if (evidence.finish_reason && evidence.finish_reason !== 'STOP') return `Gemini 没有正常完成（finishReason=${evidence.finish_reason}，可能被安全过滤器挡下或输出被截断）`;
+  if (evidence.raw_candidate === null || evidence.raw_candidate === undefined) return '没有解析出候选资料（回应格式不是预期的 JSON，或完全没有回应内容）';
+  if (evidence.fallback_note) return `已切换模型但最终仍失败：${evidence.fallback_note}`;
+  return '候选资料已抽取出来，但后续验证没有通过（栏位/期间/金额对不上——建议点 Retry 重新确认）';
+}
+
+/**
+ * 2026-10-02 新增——Recovery Center 的「Retry Selected」。不是新的处理
+ * 逻辑，逐一沿用既有的 consoleImportOneDriveFile_（跟 consoleBatchImport_/
+ * consoleRetryFile_ 共用同一个函式，UCR5）；比照 consoleBatchImport_ 的
+ * 时间预算安全机制（2026-08-23 审计报告 HIGH-1 的原因、2026-10-02 真实
+ * 再次撞到的理由完全一样：一次 GAS 执行的 6 分钟要分给选中的每一份文件，
+ * 不能让其中一份卡住拖垮整批、被 GAS 平台硬杀，见 consoleBatchImport_ 的
+ * 完整说明）——每处理一份之前检查是否接近预算，接近就提早停止，回传
+ * stoppedEarly/remainingCount，不是被硬杀、什么结果都回不来。
+ *
+ * fileRefs 用 {fileId, fileName} 而不是只给 fileId：既有的 Documents 记录
+ * 读得到 drive_file_id，但不一定读得到一个好看的档名（drive_path 只是
+ * 缓存，CMP-P11），前端从 consoleGetRecoveryStatus 拿到的 pending/failed
+ * 清单已经各自带着 driveFileId/drivePath，直接原样传回来即可，这里不用
+ * 再反查一次。
+ * @param {Array<{fileId: string, fileName: string}>} fileRefs
+ * @param {Object} [deps]
+ * @return {{attemptedCount: number, remainingCount: number, stoppedEarly: boolean, results: Array, rebuild: Object}}
+ */
+function consoleRetrySelectedFiles_(fileRefs, deps) {
+  const d = deps || buildConsoleDeps_();
+  const documentsSnapshot = d.sheetReader.readAll('Documents', DOCUMENTS_COLUMNS);
+  const verifiedIncomeSnapshot = d.sheetReader.readAll('Verified_Income', VERIFIED_INCOME_COLUMNS);
+  const nowMs = d.nowMs || (() => Date.now());
+  const timeBudgetMs = d.timeBudgetMs || 4.5 * 60 * 1000; // 跟 consoleBatchImport_ 同一个理由、同一个数字
+  const startedAt = nowMs();
+  const results = [];
+  let stoppedEarly = false;
+  for (let i = 0; i < fileRefs.length; i++) {
+    if (nowMs() - startedAt > timeBudgetMs) {
+      stoppedEarly = true;
+      break;
+    }
+    const ref = fileRefs[i];
+    const r = consoleImportOneDriveFile_(ref.fileId, ref.fileName, d, true, documentsSnapshot, verifiedIncomeSnapshot);
+    results.push(r);
+    if (typeof Utilities !== 'undefined' && i < fileRefs.length - 1) {
+      Utilities.sleep(1200); // 跟 consoleBatchImport_ 同一个理由（113 记录过的 Drive.Files.copy 紧密循环风险）
+    }
+  }
+  return {
+    attemptedCount: results.length,
+    remainingCount: fileRefs.length - results.length,
+    stoppedEarly,
+    results,
+    rebuild: consoleRebuildProjections_(d)
+  };
+}
+
+/**
  * Debug/Fallback：手动贴 Statement 文字，不透过 Drive（不是主要流程——
  * Steven 2026-08-17 明确要求：主要流程是 Drive 扫描汇入，手动贴文字只保留
  * 当调试/备用）。
@@ -459,7 +694,12 @@ function lazyOrderExtractor_() {
   let cached = null;
   return {
     extractOrders(document, pageRange) {
-      if (!cached) cached = realLLMExtractor_();
+      // 2026-10-02：明确传 'single'（即使这是默认值）——这里是
+      // consoleRunDailyAllocation_（Execution B）专用，一次 GAS 执行只处理
+      // 一笔收入，整个 6 分钟都是它的，适合用完整的三层模型链 + 耐心重试。
+      // 跟 112 的 lazyLLMExtractor_（明确传 'batch'）刻意不同，见
+      // 127_LLMExtractor.js 的 realLLMExtractor_ 说明。
+      if (!cached) cached = realLLMExtractor_('single');
       return cached.extractOrders(document, pageRange);
     }
   };
@@ -725,9 +965,18 @@ function consoleRunDailyAllocation(incomeId, deps) {
   return consoleRunDailyAllocation_(incomeId, deps);
 }
 
+/** 2026-10-02 新增——PDF Import Recovery Center 的公开薄壳。 */
+function consoleGetRecoveryStatus(deps) {
+  return consoleGetRecoveryStatus_(deps);
+}
+function consoleRetrySelectedFiles(fileRefs, deps) {
+  return consoleRetrySelectedFiles_(fileRefs, deps);
+}
+
 if (typeof module !== 'undefined') {
   module.exports = {
     realFolderScanner_,
+    realEvidenceScanner_,
     buildConsoleDeps_,
     consoleScanFolder_,
     consoleImportOneDriveFile_,
@@ -739,6 +988,9 @@ if (typeof module !== 'undefined') {
     consoleGetDashboard_,
     consoleGetIncomeDetail_,
     consoleRunDailyAllocation_,
+    consoleGetRecoveryStatus_,
+    consoleRetrySelectedFiles_,
+    summarizeEvidenceFailure_,
     lazyOrderExtractor_,
     sanitizeForClient_,
     ASSUMED_STATEMENT_TOTAL_PAGES_,
@@ -750,6 +1002,8 @@ if (typeof module !== 'undefined') {
     consoleRetryFile,
     consoleManualImport,
     consoleGetIncomeDetail,
-    consoleRunDailyAllocation
+    consoleRunDailyAllocation,
+    consoleGetRecoveryStatus,
+    consoleRetrySelectedFiles
   };
 }

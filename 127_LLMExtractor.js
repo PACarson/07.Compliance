@@ -328,11 +328,12 @@ function buildEvidenceRecord_(params) {
 var DEFAULT_LLM_EXTRACTOR_MODEL_ = 'gemini-3.8-flash';
 
 /**
- * 2026-10-01 新增：503（高峰期该模型没有算力）时要换打的第二个模型，跟主
- * 模型是同一个道理——没设定 Script Properties 就用这个默认值，不是写死
- * 唯一选项。特地选一个跟主模型「世代、发布时间都明显不同」的模型，降低
- * 两者同时撞高峰期的机率（真实撞过的两次 503——09-27 的 3.7-flash、09-29
- * 的 3.8-flash——都是最新的两代）。
+ * 2026-10-01 新增，2026-10-02 从「第二个模型」扩成「第三个模型」（Steven
+ * 要求：前两个都失败还有第三个可以用）：503（高峰期该模型没有算力）时依序
+ * 换打的候选模型，跟主模型同一个道理——没设定 Script Properties 就用这些
+ * 默认值，不是写死唯一选项。三层默认值刻意选三个「世代、发布时间都明显
+ * 不同」的模型，降低全部同时撞高峰期的机率（真实撞过三次 503——09-27 的
+ * 3.7-flash、09-29 的 3.8-flash、10-01 又是 3.7-flash）。
  *
  * 明确不选 gemini-2.5-flash（多份除错记录里这个外部除错助手一直建议的
  * "稳定选项"）：查证 Google 官方 deprecations 页面（2026-10-01）显示 2.5
@@ -342,43 +343,55 @@ var DEFAULT_LLM_EXTRACTOR_MODEL_ = 'gemini-3.8-flash';
  * 类：没有真的查证一个模型名字是不是当下还能用就拿来当预设，2026-09-27
  * 已经在 realLLMExtractor_ 的写死模型事件上犯过一次类似的错）。
  */
-var DEFAULT_LLM_EXTRACTOR_FALLBACK_MODEL_ = 'gemini-3.5-flash';
+var DEFAULT_LLM_EXTRACTOR_FALLBACK_MODEL_ = 'gemini-3.6-flash';
+/** 2026-10-02 新增——第三层，Steven 明确要求「第三个没设定就默认用 gemini-3.5-flash」。 */
+var DEFAULT_LLM_EXTRACTOR_FALLBACK_MODEL_2_ = 'gemini-3.5-flash';
 
 /**
- * 2026-09-28 新增——纯函数，Node 可测。从 Script Properties（传进来的只要有
- * getProperty(key) 就行）解析出 createLLMExtractor_ 要的 config。
+ * 2026-09-28 新增，2026-10-02 从两层扩成三层——纯函数，Node 可测。从 Script
+ * Properties（传进来的只要有 getProperty(key) 就行）解析出 createLLMExtractor_
+ * 要的 config。
  *
- * 优先序：LLM_EXTRACTOR_MODEL 有设（去掉前后空白后非空）就用它，否则用
- * DEFAULT_LLM_EXTRACTOR_MODEL_。这是这个文件开头就讲清楚的设计原则——模型名称
+ * 优先序，三层都一样：Script Property 有设（去掉前后空白后非空）就用它，
+ * 否则用对应的 DEFAULT_*。这是这个文件开头就讲清楚的设计原则——模型名称
  * 汰换比部署周期快，不写死进代码，换模型只要改 Script Properties。真实 GAS
  * 环境曾经把 realLLMExtractor_ 改成写死 model: 'gemini-3.8-flash'（能动，但
  * 违反这个原则，下次 Google 换代又要改代码重新部署）；这里改回读设定，并且
- * 处理原本没处理的「设定值是空白/只有空格」——那种值会是 truthy，`||` 不会
- * 落到默认值，模型名变成空白，URL 直接 404。
+ * 处理「设定值是空白/只有空格」——那种值会是 truthy，`||` 不会落到默认值，
+ * 模型名变成空白，URL 直接 404。
  *
- * modelSource 只是给人看的（'ScriptProperty:LLM_EXTRACTOR_MODEL' 或
- * 'default'），createLLMExtractor_ 不读它；用来在 GAS 里一眼确认到底用的是
- * 哪个来源的模型，不用再猜。
+ * modelChain 是去重后、照优先顺序排列的实际尝试清单（createLLMExtractor_
+ * 用这个，不自己重新组一次）：后面哪一层如果跟前面任何一层同名，视同没有
+ * 那一层——不会真的切换成同一个模型重打一次。modelSource 系列欄位只是给人
+ * 看的（'ScriptProperty:LLM_EXTRACTOR_FALLBACK_MODEL_2' 或 'default'），
+ * createLLMExtractor_ 不读它们；用来在 GAS 里一眼确认到底用的是哪个来源的
+ * 模型，不用再猜。
  * @param {{getProperty: function(string): (string|null)}} props
- * @return {{apiKey: (string|null), model: string, modelSource: string, evidenceFolderId: (string|null)}}
+ * @return {{apiKey: (string|null), model: string, modelSource: string, fallbackModel: (string|null), fallbackModelSource: string, fallbackModel2: (string|null), fallbackModel2Source: string, modelChain: string[], evidenceFolderId: (string|null)}}
  */
 function resolveLLMExtractorConfig_(props) {
-  const rawModel = props.getProperty('LLM_EXTRACTOR_MODEL');
-  const propertyModel = (typeof rawModel === 'string') ? rawModel.trim() : '';
-  // 2026-10-01 新增 fallbackModel，同一个「Script Properties 优先，没设定才用
-  // 默认值」原则。刻意允许 Steven 把这个设成空字符串或直接不设，两种都视为
-  // 「没有 fallback」——但如果他把它设成「跟主模型一样的名字」，视同没设
-  // fallback（跟主模型一样切了也没意义），不当作设定错误去抛错。
-  const rawFallback = props.getProperty('LLM_EXTRACTOR_FALLBACK_MODEL');
-  const propertyFallback = (typeof rawFallback === 'string') ? rawFallback.trim() : '';
-  const model = propertyModel || DEFAULT_LLM_EXTRACTOR_MODEL_;
-  const fallbackModel = propertyFallback || DEFAULT_LLM_EXTRACTOR_FALLBACK_MODEL_;
+  function resolveTier_(key, defaultValue) {
+    const raw = props.getProperty(key);
+    const trimmed = (typeof raw === 'string') ? raw.trim() : '';
+    return { value: trimmed || defaultValue, fromProperty: !!trimmed };
+  }
+  const primary = resolveTier_('LLM_EXTRACTOR_MODEL', DEFAULT_LLM_EXTRACTOR_MODEL_);
+  const fb1 = resolveTier_('LLM_EXTRACTOR_FALLBACK_MODEL', DEFAULT_LLM_EXTRACTOR_FALLBACK_MODEL_);
+  const fb2 = resolveTier_('LLM_EXTRACTOR_FALLBACK_MODEL_2', DEFAULT_LLM_EXTRACTOR_FALLBACK_MODEL_2_);
+  const seen = {};
+  const modelChain = [];
+  [primary.value, fb1.value, fb2.value].forEach((m) => {
+    if (!seen[m]) { seen[m] = true; modelChain.push(m); }
+  });
   return {
     apiKey: props.getProperty('GEMINI_API_KEY'),
-    model,
-    modelSource: propertyModel ? 'ScriptProperty:LLM_EXTRACTOR_MODEL' : 'default',
-    fallbackModel: fallbackModel !== model ? fallbackModel : null,
-    fallbackModelSource: propertyFallback ? 'ScriptProperty:LLM_EXTRACTOR_FALLBACK_MODEL' : 'default',
+    model: primary.value,
+    modelSource: primary.fromProperty ? 'ScriptProperty:LLM_EXTRACTOR_MODEL' : 'default',
+    fallbackModel: fb1.value !== primary.value ? fb1.value : null,
+    fallbackModelSource: fb1.fromProperty ? 'ScriptProperty:LLM_EXTRACTOR_FALLBACK_MODEL' : 'default',
+    fallbackModel2: (modelChain.indexOf(fb2.value) !== -1 && fb2.value !== primary.value && fb2.value !== fb1.value) ? fb2.value : null,
+    fallbackModel2Source: fb2.fromProperty ? 'ScriptProperty:LLM_EXTRACTOR_FALLBACK_MODEL_2' : 'default',
+    modelChain,
     evidenceFolderId: props.getProperty('EXTRACTION_EVIDENCE_FOLDER_ID')
   };
 }
@@ -391,43 +404,56 @@ function resolveLLMExtractorConfig_(props) {
  * @return {{extract: function(Object): Object}}
  */
 /**
- * 2026-10-01 新增——纯函数（接受 io 注入，Node 可测）。真实 GAS 撞过两次
- * ：某个模型在 Google 高峰期回 HTTP 503（这个模型现在没有算力，不是这个
- * 专案的问题），换一个模型立刻就通（09-27 gemini-3.7-flash→3.5-flash，
- * 09-29 gemini-3.8-flash→3.5-flash，两次都是外部除错助手手写一次性诊断
- * 脚本才做到，production 代码本身没有这个能力）。这里把它做成
- * extract()/extractOrders() 共用的能力：主模型撞 503 用完重试仍未恢复
- * （127 的 createRetryingPostJson_ 设的 isCapacityIssue）、且有设定不同的
- * fallbackModel 时，换那个模型重打一次；其他情况（非 503、或没设
- * fallbackModel、或 fallbackModel 跟主模型相同）原样把第一次的例外丢出去，
- * 不吞掉。
+ * 2026-10-01 新增，2026-10-02 从「两层」扩成「任意长度的模型链」（Steven
+ * 要求：前两个都失败还要有第三个可以用）——纯函数（接受 io 注入，Node 可
+ * 测）。真实 GAS 撞过三次：某个模型在 Google 高峰期回 HTTP 503（这个模型
+ * 现在没有算力，不是这个专案的问题），换一个模型立刻就通（09-27
+ * 3.7-flash→3.5-flash、09-29 3.8-flash→3.5-flash、10-01 又是
+ * 3.7-flash→3.5-flash——每次都是外部除错助手手写一次性诊断脚本才做到，
+ * production 代码本身没有这个能力）。这里把它做成 extract()/extractOrders()
+ * 共用的能力：依序尝试 models 里的每个模型，只有在 isCapacityIssue（503，
+ * 127 的 createRetryingPostJson_ 设的旗标）失败时才换下一个；撞到非 503
+ * 的例外（429 额度用尽、400 请求本身有问题）立刻原样丢出去，不会继续往
+ * 下一个模型试——429 换模型有没有用尚未证实，142 那边已经有自己的「不要
+ * 浪费额度」处理，这里不重复判断；400 换模型不会让 schema 错误变好，继续
+ * 试只是白费时间。
  *
- * 只在 isCapacityIssue（503）触发——isQuotaExhausted（429）换模型有没有用
- * 尚未证实，142 那边已经有自己的「不要浪费额度」处理，这里不重复判断、
- * 也不假设换模型对额度问题有效。
- * @param {string} primaryModel
- * @param {(string|null)} fallbackModel
+ * allModelsCapacityExhausted：全部模型都试过、而且全部都是因为
+ * isCapacityIssue 才失败时才是 true——142 可以用这个旗标判断「这不是单一
+ * 模型的偶发问题，是当下所有候选模型都没有算力」，决定要不要比照额度用尽
+ * 跳过后续的 chunk fallback（同样的容量紧张，换页码重打也不会有不同结果）。
+ * 只要有任何一个模型是因为非 503 的原因失败（例如中途撞到 429），这个旗标
+ * 就是 false——不是「全部都是容量问题」，不该被当成同一回事处理。
+ * @param {string[]} models 照优先顺序排列、已去重的模型名字（至少 1 个）
  * @param {string} apiKey
  * @param {{postJson: function(string, Object, Object): Object}} httpClient
- * @param {Object} requestBody 两个模型送出去的 request body 完全一样（换模型
+ * @param {Object} requestBody 每个模型送出去的 request body 完全一样（换模型
  *   不需要换 schema/prompt，只换 URL 里的模型名字）
- * @return {{rawResponse: Object, modelUsed: string, primaryError: (Error|null)}}
+ * @return {{rawResponse: Object, modelUsed: string, attemptedModelErrors: Array<{model: string, error: Error}>, primaryError: (Error|null)}}
  */
-function postJsonWithModelFallback_(primaryModel, fallbackModel, apiKey, httpClient, requestBody) {
+function postJsonWithModelFallback_(models, apiKey, httpClient, requestBody) {
   function callModel_(modelName) {
     const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
     return httpClient.postJson(`${endpoint}?key=${apiKey}`, { 'Content-Type': 'application/json' }, requestBody);
   }
-  try {
-    return { rawResponse: callModel_(primaryModel), modelUsed: primaryModel, primaryError: null };
-  } catch (primaryErr) {
-    const shouldTryFallback = !!(primaryErr && primaryErr.isCapacityIssue) && !!fallbackModel && fallbackModel !== primaryModel;
-    if (!shouldTryFallback) throw primaryErr;
+  const attemptedModelErrors = [];
+  for (let i = 0; i < models.length; i++) {
+    const modelName = models[i];
     try {
-      return { rawResponse: callModel_(fallbackModel), modelUsed: fallbackModel, primaryError: primaryErr };
-    } catch (fallbackErr) {
-      fallbackErr.primaryModelError = `${primaryModel}: ${primaryErr.message}`;
-      throw fallbackErr;
+      const rawResponse = callModel_(modelName);
+      return { rawResponse, modelUsed: modelName, attemptedModelErrors, primaryError: attemptedModelErrors.length > 0 ? attemptedModelErrors[0].error : null };
+    } catch (err) {
+      attemptedModelErrors.push({ model: modelName, error: err });
+      const isLastModel = i === models.length - 1;
+      const canTryNext = !isLastModel && !!(err && err.isCapacityIssue);
+      if (!canTryNext) {
+        err.attemptedModelErrors = attemptedModelErrors;
+        err.allModelsCapacityExhausted = attemptedModelErrors.every((a) => a.error && a.error.isCapacityIssue === true);
+        if (attemptedModelErrors.length > 1) {
+          err.primaryModelError = attemptedModelErrors.slice(0, -1).map((a) => `${a.model}: ${a.error.message}`).join(' | ');
+        }
+        throw err;
+      }
     }
   }
 }
@@ -440,7 +466,10 @@ function createLLMExtractor_(config, deps) {
     throw new Error('createLLMExtractor_: 缺少 evidenceFolderId（Script Properties 需要设定 EXTRACTION_EVIDENCE_FOLDER_ID）');
   }
   const model = config.model || DEFAULT_LLM_EXTRACTOR_MODEL_;
-  const fallbackModel = config.fallbackModel || null;
+  // 2026-10-02：优先用 config.modelChain（resolveLLMExtractorConfig_ 已经去重、
+  // 排好顺序）；没有的话（例如呼叫方直接手写 config，像既有测试那样）退回
+  // 「只有主模型，没有 fallback」，不会因为缺这个欄位就报错或试图自己猜。
+  const modelChain = Array.isArray(config.modelChain) && config.modelChain.length > 0 ? config.modelChain : [model];
 
   return {
     /**
@@ -455,7 +484,7 @@ function createLLMExtractor_(config, deps) {
       const pdfBase64 = deps.driveService.bytesToBase64(pdfBytes);
       const requestBody = buildGeminiRequestBody_(pdfBase64, document);
 
-      const { rawResponse, modelUsed, primaryError } = postJsonWithModelFallback_(model, fallbackModel, config.apiKey, deps.httpClient, requestBody);
+      const { rawResponse, modelUsed, attemptedModelErrors } = postJsonWithModelFallback_(modelChain, config.apiKey, deps.httpClient, requestBody);
       const extractorId = `LLMExtractor:${modelUsed}`;
 
       let parsed;
@@ -478,7 +507,9 @@ function createLLMExtractor_(config, deps) {
           // 痕迹方便回头查「这次为什么用的不是设定的主模型」，不是每次都要
           // 去猜。primaryError 是 null（从头就用主模型成功）时这个欄位不写，
           // 不为了「统一形状」硬塞一个 null 进 evidence。
-          fallbackNote: primaryError ? `主模型 ${model} 因 503 高峰期无算力失败，改用 ${modelUsed} 成功：${primaryError.message}` : undefined
+          fallbackNote: attemptedModelErrors.length > 0
+            ? `${attemptedModelErrors.map((a) => `${a.model} 因 503 高峰期无算力失败（${a.error.message}）`).join('；')}——改用 ${modelUsed} 成功`
+            : undefined
         });
         const evidenceFileName = `${document.documentId || document.fileId}__${extractionVersion.replace(/[:.]/g, '-')}.json`;
         evidenceFileId = deps.driveService.writeJsonFile(config.evidenceFolderId, evidenceFileName, evidenceRecord);
@@ -517,7 +548,7 @@ function createLLMExtractor_(config, deps) {
       const pdfBase64 = deps.driveService.bytesToBase64(pdfBytes);
       const requestBody = buildGeminiOrderExtractionRequestBody_(pdfBase64, pageRange || null);
 
-      const { rawResponse, modelUsed, primaryError } = postJsonWithModelFallback_(model, fallbackModel, config.apiKey, deps.httpClient, requestBody);
+      const { rawResponse, modelUsed, attemptedModelErrors } = postJsonWithModelFallback_(modelChain, config.apiKey, deps.httpClient, requestBody);
       const extractorId = `LLMExtractor:${modelUsed}:${scopeTag}`;
 
       let parsed;
@@ -534,7 +565,9 @@ function createLLMExtractor_(config, deps) {
           prompt: buildButiranTempahanPrompt_(pageRange || null),
           candidate: parsed ? parsed.candidate : null,
           rawResponse,
-          fallbackNote: primaryError ? `主模型 ${model} 因 503 高峰期无算力失败，改用 ${modelUsed} 成功：${primaryError.message}` : undefined
+          fallbackNote: attemptedModelErrors.length > 0
+            ? `${attemptedModelErrors.map((a) => `${a.model} 因 503 高峰期无算力失败（${a.error.message}）`).join('；')}——改用 ${modelUsed} 成功`
+            : undefined
         });
         const evidenceFileName = `${document.documentId || document.fileId}__${scopeTag.replace(/[:]/g, '-')}__${extractionVersion.replace(/[:.]/g, '-')}.json`;
         evidenceFileId = deps.driveService.writeJsonFile(config.evidenceFolderId, evidenceFileName, evidenceRecord);
@@ -597,6 +630,28 @@ var MAX_SINGLE_RETRY_SLEEP_MS_ = 55000;
 var MAX_TOTAL_RETRY_SLEEP_MS_ = 60000;
 
 /**
+ * 2026-10-02 新增，真实 GAS 触发：consoleRunDailyAllocation_ 一次只处理一笔
+ * 收入，整个 6 分钟都是它的，上面这组「耐心」预算（配合三层模型链）对它是
+ * 合理的——已经这样真实验证过三次。但 consoleBatchImport_ 在同一次执行里
+ * 要处理很多份文件，6 分钟要分给全部文件；2026-10-01 20:25-20:31 真实撞到
+ * consoleBatchImport 整个被 GAS 平台硬杀（"Exceeded maximum execution
+ * time"——平台层级终止，不是 catchable 的例外，consoleImportOneDriveFile_
+ * 的 try/catch 完全接不住，连一个干净的失败结果都救不回来），因为批次汇入
+ * 沿用了跟单笔一样耐心的重试预算；这次把模型链从两层扩成三层，如果沿用
+ * 同一套预算、还让批次情境套用，只会让这个风险更大，不是更小。
+ *
+ * 分成两种预算，由 realLLMExtractor_(profile) 决定用哪一种：
+ * - SINGLE_RETRY_BUDGET_：consoleRunDailyAllocation_ 用，沿用上面原本的值。
+ * - BATCH_RETRY_BUDGET_：consoleBatchImport_/consoleRetryFile_/
+ *   consoleManualImport_（经 112 的 lazyLLMExtractor_）用，收紧成几秒等级——
+ *   高峰期没算力就让这一份文件快速、干净地失败（Steven 已经看得到"抽取
+ *   失败 Retry"），下一份文件才有机会在剩下的时间内处理，不要为了一份文件
+ *   的重试把整批拖到被硬杀。
+ */
+var SINGLE_RETRY_BUDGET_ = { maxSingleRetrySleepMs: MAX_SINGLE_RETRY_SLEEP_MS_, maxTotalRetrySleepMs: MAX_TOTAL_RETRY_SLEEP_MS_ };
+var BATCH_RETRY_BUDGET_ = { maxSingleRetrySleepMs: 8000, maxTotalRetrySleepMs: 10000 };
+
+/**
  * 组出带重试的 postJson。I/O 从参数注入（真实环境是 UrlFetchApp.fetch /
  * Utilities.sleep，Node 测试用假的），重试策略本身因此可以在 Node 里测——原本
  * 这段整个躲在 realLLMExtractorDeps_ 里面，「只能在真实 GAS 环境跑，Node 测不了」。
@@ -619,7 +674,12 @@ var MAX_TOTAL_RETRY_SLEEP_MS_ = 60000;
  * @param {{fetch: function(string, Object): {getResponseCode: function(): number, getContentText: function(): string}, sleep: function(number): void}} io
  * @return {function(string, Object, Object): Object} postJson(url, headers, body)
  */
-function createRetryingPostJson_(io) {
+function createRetryingPostJson_(io, retryBudget) {
+  // 2026-10-02：retryBudget 是可选的覆盖值（见上面 SINGLE_RETRY_BUDGET_/
+  // BATCH_RETRY_BUDGET_ 的说明）——没给就照旧用模组层级的默认值，既有呼叫方
+  // （只传一个参数）行为完全不变。
+  const maxSingleRetrySleepMs = (retryBudget && retryBudget.maxSingleRetrySleepMs) || MAX_SINGLE_RETRY_SLEEP_MS_;
+  const maxTotalRetrySleepMs = (retryBudget && retryBudget.maxTotalRetrySleepMs) || MAX_TOTAL_RETRY_SLEEP_MS_;
   return function postJson(url, headers, body) {
     const maxAttempts = 4; // 第一次 + 最多 3 次重试
     let lastError;
@@ -661,8 +721,8 @@ function createRetryingPostJson_(io) {
       const rawDelayMs = suggestedDelaySeconds != null
         ? suggestedDelaySeconds * 1000 + 500 // +500ms 缓冲，避免卡在窗口边界又撞一次
         : 1000 * Math.pow(2, attempt - 1); // 没有建议秒数时的原有 1s/2s/4s
-      const delayMs = Math.min(rawDelayMs, MAX_SINGLE_RETRY_SLEEP_MS_);
-      if (totalSleptMs + delayMs > MAX_TOTAL_RETRY_SLEEP_MS_) {
+      const delayMs = Math.min(rawDelayMs, maxSingleRetrySleepMs);
+      if (totalSleptMs + delayMs > maxTotalRetrySleepMs) {
         // 2026-09-29 修正可读性缺陷（真实 Cloud logs 发现）：原本把这句中文
         // 直接接在 lastError.message 后面——lastError.message 本身已经是
         // 「HTTP 429：」加上被 slice(0,500) 截断到一半的原始 JSON，两段直接
@@ -670,8 +730,9 @@ function createRetryingPostJson_(io) {
         // `"status": "RESOURCE_EXHAUSTED",\n    "（已累计等待 9 秒...）"`）。
         // 改成中文说明放最前面、自成一句，原始错误文字放冒号后面，读的时候
         // 一眼就知道两段是分开的。isQuotaExhausted 沿用上面已经判断过的值
-        // （这里一定是 429 才会走到，因为 503 的 delayMs 来自 exponential
-        // backoff，1s/2s/4s 不可能超过 55 秒的单次上限、更不会撞到这里）。
+        // （503 走的是 exponential backoff，1s/2s/4s，在 BATCH_RETRY_BUDGET_
+        // 的单次 8 秒上限下也可能撞到这里——2026-10-02 起不能再假设只有 429
+        // 会落到这个分支）。
         const capped = new Error(`重试已达累计等待上限（已睡 ${Math.round(totalSleptMs / 1000)} 秒，再等会逼近 GAS 单次执行上限）——不再重试，最后一次错误：${lastError.message}`);
         capped.isQuotaExhausted = lastError.isQuotaExhausted === true;
         capped.isCapacityIssue = lastError.isCapacityIssue === true;
@@ -685,7 +746,7 @@ function createRetryingPostJson_(io) {
 }
 
 /** 真的调 DriveApp/UrlFetchApp/Utilities 的那一层——只能在真实 GAS 环境跑，Node 测不了。 */
-function realLLMExtractorDeps_(now) {
+function realLLMExtractorDeps_(now, retryBudget) {
   return {
     driveService: {
       getFileBytes(fileId) {
@@ -703,11 +764,12 @@ function realLLMExtractorDeps_(now) {
     httpClient: {
       // 重试策略本身（含 429 依 Gemini 回报的秒数等待、累计等待上限）在
       // createRetryingPostJson_ 里，Node 用假的 fetch/sleep 测过；这里只接真的
-      // UrlFetchApp / Utilities.sleep，没有别的逻辑。
+      // UrlFetchApp / Utilities.sleep，没有别的逻辑。retryBudget 没给就是
+      // undefined，createRetryingPostJson_ 自己会退回模组层级的默认值。
       postJson: createRetryingPostJson_({
         fetch: (url, options) => UrlFetchApp.fetch(url, options),
         sleep: (ms) => Utilities.sleep(ms)
-      })
+      }, retryBudget)
     },
     now: now || new Date()
   };
@@ -716,16 +778,30 @@ function realLLMExtractorDeps_(now) {
 /**
  * GAS 环境下真正会用到的入口——从 Script Properties 读设定，组出真的
  * LLMExtractor。Script Properties 没设好会直接抛错（CMP-P10：不猜）。
- * @return {{extract: function(Object): Object}}
+ *
+ * 2026-10-02 新增 profile 参数（真实 GAS 触发：consoleBatchImport 2026-10-01
+ * 20:25-20:31 被 GAS 平台硬杀，见 SINGLE_RETRY_BUDGET_/BATCH_RETRY_BUDGET_
+ * 上方的完整说明）：
+ * - 'single'（预设，不传就是这个）：170 的 lazyOrderExtractor_ 用——完整的
+ *   三层模型链（config.modelChain）+ 耐心的 SINGLE_RETRY_BUDGET_。
+ * - 'batch'：112 的 lazyLLMExtractor_ 用——只用主模型（不换模型，
+ *   modelChain 收窄成只有一个元素）+ 收紧的 BATCH_RETRY_BUDGET_。
+ * @param {('single'|'batch')} [profile] 预设 'single'
+ * @return {{extract: function(Object): Object, extractOrders: function(Object, ?Object): Object}}
  */
-function realLLMExtractor_() {
-  // 2026-09-28 加固：模型来自 Script Properties 的 LLM_EXTRACTOR_MODEL，没设才用
-  // DEFAULT_LLM_EXTRACTOR_MODEL_（gemini-3.8-flash）——见 resolveLLMExtractorConfig_。
+function realLLMExtractor_(profile) {
+  const isBatch = profile === 'batch';
+  const config = resolveLLMExtractorConfig_(PropertiesService.getScriptProperties());
+  if (isBatch) {
+    // 批次汇入情境：不换模型，见 BATCH_RETRY_BUDGET_ 上方说明——高峰期没
+    // 算力就让这一份文件快速失败，不要为了换模型拖长单一文件的处理时间。
+    config.modelChain = [config.model];
+  }
   // ⚠️ 部署这版之前先确认 Script Properties：如果 LLM_EXTRACTOR_MODEL 还设成
   // 'gemini-3.5-flash'（2026-09-27 除错记录里看到的值），这里会照旧读到
   // 3.5-flash，不会自动变成 3.8-flash。要用 3.8-flash：把该 key 的值改成
   // gemini-3.8-flash，或整个删掉这个 key。
-  return createLLMExtractor_(resolveLLMExtractorConfig_(PropertiesService.getScriptProperties()), realLLMExtractorDeps_());
+  return createLLMExtractor_(config, realLLMExtractorDeps_(undefined, isBatch ? BATCH_RETRY_BUDGET_ : SINGLE_RETRY_BUDGET_));
 }
 
 if (typeof module !== 'undefined') {
@@ -741,7 +817,10 @@ if (typeof module !== 'undefined') {
     parseRetryDelaySeconds_,
     createRetryingPostJson_,
     postJsonWithModelFallback_,
+    SINGLE_RETRY_BUDGET_,
+    BATCH_RETRY_BUDGET_,
     DEFAULT_LLM_EXTRACTOR_FALLBACK_MODEL_,
+    DEFAULT_LLM_EXTRACTOR_FALLBACK_MODEL_2_,
     MAX_SINGLE_RETRY_SLEEP_MS_,
     MAX_TOTAL_RETRY_SLEEP_MS_,
     DEFAULT_LLM_EXTRACTOR_MODEL_,

@@ -70,7 +70,14 @@ function lazyLLMExtractor_() {
   let cached = null;
   return {
     extract(document) {
-      if (!cached) cached = realLLMExtractor_();
+      // 2026-10-02：明确传 'batch'——这里是 consoleBatchImport_/
+      // consoleRetryFile_/consoleManualImport_ 共用的 statement 层级抽取，
+      // 一次 GAS 执行要处理多份文件，不能用 127 给单笔执行（Execution B）
+      // 准备的耐心重试+换模型预算，否则一份文件卡住就可能拖垮整批（真实
+      // 撞过：consoleBatchImport 2026-10-01 20:25-20:31 被 GAS 平台硬杀）。
+      // 见 127_LLMExtractor.js 的 realLLMExtractor_/SINGLE_RETRY_BUDGET_/
+      // BATCH_RETRY_BUDGET_ 说明。
+      if (!cached) cached = realLLMExtractor_('batch');
       return cached.extract(document);
     }
   };
