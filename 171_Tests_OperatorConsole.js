@@ -4,7 +4,9 @@ if (typeof require === 'function') {
     consoleRetryFile_, consoleManualImport_, consoleRebuildProjections_, consoleGetDashboard_,
     consoleGetIncomeDetail_, consoleRunDailyAllocation_, consoleGetDashboard, consoleGetLastFolderId, consoleScanFolder,
     consoleManualImport, consoleGetIncomeDetail, consoleRunDailyAllocation,
-    sanitizeForClient_, ASSUMED_STATEMENT_TOTAL_PAGES_
+    sanitizeForClient_, ASSUMED_STATEMENT_TOTAL_PAGES_,
+    consoleGetRecoveryStatus_, consoleRetrySelectedFiles_, summarizeEvidenceFailure_,
+    consoleGetRecoveryStatus, consoleRetrySelectedFiles
   } = require('./170_OperatorConsole.js');
   var { createTruthWriter_ } = require('./115_TruthWriter.js');
   var { createSheetReader_ } = require('./117_SheetReader.js');
@@ -36,6 +38,31 @@ function fakeConsoleDeps_(files, now) {
     folderScanner: fakeFolderScanner_(files || []),
     now: now || new Date('2026-08-17T10:00:00Z'),
     _accessor: accessor // 方便测试直接检查底层写了什么，不是给编排代码用的
+  };
+}
+
+/**
+ * 2026-10-02 新增——假的证据资料夹扫描器，给 PDF Import Recovery Center 的
+ * 测试用。filesByPrefix 是 { '<document_id>__': [{id, name, lastUpdated,
+ * content, throwOnRead?}, ...] }——跟真的 realEvidenceScanner_ 同一个介面
+ * （listFilesWithPrefix/readJsonFile），folderId 这里不检查（只有一个假
+ * 资料夹），throwOnRead 给「证据档案读不出来/格式坏掉」的情境用。
+ */
+function fakeEvidenceScanner_(filesByPrefix) {
+  const byId = {};
+  Object.keys(filesByPrefix).forEach((prefix) => {
+    filesByPrefix[prefix].forEach((f) => { byId[f.id] = f; });
+  });
+  return {
+    listFilesWithPrefix(folderId, prefix) {
+      return (filesByPrefix[prefix] || []).map((f) => ({ id: f.id, name: f.name, lastUpdated: f.lastUpdated }));
+    },
+    readJsonFile(fileId) {
+      const f = byId[fileId];
+      if (!f) throw new Error(`fakeEvidenceScanner_: 没有 id=${fileId} 的档案`);
+      if (f.throwOnRead) throw new Error(f.throwOnRead);
+      return f.content;
+    }
   };
 }
 
@@ -429,6 +456,102 @@ function runAllOperatorConsoleTests() {
   assertEqual_('consoleRunDailyAllocation_·失败时 errors 带着底层例外文字（不再是没有线索的黑盒 Needs_Review）', rdaDiag.errors.some((e) => String(e.exception || '').indexOf('模拟 Gemini HTTP 400') !== -1), true, results);
   assertEqual_('consoleRunDailyAllocation_·extractor 被呼叫三次（整份 + 两段），每次收到的 document.totalPages 都是那个具名假设值', { calls: seenByExtractor.length, allUseAssumedTotalPages: seenByExtractor.every((c) => c.totalPages === ASSUMED_STATEMENT_TOTAL_PAGES_) }, { calls: 3, allUseAssumedTotalPages: true }, results);
   assertEqual_('consoleRunDailyAllocation_·成功时 attempts/errors 也是阵列（回传形状固定，前端不用判断有没有这两个欄位）', { attempts: Array.isArray(rdaResult.attempts), errors: Array.isArray(rdaResult.errors) }, { attempts: true, errors: true }, results);
+
+  // ============ PDF Import Recovery Center（2026-10-02，真实撞到 2026-W06.pdf 卡住要手动删 Documents 才能重试）============
+
+  // ---- summarizeEvidenceFailure_：纯函数 ----
+  assertEqual_('summarizeEvidenceFailure_·API 本身回报的错误优先（真实撞过的 503）', summarizeEvidenceFailure_({ raw_response: { error: { message: 'This model is currently experiencing high demand.' } }, finish_reason: null, raw_candidate: null }), 'LLM API 回传错误：This model is currently experiencing high demand.', results);
+  assertEqual_('summarizeEvidenceFailure_·finishReason 不是 STOP', summarizeEvidenceFailure_({ raw_response: {}, finish_reason: 'SAFETY', raw_candidate: null }), 'Gemini 没有正常完成（finishReason=SAFETY，可能被安全过滤器挡下或输出被截断）', results);
+  assertEqual_('summarizeEvidenceFailure_·candidate 是 null（没有 API 错误、finishReason 是 STOP）', summarizeEvidenceFailure_({ raw_response: {}, finish_reason: 'STOP', raw_candidate: null }), '没有解析出候选资料（回应格式不是预期的 JSON，或完全没有回应内容）', results);
+  // fallback_note 分支排在 raw_candidate 检查之后——raw_candidate 是 null 时会先命中那一条，这里用非 null candidate 单独验证 fallback_note 分支本身
+  assertEqual_('summarizeEvidenceFailure_·candidate 存在、有 fallback_note → 回报换过模型（比「候选资料已抽出但验证没过」更具体，优先用这个）', summarizeEvidenceFailure_({ raw_response: {}, finish_reason: 'STOP', raw_candidate: { days: [] }, fallback_note: '主模型 gemini-3.8-flash 因 503 高峰期无算力失败，改用 gemini-3.5-flash 成功' }), '已切换模型但最终仍失败：主模型 gemini-3.8-flash 因 503 高峰期无算力失败，改用 gemini-3.5-flash 成功', results);
+  assertEqual_('summarizeEvidenceFailure_·candidate 存在、没有 fallback_note → 候选资料已抽出但后续验证没过', summarizeEvidenceFailure_({ raw_response: {}, finish_reason: 'STOP', raw_candidate: { days: [] } }), '候选资料已抽取出来，但后续验证没有通过（栏位/期间/金额对不上——建议点 Retry 重新确认）', results);
+  assertEqual_('summarizeEvidenceFailure_·空物件/undefined 不抛错', [summarizeEvidenceFailure_(null), summarizeEvidenceFailure_(undefined)], ['证据档案是空的', '证据档案是空的'], results);
+
+  // ---- consoleGetRecoveryStatus_：Pending vs Failed vs Completed 的分类 ----
+  function seedDoc_(deps, docId, driveFileId, period, drivePath) {
+    deps._accessor.appendRow('Documents', [docId, 'Grab', 'Weekly Statement', 'Income', period, `hash-${docId}`, driveFileId, drivePath || `${docId}.pdf`, 'Imported']);
+  }
+  function seedVerified_(deps, incomeId, period, docId) {
+    deps._accessor.appendRow('Verified_Income', [incomeId, period, 'MYR', 500, 50, 10, 0, 0, 560, 560, 'Compliance OS', 'Grab', 'Verified', '2026-07-22T00:00:00Z', docId, 'GrabWeeklyParser', '2026-07-13', '2026-07-19']);
+  }
+
+  const depsRec1 = fakeConsoleDeps_([]);
+  seedDoc_(depsRec1, 'CMP-DOC-PENDING', 'drive-pending', '2026-W06'); // 从来没有证据档——真的从没被尝试过
+  seedDoc_(depsRec1, 'CMP-DOC-FAILED', 'drive-failed', '2026-W06'); // 有证据档，没有 Verified_Income
+  seedDoc_(depsRec1, 'CMP-DOC-DONE', 'drive-done', '2026-W07');
+  seedVerified_(depsRec1, 'CMP-INCOME-2026-W07', '2026-W07', 'CMP-DOC-DONE');
+  depsRec1.evidenceScanner = fakeEvidenceScanner_({
+    'CMP-DOC-FAILED__': [
+      { id: 'ev1', name: 'CMP-DOC-FAILED__2026-10-01T10-00-00.000Z.json', lastUpdated: new Date('2026-10-01T10:00:00Z'), content: { raw_response: { error: { message: 'This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.' } }, finish_reason: null, raw_candidate: null } },
+      { id: 'ev2', name: 'CMP-DOC-FAILED__2026-10-01T11-00-00.000Z.json', lastUpdated: new Date('2026-10-01T11:00:00Z'), content: { raw_response: { error: { message: '第二次也失败了' } }, finish_reason: null, raw_candidate: null } }
+    ]
+  });
+  depsRec1.evidenceFolderId = 'evidence-folder-1';
+  const recStatus1 = consoleGetRecoveryStatus_(depsRec1);
+  assertEqual_('Recovery·从没被尝试过（没有任何证据档）的文件归 Pending', recStatus1.pending.map((p) => p.documentId), ['CMP-DOC-PENDING'], results);
+  assertEqual_('Recovery·Pending 不需要 Documents 记录以外的任何东西就能判断，不依赖即时 Drive 资料夹扫描', recStatus1.pending[0].driveFileId, 'drive-pending', results);
+  assertEqual_('Recovery·真的打过 Gemini、但没进 Verified_Income 的文件归 Failed，不是 Pending', recStatus1.failed.map((f) => f.documentId), ['CMP-DOC-FAILED'], results);
+  assertEqual_('Recovery·Failed 的 lastError 取「最新」一份证据档（按 lastUpdated），不是第一份', recStatus1.failed[0].lastError, 'LLM API 回传错误：第二次也失败了', results);
+  assertEqual_('Recovery·Failed 的 attemptCount 是数出来的证据档份数（2 份），不是新发明的持久化欄位', recStatus1.failed[0].attemptCount, 2, results);
+  assertEqual_('Recovery·已经进 Verified_Income 的文件归 Completed，不出现在 Pending/Failed（不会被重复标记成需要救援）', { completed: recStatus1.completed.map((c) => c.documentId), notInPending: recStatus1.pending.some((p) => p.documentId === 'CMP-DOC-DONE'), notInFailed: recStatus1.failed.some((f) => f.documentId === 'CMP-DOC-DONE') }, { completed: ['CMP-DOC-DONE'], notInPending: false, notInFailed: false }, results);
+  assertEqual_('Recovery·Completed 只带最少欄位（documentId/incomeIds/period），不复制 Verified_Income 整行内容（Section 3C：不建第二个 source of truth）', Object.keys(recStatus1.completed[0]).sort(), ['documentId', 'driveFileId', 'drivePath', 'incomeIds', 'period'].sort(), results);
+
+  // ---- evidenceScanner 没接上（Node 测试环境常态，或 Script Properties 没设定）→ 老实说判断不出来，不是假装都是 Pending ----
+  const depsRecNoEvidence = fakeConsoleDeps_([]);
+  seedDoc_(depsRecNoEvidence, 'CMP-DOC-X', 'drive-x', '2026-W08');
+  const recStatusNoEvidence = consoleGetRecoveryStatus_(depsRecNoEvidence);
+  assertEqual_('Recovery·evidenceScanner 没接上 → evidenceFolderConfigured: false，文件进 Pending 但标注 evidenceUnavailable，不是悄悄当成「真的检查过、确定是 Pending」', { configured: recStatusNoEvidence.evidenceFolderConfigured, item: recStatusNoEvidence.pending[0] && { status: recStatusNoEvidence.pending[0].status, evidenceUnavailable: recStatusNoEvidence.pending[0].evidenceUnavailable } }, { configured: false, item: { status: 'Pending', evidenceUnavailable: true } }, results);
+
+  // ---- 证据档案本身读不出来/坏掉（Invalid states are rejected safely）----
+  const depsRecBadEvidence = fakeConsoleDeps_([]);
+  seedDoc_(depsRecBadEvidence, 'CMP-DOC-BAD', 'drive-bad', '2026-W09');
+  depsRecBadEvidence.evidenceScanner = fakeEvidenceScanner_({ 'CMP-DOC-BAD__': [{ id: 'evbad', name: 'CMP-DOC-BAD__x.json', lastUpdated: new Date('2026-10-01T00:00:00Z'), throwOnRead: '档案不是合法 JSON' }] });
+  depsRecBadEvidence.evidenceFolderId = 'evidence-folder-1';
+  const recStatusBad = consoleGetRecoveryStatus_(depsRecBadEvidence);
+  assertEqual_('Recovery·证据档案本身读不出来 → 安全地归 Failed、lastError 说明读取失败，不是让整个 Recovery Center 崩溃', { status: recStatusBad.failed[0] && recStatusBad.failed[0].status, lastErrorMentionsReadFailure: recStatusBad.failed[0] && recStatusBad.failed[0].lastError.indexOf('读取/解析失败') !== -1 }, { status: 'Failed', lastErrorMentionsReadFailure: true }, results);
+
+  // ---- order 层级的证据档（Daily Allocation，带 orders: 的 scope tag）不该被 Recovery Center 误判成 statement 层级的尝试 ----
+  const depsRecOrderLevel = fakeConsoleDeps_([]);
+  seedDoc_(depsRecOrderLevel, 'CMP-DOC-ORD', 'drive-ord', '2026-W10');
+  depsRecOrderLevel.evidenceScanner = fakeEvidenceScanner_({ 'CMP-DOC-ORD__': [{ id: 'evord', name: 'CMP-DOC-ORD__orders:full__2026-10-01T00-00-00.000Z.json', lastUpdated: new Date('2026-10-01T00:00:00Z'), content: {} }] });
+  depsRecOrderLevel.evidenceFolderId = 'evidence-folder-1';
+  const recStatusOrderLevel = consoleGetRecoveryStatus_(depsRecOrderLevel);
+  assertEqual_('Recovery·只有 order 层级（Daily Allocation，orders: scope tag）证据档、没有 statement 层级证据 → 仍归 Pending（Recovery Center 这次的范围是 Document Import，不是 Daily Allocation）', recStatusOrderLevel.pending.map((p) => p.documentId), ['CMP-DOC-ORD'], results);
+
+  // ---- 没有原生 Date 漏出去（跟 consoleGetDashboard 同一个 sanitizeForClient_ 把关）----
+  assertEqual_('Recovery·consoleGetRecoveryStatus_ 的回传物件里没有原生 Date（lastAttemptAt 等欄位都已经转成字符串）', collectDatePaths_(recStatus1, 'recovery', []), [], results);
+  assertEqual_('Recovery·公开 consoleGetRecoveryStatus 回传的也是已经 sanitize 过的物件（不是另外包一层 JSON 字符串——这个端点不像 consoleGetDashboard 那样有已知的 google.script.run 传输问题史，不需要那层额外保险）', typeof consoleGetRecoveryStatus(depsRec1), 'object', results);
+
+  // ---- consoleRetrySelectedFiles_：复用既有 consoleImportOneDriveFile_，不是新的处理引擎 ----
+  const depsRetrySel = fakeConsoleDeps_([]);
+  seedDoc_(depsRetrySel, 'CMP-DOC-R1', 'drive-r1', '2026-W11');
+  seedDoc_(depsRetrySel, 'CMP-DOC-R2', 'drive-r2', '2026-W12');
+  const selResult = consoleRetrySelectedFiles_([{ fileId: 'drive-r1', fileName: 'r1.pdf' }, { fileId: 'drive-r2', fileName: 'r2.pdf' }], depsRetrySel);
+  assertEqual_('Retry Selected·每个文件各自回报结果，不是整批只给一个「成功/失败」（部分失败要看得出是哪几份）', selResult.results.map((r) => r.fileId), ['drive-r1', 'drive-r2'], results);
+  assertEqual_('Retry Selected·用的是既有的 consoleImportOneDriveFile_（isRetry=true 走的 skipImport 路径），不是另一套汇入引擎——两份文件都沿用各自既有的 document_id，不会产生新的 Documents 记录', depsRetrySel._accessor.getAllRows('Documents').filter((r) => r[0] === 'CMP-DOC-R1' || r[0] === 'CMP-DOC-R2').length, 2, results);
+
+  // ---- Retry Selected 比照 consoleBatchImport_ 的时间预算安全机制（2026-10-01 consoleBatchImport 真实被 GAS 硬杀的同一个理由，Retry Selected 不能重蹈覆辙）----
+  const depsRetrySelBudget = fakeConsoleDeps_([]);
+  seedDoc_(depsRetrySelBudget, 'CMP-DOC-B1', 'drive-b1', '2026-W13');
+  seedDoc_(depsRetrySelBudget, 'CMP-DOC-B2', 'drive-b2', '2026-W14');
+  seedDoc_(depsRetrySelBudget, 'CMP-DOC-B3', 'drive-b3', '2026-W15');
+  let selBudgetCallCount = 0;
+  const selBudgetResult = consoleRetrySelectedFiles_(
+    [{ fileId: 'drive-b1', fileName: 'b1.pdf' }, { fileId: 'drive-b2', fileName: 'b2.pdf' }, { fileId: 'drive-b3', fileName: 'b3.pdf' }],
+    Object.assign({}, depsRetrySelBudget, {
+      timeBudgetMs: 1000,
+      nowMs: () => { selBudgetCallCount++; return selBudgetCallCount <= 2 ? 0 : 999999; } // 第 3 次呼叫（处理第 2 份前的检查）直接跳到远超预算，跟 consoleBatchImport_ 既有测试同一个手法
+    })
+  );
+  assertEqual_('Retry Selected·接近/超过时间预算就提早停止（stoppedEarly），不会每份都硬试到被 GAS 平台强制终止——跟 consoleBatchImport_ 共用同一个安全机制，不是重新发明一次', { stoppedEarly: selBudgetResult.stoppedEarly, attempted: selBudgetResult.attemptedCount, remaining: selBudgetResult.remainingCount }, { stoppedEarly: true, attempted: 1, remaining: 2 }, results);
+
+  // ---- Retry 不会重复发布 Verified_Income（双击/重复请求的后端层保险）----
+  const depsNoDup = fakeConsoleDeps_([]);
+  seedDoc_(depsNoDup, 'CMP-DOC-NODUP', 'drive-nodup', '2026-W16');
+  seedVerified_(depsNoDup, 'CMP-INCOME-2026-W16', '2026-W16', 'CMP-DOC-NODUP');
+  const recStatusNoDup = consoleGetRecoveryStatus_(depsNoDup);
+  assertEqual_('Retry·已经 Completed 的文件不会出现在 Pending/Failed 里，Recovery Center UI 不会给它一个 Retry 按钮（避免误触重新发布）', { inPending: recStatusNoDup.pending.some((p) => p.documentId === 'CMP-DOC-NODUP'), inFailed: recStatusNoDup.failed.some((f) => f.documentId === 'CMP-DOC-NODUP') }, { inPending: false, inFailed: false }, results);
 
   const allPass = results.every((r) => r.pass);
   results.forEach((r) => {
