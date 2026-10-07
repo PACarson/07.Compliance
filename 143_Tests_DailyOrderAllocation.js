@@ -54,6 +54,24 @@ var DOAL_W33_EXPECTED_DAILY_ = {
 };
 var DOAL_W33_EXPECTED_TOTAL_ = 1195.10;
 
+// Phase 4 测试要用的 142 函式（candidateFromGeminiOrderRow_ 等）的解析器。
+// 2026-09-15：原本漏了 typeof require 守卫，GAS 没有 require 直接 ReferenceError
+//（真实 GAS 执行时抓到的）；当时的修法是把「同名 const 解构」改成呼叫这个 resolver。
+// 2026-10-07 修正（用「所有档案载入同一个全域 scope、没有 require」的 GAS 式模拟抓到的，
+// 原始 repo 就会这样，不是当天的改动造成的）：09-15 那版 resolver 仍然嵌在
+// runDailyOrderAllocationTests_ 里面，它的 GAS 分支回传 {candidateFromGeminiOrderRow_, ...}
+// 时，这三个名字先在「外层函式」找——而外层函式正好用同名 const 解构在接这个
+// 函式的回传值，初始化期间这三个名字还在 TDZ → "Cannot access
+// 'candidateFromGeminiOrderRow_' before initialization"。resolver 嵌在同一个外层函式
+// 里，遮蔽就没有消失。提到顶层之后，它的 scope chain 是「自己 → 全域」，不经过外层
+// 函式，GAS 分支才真的引用到全域的 142 函式；Node 分支（require）行为完全没变。
+function resolveDoalTestDeps143_() {
+  if (typeof require === 'function') {
+    return require('./142_DailyOrderAllocation.js');
+  }
+  return { candidateFromGeminiOrderRow_, mergeChunkedExtractionResults_, runGeminiOrderExtractionWithFallback_ }; // GAS：142 已经载入，直接引用全域
+}
+
 function runDailyOrderAllocationTests_() {
   const results = [];
 
@@ -249,21 +267,8 @@ function runDailyOrderAllocationTests_() {
   results.push({ name: 'TEST 跨月投影: W01 正确拆成 2025-12 / 2026-01 两个月份桶，不是整周塞一个月', pass: Math.abs(grouped['2025-12'] - dec2025) < 0.01 && Math.abs(grouped['2026-01'] - jan2026) < 0.01, actual: grouped, expected: { '2025-12': dec2025, '2026-01': jan2026 } });
 
   // ---- Phase 4（2026-08-25）：Gemini candidate 映射 + chunk 合并 + fallback 编排 ----
-  // 2026-09-15：原本这行漏了这份文件其他每一处都有的 typeof require 守卫，
-  // GAS 没有 require，直接 ReferenceError（真实 GAS 执行时抓到的）。这三个
-  // 名字后面在这个函数里被大量引用，不能像 111 那样直接改名——试过用
-  // const {candidateFromGeminiOrderRow_,...} = cond ? require(...) : {同名
-  // shorthand} 这种写法，GAS 分支一样会因为「解构出来的名字在自己初始化
-  // 完成前引用自己」直接 TDZ ReferenceError。改用一个独立的 resolver
-  // function：它内部引用这三个名字时，走的是它自己的 scope chain（GAS 全域
-  // 或这个 function 自己的闭包），不是下面这行 const 解构正在宣告的那个
-  // scope，所以不会有自我引用的问题——没有改变这三个名字后续任何一处用法。
-  function resolveDoalTestDeps143_() {
-    if (typeof require === 'function') {
-      return require('./142_DailyOrderAllocation.js');
-    }
-    return { candidateFromGeminiOrderRow_, mergeChunkedExtractionResults_, runGeminiOrderExtractionWithFallback_ }; // GAS：142 已经载入，直接引用全域
-  }
+  // resolveDoalTestDeps143_ 定义在文件顶层（见 runDailyOrderAllocationTests_ 上方的说明）——
+  // 2026-10-07 起不再嵌在这个函数里面。
   const { candidateFromGeminiOrderRow_, mergeChunkedExtractionResults_, runGeminiOrderExtractionWithFallback_ } = resolveDoalTestDeps143_();
 
   // 用 Phase 1 已经验证过的真实数字构造"如果 Gemini 回报正确"的样子——
@@ -330,6 +335,112 @@ function runDailyOrderAllocationTests_() {
   );
   results.push({ name: 'Phase4.编排: 整份文件跟两个 chunk 全部失败 → Needs_Review，不抛例外中断整个 Statement（Steven 明确要求）', pass: totalFailure.allocationStatus === 'Needs_Review' && Array.isArray(totalFailure.dailyAllocations), actual: totalFailure.allocationStatus, expected: 'Needs_Review（没有抛例外）' });
   results.push({ name: 'Phase4.编排: batchId 带正确前缀跟 verifiedIncomeId，符合已确认的 idempotency 格式', pass: /^CMP-OALB-CMP-VI-TEST-\d+$/.test(totalFailure.batchId), actual: totalFailure.batchId, expected: 'CMP-OALB-CMP-VI-TEST-<timestamp>' });
+
+  // ---- 2026-10-07 新增（真实 GAS 触发）：platform 别名 "4-Hour Delivery" ----
+  // 真实 debug 日志：2026-W14（30 Mac–5 April 2026，跨月周）Jumaat 3 April 一笔
+  // 订单 platform_raw = "4-Hour Delivery"（Grab 模板在平台栏位漏印
+  // "GrabExpress"，Gemini 照 127 schema 要求忠实回报原文）；旧逻辑整笔拒收 →
+  // 当天 Discrepancy_Flagged → 整份 Needs_Review。下面这组测试是对着这条真实
+  // 失败链条设计的，不是泛泛的 alias 测试。
+  // ⚠️ 诚实标注：订单号 PLAN-1-HWRQ5Q8GW4QH 跟金额（基本 6.00 + 调整 3.10 =
+  // 9.10）取自 Steven 提供的 debug 分析对该行的描述，不是直接从原 PDF 抽的
+  // （写这组测试的 session 没有拿到原 PDF）；platform_raw 原文跟 day 名称
+  // "Jumaat 3 April" 才是 debug 日志（真实 GAS 输出）本身印出来的。
+  // 刻意不用跟 142 同名的 const 解构：GAS 里 142 的函式/变数是全域，同名 const
+  // 会遮蔽全域、让 resolver 在初始化期间踩 TDZ（上面 resolveDoalTestDeps143_
+  // 那段注释讲的同一类问题）——改成挂在命名空间物件上。
+  function resolveDoalPlatformDeps143_() {
+    if (typeof require === 'function') {
+      const m = require('./142_DailyOrderAllocation.js');
+      return { classify: m.classifyPlatform_, normalize: m.normalizePlatformLabel_, names: m.PLATFORM_NAMES_, aliases: m.PLATFORM_ALIASES_ };
+    }
+    return { classify: classifyPlatform_, normalize: normalizePlatformLabel_, names: PLATFORM_NAMES_, aliases: PLATFORM_ALIASES_ }; // GAS：142 已经载入，直接引用全域
+  }
+  const platformDeps143 = resolveDoalPlatformDeps143_();
+
+  const canonicalPlatformCases = [
+    ['GrabFood', 'GrabFood'], ['GrabMart', 'GrabMart'], ['GrabExpress', 'GrabExpress'],
+    ['GrabExpress Instant -- Bike', 'GrabExpress'], ['GrabExpress Instant - Bike', 'GrabExpress']
+  ];
+  const canonicalPlatformActual = canonicalPlatformCases.map((c) => platformDeps143.classify(c[0]));
+  results.push({ name: 'Platform.规范名称: 既有三个规范名称的判定完全不变（含 Grab 自己 "Instant -- Bike" / "Instant - Bike" 两种写法）', pass: JSON.stringify(canonicalPlatformActual) === JSON.stringify(canonicalPlatformCases.map((c) => c[1])), actual: canonicalPlatformActual, expected: canonicalPlatformCases.map((c) => c[1]) });
+
+  results.push({ name: 'Platform.别名: debug 日志里的真实原文 "4-Hour Delivery" → GrabExpress', pass: platformDeps143.classify('4-Hour Delivery') === 'GrabExpress', actual: platformDeps143.classify('4-Hour Delivery'), expected: 'GrabExpress' });
+
+  const aliasVariants = ['4-hour delivery', '4 Hour Delivery', '4-Hour  Delivery', '4-Hour\nDelivery', '4\u2013Hour Delivery'];
+  const aliasVariantActual = aliasVariants.map((v) => platformDeps143.classify(v));
+  results.push({ name: 'Platform.别名: 大小写 / 连字号 / 空白 / 换行写法不同仍命中同一条（Grab 模板同一服务名的连字号写法本来就不一致）', pass: aliasVariantActual.every((p) => p === 'GrabExpress'), actual: aliasVariantActual, expected: '全部 GrabExpress' });
+
+  const aliasBoundaryActual = ['24-Hour Delivery', '4-Hour Deliveryman'].map((v) => platformDeps143.classify(v));
+  results.push({ name: 'Platform.别名: 完整词边界——"24-Hour Delivery" / "4-Hour Deliveryman" 不会被 "4-Hour Delivery" 别名误吞', pass: aliasBoundaryActual.every((p) => p === null), actual: aliasBoundaryActual, expected: [null, null] });
+
+  const unknownPlatformActual = ['Some New Service', '', null, undefined, 123].map((v) => platformDeps143.classify(v));
+  results.push({ name: 'Platform.fail-closed: 认不出来的名称（含空字串 / null / undefined / 非字串）仍然回 null——gate 没被拿掉', pass: unknownPlatformActual.every((p) => p === null), actual: unknownPlatformActual, expected: '全部 null' });
+
+  const normalizedAliasKeys = platformDeps143.aliases.map((a) => platformDeps143.normalize(a.alias));
+  results.push({
+    name: 'Platform.别名表完整性: 每一条都指向既有规范 platform、都带证据说明、正规化后不重复（没证据的名称不准加）',
+    pass: platformDeps143.aliases.every((a) => typeof a.alias === 'string' && a.alias.length > 0 && platformDeps143.names.indexOf(a.platform) !== -1 && typeof a.evidence === 'string' && a.evidence.length > 0) && new Set(normalizedAliasKeys).size === normalizedAliasKeys.length,
+    actual: platformDeps143.aliases, expected: '每条 alias/platform(∈规范名称)/evidence 齐全，正规化后不重复'
+  });
+
+  const fourHourPeriodStart = { year: 2026, month: 3, day: 30 };
+  const fourHourPeriodEnd = { year: 2026, month: 4, day: 5 };
+  const fourHourDay = { weekday_name: 'Jumaat', day: 3, month_name: 'April', day_block_complete: true, printed_daily_subtotal: 14.60 };
+  const fourHourOrder = { order_row_type: 'Tunggal', platform_raw: '4-Hour Delivery', order_ids_raw: ['PLAN-1-HWRQ5Q8GW4QH'], and_more_count: 0, payment_method_raw: 'Tanpa tunai', base_income: 6.00, other_income: 0, income_adjustment: 3.10, net_income: 9.10, source_page: 14, low_confidence: false };
+
+  const fourHourMapped = candidateFromGeminiOrderRow_(fourHourDay, fourHourOrder, fourHourPeriodStart, fourHourPeriodEnd);
+  results.push({
+    name: 'Phase4.映射(4-Hour Delivery): debug 那一笔 → valid，platform=GrabExpress，保留 platform_raw 原文，日期/金额不变',
+    pass: fourHourMapped.valid && fourHourMapped.candidate.platform === 'GrabExpress' && fourHourMapped.candidate.platform_raw === '4-Hour Delivery' && fourHourMapped.candidate.order_date === '2026-04-03' && fourHourMapped.candidate.base_income === 6 && fourHourMapped.candidate.income_adjustment === 3.1 && fourHourMapped.candidate.net_income === 9.1,
+    actual: fourHourMapped, expected: 'valid, platform=GrabExpress, platform_raw=4-Hour Delivery, order_date=2026-04-03, 6.00/3.10/9.10'
+  });
+
+  const unknownPlatformMapped = candidateFromGeminiOrderRow_(fourHourDay, Object.assign({}, fourHourOrder, { platform_raw: 'Some New Service' }), fourHourPeriodStart, fourHourPeriodEnd);
+  const unknownPlatformMessage = (unknownPlatformMapped.errors && unknownPlatformMapped.errors[0]) || '';
+  results.push({
+    name: 'Phase4.映射(未知 platform): 仍然拒收（fail closed），错误讯息带出 platform_raw / 订单号 / 页码，原有前缀文字不变',
+    pass: unknownPlatformMapped.valid === false && unknownPlatformMapped.candidate === null && unknownPlatformMessage.indexOf('platform_raw 无法归类到已知 platform：Some New Service') === 0 && unknownPlatformMessage.indexOf('PLAN-1-HWRQ5Q8GW4QH') !== -1 && unknownPlatformMessage.indexOf('第 14 页') !== -1,
+    actual: unknownPlatformMessage, expected: '以「platform_raw 无法归类到已知 platform：Some New Service」开头，含订单号跟「第 14 页」'
+  });
+
+  const fourHourGrabFoodOrder = Object.assign({}, geminiOrderSample, { order_ids_raw: ['A-8QLIOUFWWKVDAV'], source_page: 14 }); // 4.10 + 1.40 + 0 = 5.50
+  function fourHourDayCandidate_(orders, printedSubtotal) {
+    return {
+      extraction_scope: { first_page_seen: 1, last_page_seen: 24 },
+      days: [{ weekday_name: 'Jumaat', day: 3, month_name: 'April', day_block_complete: true, printed_daily_subtotal: printedSubtotal, orders }],
+      notes: ''
+    };
+  }
+  const fourHourVic = { netDeliveryIncome: 14.60, periodStartParts: fourHourPeriodStart, periodEndParts: fourHourPeriodEnd, verifiedIncomeId: 'CMP-INCOME-2026-W14-TEST' };
+  const fourHourDoc = { fileId: 'f1', documentId: 'doc1', totalPages: 24 };
+  const fourHourNow = new Date('2026-10-07T00:00:00Z');
+
+  const fourHourBatch = runGeminiOrderExtractionWithFallback_(fourHourDoc, fourHourVic, { extractor: mockExtractor_(fourHourDayCandidate_([fourHourGrabFoodOrder, fourHourOrder], 14.60), []), now: fourHourNow });
+  results.push({
+    name: 'Phase4.编排(重现 debug 失败链条): 同一天有 GrabFood + 4-Hour Delivery、subtotal 对得上 → Fully_Allocated，没有 nonRetryableErrors',
+    pass: fourHourBatch.allocationStatus === 'Fully_Allocated' && fourHourBatch.nonRetryableErrors.length === 0 && fourHourBatch.dailyAllocations.length === 1 && fourHourBatch.dailyAllocations[0].checksum_status === 'Matched' && fourHourBatch.dailyAllocations[0].date === '2026-04-03' && fourHourBatch.statementChecksum.status === 'Matched',
+    actual: { status: fourHourBatch.allocationStatus, errors: fourHourBatch.nonRetryableErrors, day: fourHourBatch.dailyAllocations[0] }, expected: 'Fully_Allocated / 0 errors / 2026-04-03 Matched'
+  });
+  results.push({
+    name: 'Phase4.编排: 4-Hour Delivery 那笔真的进了 orderRows（不是被丢弃后靠别处补平）、归为 GrabExpress，两笔合计 14.60',
+    pass: fourHourBatch.orderRows.length === 2 && fourHourBatch.orderRows.some((r) => r.platform_raw === '4-Hour Delivery' && r.platform === 'GrabExpress' && r.net_income === 9.1) && fourHourBatch.dailyAllocations[0].net_delivery_income === 14.6,
+    actual: fourHourBatch.orderRows, expected: '2 笔，其中一笔 platform_raw=4-Hour Delivery / platform=GrabExpress / 9.10'
+  });
+
+  const unknownPlatformBatch = runGeminiOrderExtractionWithFallback_(fourHourDoc, fourHourVic, { extractor: mockExtractor_(fourHourDayCandidate_([fourHourGrabFoodOrder, Object.assign({}, fourHourOrder, { platform_raw: 'Some New Service' })], 14.60), []), now: fourHourNow });
+  results.push({
+    name: 'Phase4.编排(对照组): 真的未知的 platform → 该笔被拒收、当天 Discrepancy_Flagged（差 -9.10）、整份 Needs_Review、nonRetryableErrors 指出 "Jumaat 3 April"——gate 仍然有效，且跟 debug 日志同一个形状',
+    pass: unknownPlatformBatch.allocationStatus === 'Needs_Review' && unknownPlatformBatch.nonRetryableErrors.length === 1 && unknownPlatformBatch.nonRetryableErrors[0].day === 'Jumaat 3 April' && unknownPlatformBatch.dailyAllocations[0].checksum_status === 'Discrepancy_Flagged' && unknownPlatformBatch.dailyAllocations[0].checksum_difference === -9.1,
+    actual: { status: unknownPlatformBatch.allocationStatus, errors: unknownPlatformBatch.nonRetryableErrors, day: unknownPlatformBatch.dailyAllocations[0] }, expected: 'Needs_Review / 1 error(Jumaat 3 April) / Discrepancy_Flagged -9.10'
+  });
+
+  const legacyAliasRow = parseOrderRowCandidate_('Tunggal 4-Hour Delivery PLAN-1- HWRQ5Q8GW4QH Tanpa tunai 6.00 3.10 9.10');
+  results.push({
+    name: 'Platform.文字解析路径（旧路径，生产零引用）: 同样走 classifyPlatform_，4-Hour Delivery 行判成 GrabExpress——两条路径共用同一个判定，没有各自一份白名单',
+    pass: legacyAliasRow.valid && legacyAliasRow.candidate.platform === 'GrabExpress' && legacyAliasRow.candidate.order_id_primary === 'PLAN-1-HWRQ5Q8GW4QH' && legacyAliasRow.candidate.net_income === 9.1,
+    actual: legacyAliasRow, expected: 'valid, GrabExpress, PLAN-1-HWRQ5Q8GW4QH, 9.10'
+  });
 
   // ---- 2026-09-24 新增（Runtime Readiness Audit 静态审计发现）：
   // document.totalPages 缺失时，绝对不能算出 NaN page range 还真的打去

@@ -82,6 +82,69 @@ var MONTH_NAME_TO_NUMBER_ = {
 
 var PLATFORM_NAMES_ = ['GrabExpress', 'GrabFood', 'GrabMart'];
 
+/**
+ * Grab 在 PDF 平台栏位印出来、但不含任何规范 platform 名称子字串的服务名称
+ * → 它所属的规范 platform。
+ *
+ * 2026-10-07 新增（真实 GAS 触发，Steven 提供的 debug 日志）：2026-W14
+ * （30 Mac–5 April 2026，跨月周）Jumaat 3 April 有一笔订单的平台栏位印的
+ * 是 "4-Hour Delivery"——Gemini 照 127 schema 的要求忠实回报了原文
+ * （platform_raw 本来就规定不正规化），但旧逻辑只认 PLATFORM_NAMES_ 子字串，
+ * 整笔被 candidateFromGeminiOrderRow_ 拒收 → 当天 checksum 差该笔金额 →
+ * 整份 Statement Needs_Review，跨月拆分被挡住。
+ *
+ * 为什么不是「未知 platform 也放行」：拒收未知 platform 是刻意的 fail-closed
+ * gate（CMP-P10）。这次它抓到的是真实的新原文——gate 在正常工作，不是
+ * gate 太严。正确的修法是把「已确认归属的」新名称显式加进这张表，不是拿掉
+ * gate；没有证据的名称不准加（见 143 的别名表完整性测试）。
+ *
+ * 比对规则见 classifyPlatform_：先照原本规则找规范名称子字串（行为完全不变），
+ * 找不到才查这张表。
+ *
+ * @type {Array<{alias: string, platform: string, evidence: string}>}
+ */
+var PLATFORM_ALIASES_ = [
+  {
+    alias: '4-Hour Delivery',
+    platform: 'GrabExpress',
+    evidence: 'Grab 官网 https://www.grab.com/my/express/ 把 4-Hour Delivery 列为 GrabExpress 的服务之一（跟 Instant、Scheduled 并列）；本 repo 两份真实 fixture（W01、W33）各 19 笔 PLAN-1- 订单号、各 19 个 GrabExpress 平台栏位，笔数一一对应（GrabExpress 订单号前缀见 extractOrderIds_）。'
+  }
+];
+
+/**
+ * 平台名称别名比对用的正规化：转小写，连续空白/连字号/下划线折成单一空格。
+ * Grab 自己的模板里同一个服务名称的连字号写法就不一致（真实 fixture 里
+ * "Instant -- Bike" 跟 "Instant - Bike" 并存），别名比对不能依赖字面一致。
+ * 只用在别名比对；规范名称比对的行为刻意保持跟 2026-10-07 以前完全一样，
+ * 不顺手放宽。
+ * @param {string} text
+ * @return {string}
+ */
+function normalizePlatformLabel_(text) {
+  return String(text).toLowerCase().replace(/[\s\-\u2013\u2014_]+/g, ' ').trim();
+}
+
+/**
+ * platform_raw（或文字解析路径的 row-block 原文）→ 规范 platform 名称；认不出来
+ * 回 null。这是全专案唯一做这个判定的地方（单一事实来源）：文字解析路径
+ * （parseOrderRowCandidate_）跟 Gemini 路径（candidateFromGeminiOrderRow_）都
+ * 呼叫这里，不各自保留一份白名单。
+ *
+ * 判定顺序：(1) 规范名称子字串（区分大小写，跟原本一样）；(2) 别名表——两边
+ * 正规化之后按完整词边界比对（"4-Hour Delivery" 命中，"24-Hour Delivery"
+ * 不命中）。都没命中 → null，由呼叫方显式落 errors（fail closed，不猜）。
+ * @param {string} platformRaw
+ * @return {(string|null)}
+ */
+function classifyPlatform_(platformRaw) {
+  if (typeof platformRaw !== 'string' || platformRaw === '') return null;
+  const canonical = PLATFORM_NAMES_.find((p) => platformRaw.indexOf(p) !== -1);
+  if (canonical) return canonical;
+  const haystack = ' ' + normalizePlatformLabel_(platformRaw) + ' ';
+  const hit = PLATFORM_ALIASES_.find((a) => haystack.indexOf(' ' + normalizePlatformLabel_(a.alias) + ' ') !== -1);
+  return hit ? hit.platform : null;
+}
+
 // Butiran/Jenis Tempahan 栏位常见的非订单号关键字——从 flatten 过的
 // row-block 文字里剔除这些之后，剩下形状像订单号的 token 才当作真的
 // 订单号。刻意用「排除已知关键字」而不是「只认已知前缀」，因为前缀
@@ -265,7 +328,7 @@ function parseOrderRowCandidate_(rowBlockRaw) {
   const rowType = /\bSekaligus\b/.test(flat) ? 'Sekaligus' : (/\bTunggal\b/.test(flat) ? 'Tunggal' : null);
   if (!rowType) errors.push(`无法判定 Jenis Tempahan（Tunggal/Sekaligus）：${flat.slice(0, 80)}`);
 
-  const platform = PLATFORM_NAMES_.find((p) => flat.indexOf(p) !== -1) || null;
+  const platform = classifyPlatform_(flat);
   if (!platform) errors.push(`无法判定 platform：${flat.slice(0, 80)}`);
 
   const ids = platform ? extractOrderIds_(flat, platform) : [];
@@ -588,9 +651,21 @@ function candidateFromGeminiOrderRow_(geminiDay, geminiOrder, periodStartParts, 
   if (KNOWN_WEEKDAY_MISMATCH_CHECK_(geminiDay.weekday_name, dateResult.isoDate)) {
     return { valid: false, errors: [`weekday_name (${geminiDay.weekday_name}) 跟解析出来的日期 ${dateResult.isoDate} 实际的星期几对不上`], candidate: null };
   }
-  const platform = PLATFORM_NAMES_.find((p) => geminiOrder.platform_raw.indexOf(p) !== -1) || null;
+  const platform = classifyPlatform_(geminiOrder.platform_raw);
   if (!platform) {
-    return { valid: false, errors: [`platform_raw 无法归类到已知 platform：${geminiOrder.platform_raw}`], candidate: null };
+    // fail closed（CMP-P10）：认不出来就明确拒收，不猜。错误讯息带出订单号 +
+    // 页码 + 已知名称，现场不用再手动翻 PDF 才找得到是哪一笔（2026-10-07
+    // 那次 debug 是靠人工翻 PDF 第 14 页才定位到的）。这个函式不抛例外——
+    // 组讯息用的栏位都做了防呆。
+    const idsForMessage = Array.isArray(geminiOrder.order_ids_raw) && geminiOrder.order_ids_raw.length > 0
+      ? geminiOrder.order_ids_raw.join(' / ')
+      : '（无订单号）';
+    const knownAliases = PLATFORM_ALIASES_.map((a) => a.alias).join('/');
+    return {
+      valid: false,
+      errors: [`platform_raw 无法归类到已知 platform：${geminiOrder.platform_raw}（订单号 ${idsForMessage}，PDF 第 ${geminiOrder.source_page} 页。已知：${PLATFORM_NAMES_.join('/')}；别名：${knownAliases}。如果这是 Grab 新增的服务名称，先确认它的归属再加进 PLATFORM_ALIASES_，不要直接放行）`],
+      candidate: null
+    };
   }
   const idPrefix = platform === 'GrabExpress' ? 'PLAN-1-' : 'A-';
   const idsText = geminiOrder.order_ids_raw.join(' / ') + (geminiOrder.and_more_count > 0 ? ` and ${geminiOrder.and_more_count}` : '');
@@ -605,6 +680,7 @@ function candidateFromGeminiOrderRow_(geminiDay, geminiOrder, periodStartParts, 
       order_date: dateResult.isoDate,
       order_row_type: geminiOrder.order_row_type,
       platform,
+      platform_raw: geminiOrder.platform_raw, // PDF 原文；platform 是我们判定的规范名称，两者并存才查得到别名判定的依据
       order_id_primary: geminiOrder.order_ids_raw[0] || null,
       order_id_raw: idsText,
       bundled_order_count: geminiOrder.order_row_type === 'Tunggal' ? 1 : (geminiOrder.order_ids_raw.length + geminiOrder.and_more_count),
@@ -1063,6 +1139,10 @@ if (typeof module !== 'undefined') {
     WEEKDAY_NAMES_,
     ENGLISH_WEEKDAY_NAMES_,
     MONTH_NAME_TO_NUMBER_,
+    PLATFORM_NAMES_,
+    PLATFORM_ALIASES_,
+    normalizePlatformLabel_,
+    classifyPlatform_,
     isoDateFromYmd_,
     isValidYmd_,
     enumerateYearMonthsInPeriod_,
