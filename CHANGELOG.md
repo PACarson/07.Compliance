@@ -18,6 +18,18 @@
 
 ---
 
+## 2026-10-07 — Platform 别名 "4-Hour Delivery"（真实 GAS 触发的 fail-closed gate 命中）+ 143 测试档的 GAS-scope 既有缺陷修复 + 扫描结果排序 + PDF 汇入恢复中心 UI（ADR-006）+ Recovery 后端 mutation testing
+
+- **类型**: Production code changes（142：`PLATFORM_ALIASES_`/`normalizePlatformLabel_`/`classifyPlatform_`，生产路径与旧死代码路径共用同一个判定；170.html：扫描结果排序下拉 + 纯函数 `sortScanFiles`；**170.html：「PDF 汇入恢复中心」区块——Pending/Failed/Completed 分页、单档 Retry、选取多档 Retry、Filter、Refresh；后端 `170_OperatorConsole.js` 一行没动**）+ Verification-only changes（Node + mutation + GAS 式 scope 模拟 + 整份真实 W14 数据端到端，非真实 GAS；143 新增 17 项、171 新增 38 项：13 排序 + 21 Recovery UI + 4 项后端 mutation 缺口断言，171 是这个专案第一个会读 170.html 的自动化测试）+ 测试档缺陷修复（143 的 resolver 提到顶层）
+- **流程**: Code → Verify → Governance（Steven 提供 `debug.pdf` 真实 GAS 日志、明确指示"从 debug 开始写代码/修代码"；根因先对照实际代码核实，再修，再写治理文件）。Steven 2026-10-04 的 coding 暂停已于本窗口由他解除（顺序：先读 checkpoint → 先修 debug → 之后才回到 checkpoint 的项目）；同日上传的 `Emergency_Stop_Handoff_Checkpoint_2026-10-04.md` 写明该 checkpoint 本身不授予恢复权限——恢复授权来自 Steven 本窗口的明确指示
+- 详见 `ADR-005` 新增 2026-10-07 段落、`ADR-006` 实作范围表下方的一致性核对说明、`VERIFICATION_STATUS.md` 新增第 8–11 项、`900_Constitution.js` 的 `changelog` 数组同日期条目
+- Schema changes: NONE　Extraction-contract changes: NONE（`127` 的 Gemini schema/prompt 完全没动——Gemini 抽得没错）
+- **别名证据来自 statement 原件本身**（`2026-W14.pdf`）：印刷的「Pendapatan asas Express」53.50 = 7 笔 GrabExpress(Instant) 47.50 + 这笔 4-Hour Delivery 的 6.00；7 天印刷小计合计 = 1,297.80 = 逐笔加总。用原件核对时发现 `debug.pdf` 里外部分析把 RM207.70 当成 3 April 的小计是错的（那是 4 April 的；3 April 是 RM222.20），机制不变
+- **Mutation testing（ADR-006 先前记录的缺口，本次补做）**：Recovery 后端 26 种变异，初次有 4 个幸存者——`Completed` 的 `incomeIds` 取错栏位、`Failed` 的 `lastAttemptAt` 被拿掉、`consoleRetrySelectedFiles_` 拿掉 `isRetry=true`（会让每次「重试」都新增重复的 Documents 记录，总数 2 → 4，原有断言只数「原本那两个 id 还在」所以照样通过）、回传少了 `rebuild`；补 4 条断言（只新增、没改动 Steven 原有测试）后全部被抓到。Recovery UI 30 种变异，1 个幸存（Completed 分页「不能重试」的守卫没人测到），补测试后全部被抓到
+- **Recovery Center UI 的设计取舍**（Steven 尚未逐项审阅）：一律手动「刷新状态」才读取、页面载入不自动打后端；没有自动重试、没有「全部重试」；「重试选中的」只动选中 ∩ 目前看得到 ∩ 有 Drive file id 的文件；后端回传 null/格式不对时明确显示错误、不崩；ADR-006 整体架构仍是 `PROPOSED`
+- **一致性核对（已解决）**：回到 handoff 时，当时上传的 repo 快照缺 handoff 描述的 `127` 3 层模型链/重试预算、`112`/`170.js` 对应呼叫、`170.js` 的 Recovery Center 后端及 `128`/`171` 对应测试，但治理文件已把它们写成已实作；同日 Steven 上传了那 5 个档案，核对后合并，全部测试通过（见 `VERIFICATION_STATUS.md` 第 11 项）
+- **诚实记录**：真实 GAS 尚未重新执行确认（包括 Recovery Center UI——真实浏览器/HTML Service 的渲染、`consoleGetRecoveryStatus` 在真实 `google.script.run` 下的传输都没验证过）；端到端测试里的「Gemini」是确定性替身（pdfplumber 对原件逐笔抽出），证明管线行为、不证明真实 Gemini 抽出同一份候选；排序没在真实浏览器看过；别名表结构、共用判定函式、`platform_raw` 新增、排序下拉等实作细节 Steven 尚未逐项审阅
+
 ## 2026-10-04 — PDF Import Recovery Center：审计 + 后端实作（ADR-006 新增，UI 未开始）+ 本窗口完整核对 checkpoint
 
 - **类型**: Governance changes（新增 ADR-006）+ Production code changes（170：`consoleGetRecoveryStatus_`/`summarizeEvidenceFailure_`/`consoleRetrySelectedFiles_`/`realEvidenceScanner_`）+ Verification-only changes（Node 测试，非真实 GAS）

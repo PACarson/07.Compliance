@@ -496,6 +496,11 @@ function runAllOperatorConsoleTests() {
   assertEqual_('Recovery·Failed 的 attemptCount 是数出来的证据档份数（2 份），不是新发明的持久化欄位', recStatus1.failed[0].attemptCount, 2, results);
   assertEqual_('Recovery·已经进 Verified_Income 的文件归 Completed，不出现在 Pending/Failed（不会被重复标记成需要救援）', { completed: recStatus1.completed.map((c) => c.documentId), notInPending: recStatus1.pending.some((p) => p.documentId === 'CMP-DOC-DONE'), notInFailed: recStatus1.failed.some((f) => f.documentId === 'CMP-DOC-DONE') }, { completed: ['CMP-DOC-DONE'], notInPending: false, notInFailed: false }, results);
   assertEqual_('Recovery·Completed 只带最少欄位（documentId/incomeIds/period），不复制 Verified_Income 整行内容（Section 3C：不建第二个 source of truth）', Object.keys(recStatus1.completed[0]).sort(), ['documentId', 'driveFileId', 'drivePath', 'incomeIds', 'period'].sort(), results);
+  // 2026-10-07 补上（对 Recovery 后端做 mutation testing 时发现的缺口，ADR-006 先前记录「后端测试没做过 mutation testing」）：
+  // 上面只验证 Completed 的「栏位名称」、没验证值——incomeIds 取错栏位（例如误拿 period）也不会被发现；
+  // Failed 的 lastAttemptAt 则完全没有任何测试，整个栏位被拿掉也不会被发现。
+  assertEqual_('Recovery·Completed 的 incomeIds / period / drivePath 是 Verified_Income 与 Documents 里的值本身（不只是栏位名称对）', { incomeIds: recStatus1.completed[0].incomeIds, period: recStatus1.completed[0].period, drivePath: recStatus1.completed[0].drivePath }, { incomeIds: ['CMP-INCOME-2026-W07'], period: '2026-W07', drivePath: 'CMP-DOC-DONE.pdf' }, results);
+  assertEqual_('Recovery·Failed 的 lastAttemptAt 是「最新」一份证据档的 lastUpdated（11:00，不是 10:00 那份）', recStatus1.failed[0].lastAttemptAt, '2026-10-01T11:00:00.000Z', results);
 
   // ---- evidenceScanner 没接上（Node 测试环境常态，或 Script Properties 没设定）→ 老实说判断不出来，不是假装都是 Pending ----
   const depsRecNoEvidence = fakeConsoleDeps_([]);
@@ -530,6 +535,11 @@ function runAllOperatorConsoleTests() {
   const selResult = consoleRetrySelectedFiles_([{ fileId: 'drive-r1', fileName: 'r1.pdf' }, { fileId: 'drive-r2', fileName: 'r2.pdf' }], depsRetrySel);
   assertEqual_('Retry Selected·每个文件各自回报结果，不是整批只给一个「成功/失败」（部分失败要看得出是哪几份）', selResult.results.map((r) => r.fileId), ['drive-r1', 'drive-r2'], results);
   assertEqual_('Retry Selected·用的是既有的 consoleImportOneDriveFile_（isRetry=true 走的 skipImport 路径），不是另一套汇入引擎——两份文件都沿用各自既有的 document_id，不会产生新的 Documents 记录', depsRetrySel._accessor.getAllRows('Documents').filter((r) => r[0] === 'CMP-DOC-R1' || r[0] === 'CMP-DOC-R2').length, 2, results);
+  // 2026-10-07 补上（对 Recovery 后端做 mutation testing 时发现的缺口）：上一条只数「原本那两个 document_id 还在」——
+  // 就算每次重试都偷偷新增重复的 Documents 记录，这两个 id 仍然各有 1 笔、数出来永远是 2，抓不到。实测把 isRetry=true
+  // 拿掉，Documents 会多出 2 笔重复记录（总数 2 → 4），上一条照样通过；所以另外直接比对 Documents 全部的 document_id。
+  assertEqual_('Retry Selected·没有新增任何 Documents 记录：Documents 全部的 document_id 仍然只有原本那两个（拿掉 isRetry=true 会多出重复记录）', depsRetrySel._accessor.getAllRows('Documents').map((r) => r[0]), ['CMP-DOC-R1', 'CMP-DOC-R2'], results);
+  assertEqual_('Retry Selected·回传有 rebuild（前端靠它刷新 Dashboard/月度总览），形状跟 consoleBatchImport_ 的一样（有 monthlySummaries 阵列）', { type: typeof selResult.rebuild, monthlySummaries: Array.isArray(selResult.rebuild && selResult.rebuild.monthlySummaries) }, { type: 'object', monthlySummaries: true }, results);
 
   // ---- Retry Selected 比照 consoleBatchImport_ 的时间预算安全机制（2026-10-01 consoleBatchImport 真实被 GAS 硬杀的同一个理由，Retry Selected 不能重蹈覆辙）----
   const depsRetrySelBudget = fakeConsoleDeps_([]);
@@ -552,6 +562,437 @@ function runAllOperatorConsoleTests() {
   seedVerified_(depsNoDup, 'CMP-INCOME-2026-W16', '2026-W16', 'CMP-DOC-NODUP');
   const recStatusNoDup = consoleGetRecoveryStatus_(depsNoDup);
   assertEqual_('Retry·已经 Completed 的文件不会出现在 Pending/Failed 里，Recovery Center UI 不会给它一个 Retry 按钮（避免误触重新发布）', { inPending: recStatusNoDup.pending.some((p) => p.documentId === 'CMP-DOC-NODUP'), inFailed: recStatusNoDup.failed.some((f) => f.documentId === 'CMP-DOC-NODUP') }, { inPending: false, inFailed: false }, results);
+
+  // ============ 170_OperatorConsole.html：扫描结果排序（2026-10-07；Steven 先前明确提过的需求）============
+  // 只能在 Node 跑（要读 HTML 文件、用 vm 执行）；GAS 里没有 fs/vm，整段略过，不算失败。
+  // 做法：用括号配对从 HTML 的 <script> 区块抽出「真正的那份函数原始码」丢进 vm 沙盒执行——
+  // 测的是 HTML 里实际的代码，不是另外重写一份；render 用一个最小的假 document。
+  // 这是这个专案第一个会读 170.html 的自动化测试，顺便补上「HTML script 区块语法合法」这个以前
+  // 完全没有任何测试挡着的缺口。真实浏览器/HTML Service 的呈现仍然靠文件末尾的人工验证清单。
+  if (typeof require === 'function') {
+    const fsHtml = require('fs');
+    const pathHtml = require('path');
+    const vmHtml = require('vm');
+    const htmlText = fsHtml.readFileSync(pathHtml.join(__dirname, '170_OperatorConsole.html'), 'utf8');
+    const scriptMatch = htmlText.match(/<script>([\s\S]*?)<\/script>/);
+    const scriptText = scriptMatch ? scriptMatch[1] : '';
+
+    let scriptParses = false;
+    try { new vmHtml.Script(scriptText); scriptParses = true; } catch (e) { scriptParses = false; }
+    assertEqual_('170.html·<script> 区块语法合法（以前没有任何测试会抓到 HTML 里的语法错误）', scriptParses, true, results);
+
+    // 从 script 原始码里抽出 `function name(...) { ... }` 整段（跳过字串里的大括号）
+    const extractFn = function (src, name) {
+      const start = src.indexOf('function ' + name + '(');
+      if (start === -1) throw new Error('170.html 里找不到 function ' + name);
+      let i = src.indexOf('{', src.indexOf(')', start));
+      let depth = 0;
+      let prevSig = ''; // 上一个非空白字元：用来分辨「/」是正则字面量的开头还是除号
+      for (; i < src.length; i++) {
+        const ch = src[i];
+        const nx = src[i + 1];
+        if (ch === '/' && nx === '/') { while (i < src.length && src[i] !== '\n') i++; continue; }
+        if (ch === '/' && nx === '*') { i = src.indexOf('*/', i + 2) + 1; continue; }
+        if (ch === "'" || ch === '"' || ch === '`') {
+          const q = ch;
+          i++;
+          while (i < src.length && src[i] !== q) { if (src[i] === '\\') i++; i++; }
+          prevSig = q;
+          continue;
+        }
+        if (ch === '/' && (prevSig === '' || '(,=:[!&|?{};+-*%<>~^'.indexOf(prevSig) !== -1)) { // 正则字面量（里面可能有引号，例如 /"/g）
+          i++;
+          let inClass = false;
+          while (i < src.length) {
+            const c = src[i];
+            if (c === '\\') { i += 2; continue; }
+            if (c === '[') inClass = true; else if (c === ']') inClass = false; else if (c === '/' && !inClass) break;
+            i++;
+          }
+          prevSig = '/';
+          continue;
+        }
+        if (ch === '{') depth++;
+        if (ch === '}') { depth--; if (depth === 0) return src.slice(start, i + 1); }
+        if (!/\s/.test(ch)) prevSig = ch;
+      }
+      throw new Error('function ' + name + ' 的大括号没有配对');
+    };
+
+    const scanEl = { innerHTML: '' };
+    const sortSandbox = {
+      state: { scan: null, scanSort: 'original' },
+      document: {
+        getElementById(id) { return id === 'scanResults' ? scanEl : { innerHTML: '' }; },
+        createElement() {
+          let text = '';
+          return {
+            set textContent(v) { text = v; },
+            get innerHTML() { return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+          };
+        }
+      }
+    };
+    vmHtml.createContext(sortSandbox);
+    vmHtml.runInContext(['sortScanFiles', 'escapeHtml', 'changeScanSort', 'renderScanResults'].map((n) => extractFn(scriptText, n)).join('\n'), sortSandbox);
+    const sortFn = (files, mode) => JSON.parse(JSON.stringify(sortSandbox.sortScanFiles(files, mode))); // 跨 vm realm 的阵列，转回本 realm 才好比对
+    const names = (files, mode) => sortFn(files, mode).map((f) => f.name);
+    const named = (...ns) => ns.map((n, i) => ({ id: 'f' + i, name: n }));
+
+    const origFiles = named('b.pdf', 'a.pdf', 'c.pdf');
+    const origSnapshot = JSON.stringify(origFiles);
+    const keptOriginal = sortSandbox.sortScanFiles(origFiles, 'original');
+    assertEqual_('170.html·sortScanFiles original：维持 Drive 回传的原始顺序', names(origFiles, 'original'), ['b.pdf', 'a.pdf', 'c.pdf'], results);
+    assertEqual_('170.html·sortScanFiles 不改动传入的阵列（回传的是新阵列；原始顺序留着才能切回去）', { sameRef: keptOriginal === origFiles, inputUnchanged: JSON.stringify(origFiles) === origSnapshot }, { sameRef: false, inputUnchanged: true }, results);
+
+    const weekFiles = named('2026-W10.pdf', '2026-W2.pdf', '2026-W06.pdf');
+    assertEqual_('170.html·sortScanFiles 升序：数字按数值比（W2 < W06 < W10，不是字串顺序）', names(weekFiles, 'name_asc'), ['2026-W2.pdf', '2026-W06.pdf', '2026-W10.pdf'], results);
+    assertEqual_('170.html·sortScanFiles 降序：跟升序严格相反', names(weekFiles, 'name_desc'), ['2026-W10.pdf', '2026-W06.pdf', '2026-W2.pdf'], results);
+    // 光看 A.pdf < b.pdf 抓不到「sensitivity 被改成分大小写」这种破坏（第一层字母顺序就决定了）；
+    // 所以另外用「只差大小写的两个名字」当平手：不分大小写时它们是平手、保持原始顺序，分大小写就会被拆开。
+    assertEqual_('170.html·sortScanFiles 不分大小写（A.pdf 排在 b.pdf 前面；只差大小写的 A.pdf / a.pdf 视为平手、保持原始顺序）', { letters: names(named('b.pdf', 'A.pdf', 'c.pdf'), 'name_asc'), tieAsc: names(named('A.pdf', 'a.pdf'), 'name_asc'), tieDesc: names(named('A.pdf', 'a.pdf'), 'name_desc') }, { letters: ['A.pdf', 'b.pdf', 'c.pdf'], tieAsc: ['A.pdf', 'a.pdf'], tieDesc: ['A.pdf', 'a.pdf'] }, results);
+
+    const tieFiles = [{ id: 'first', name: 'x.pdf' }, { id: 'second', name: 'x.pdf' }, { id: 'third', name: 'a.pdf' }];
+    assertEqual_('170.html·sortScanFiles 同名时保持原始顺序当 tie-breaker（升序、降序都一样，降序不会把同名反转）', { asc: sortFn(tieFiles, 'name_asc').map((f) => f.id), desc: sortFn(tieFiles, 'name_desc').map((f) => f.id) }, { asc: ['third', 'first', 'second'], desc: ['first', 'second', 'third'] }, results);
+
+    let edgeThrew = false;
+    let edgeResults = null;
+    try {
+      edgeResults = {
+        unknownMode: names(origFiles, 'bogus'),
+        nullFiles: sortFn(null, 'name_asc'),
+        undefinedFiles: sortFn(undefined, 'name_desc'),
+        missingName: sortFn([{ id: 'n1' }, { id: 'n2', name: 'a.pdf' }], 'name_asc').map((f) => f.id)
+      };
+    } catch (e) { edgeThrew = true; }
+    assertEqual_('170.html·sortScanFiles 边界：未知 mode 当 original、null/undefined 回空阵列、缺 name 不抛错（缺 name 的当空字串排最前）', { edgeThrew, edgeResults }, { edgeThrew: false, edgeResults: { unknownMode: ['b.pdf', 'a.pdf', 'c.pdf'], nullFiles: [], undefinedFiles: [], missingName: ['n1', 'n2'] } }, results);
+
+    // render：用真正的 renderScanResults / changeScanSort，不是另外重写。
+    // 第三个文件名刻意含 < >，确认 escapeHtml 没被排序改动弄丢；名字用字母开头，避免测试依赖「标点 vs 数字」这种
+    // 各 ICU 版本可能不同的排序细节（数字 < 字母 在所有 collation 都成立）。
+    const renderFiles = [
+      { id: 'r1', name: '2026-W10.pdf', alreadyImported: true },
+      { id: 'r2', name: '2026-W2.pdf', alreadyImported: false },
+      { id: 'r3', name: 'a<b>.pdf', alreadyImported: false }
+    ];
+    const renderOrder = () => (scanEl.innerHTML.match(/<span class="file-name">(.*?)<\/span>/g) || []).map((m) => m.replace(/<\/?span[^>]*>/g, ''));
+    sortSandbox.state.scan = { files: renderFiles };
+    sortSandbox.state.scanSort = 'original';
+    sortSandbox.renderScanResults(sortSandbox.state.scan);
+    assertEqual_('170.html·render 预设（original）：顺序跟扫描回传一致，标题数字不变（3 份 PDF，2 份待处理，1 份已汇入）', { order: renderOrder(), heading: /扫描结果 — 3 份 PDF，2 份待处理，1 份已汇入/.test(scanEl.innerHTML) }, { order: ['2026-W10.pdf', '2026-W2.pdf', 'a&lt;b&gt;.pdf'], heading: true }, results);
+
+    sortSandbox.changeScanSort('name_desc');
+    const selectedOptions = (scanEl.innerHTML.match(/<option value="([a-z_]+)" selected>/g) || []).map((m) => m.replace(/.*value="([a-z_]+)".*/, '$1'));
+    assertEqual_('170.html·changeScanSort("name_desc")：state 更新、重新 render 成降序、下拉只有「降序」被选中', { stateSort: sortSandbox.state.scanSort, order: renderOrder(), selected: selectedOptions }, { stateSort: 'name_desc', order: ['a&lt;b&gt;.pdf', '2026-W10.pdf', '2026-W2.pdf'], selected: ['name_desc'] }, results);
+
+    sortSandbox.changeScanSort('name_asc');
+    assertEqual_('170.html·changeScanSort("name_asc")：切回升序（数字按数值：W2 在 W10 前面）', renderOrder(), ['2026-W2.pdf', '2026-W10.pdf', 'a&lt;b&gt;.pdf'], results);
+    assertEqual_('170.html·render 不改动 state.scan.files 的顺序，也没有漏掉 escapeHtml（文件名里的 < > 仍然被转义）', { fileIds: sortSandbox.state.scan.files.map((f) => f.id), escaped: scanEl.innerHTML.indexOf('a<b>') === -1 }, { fileIds: ['r1', 'r2', 'r3'], escaped: true }, results);
+
+    sortSandbox.state.scan = { files: [] };
+    sortSandbox.renderScanResults(sortSandbox.state.scan);
+    assertEqual_('170.html·资料夹没有 PDF：仍然显示原本的空状态，不渲染排序下拉', { empty: scanEl.innerHTML.indexOf('没有找到 PDF') !== -1, hasSelect: scanEl.innerHTML.indexOf('<select') !== -1 }, { empty: true, hasSelect: false }, results);
+
+    // ============ PDF Import Recovery Center UI（2026-10-07；ADR-006 的 UI 部分）============
+    // 同一套做法：从 HTML 抽出真正的函数丢进 vm，配假的 DOM 跟假的 google.script.run——后者由测试手动决定「后端什么时候
+    // 回来」，才测得到「请求进行中」的状态。测的是 UI 逻辑 + render 输出 + 对后端的呼叫契约；真实 GAS 环境下
+    // google.script.run 的传输行为、真实浏览器的呈现，仍然靠文件末尾的人工验证清单。
+    const plain = (x) => JSON.parse(JSON.stringify(x));
+    const REC_FNS = ['escapeHtml', 'escapeJs', 'escapeHtmlAttr', 'jsArg', 'money', 'stageBadge', 'reconBadge', 'showToast',
+      'recoveryIsTab', 'recoveryIsRetryTab', 'recoveryItemsForTab', 'recoveryCanRetry', 'recoveryMatchesFilter', 'recoveryVisibleItems',
+      'recoverySelectedRefs', 'recoveryFindItem', 'formatAttemptTime', 'renderRecoveryStatusLine', 'renderRecoveryTabs', 'renderRecoveryActions',
+      'renderRecoverySummary', 'renderRecoveryItem', 'renderRecoveryList', 'renderRecovery', 'recoverySetTab', 'recoverySetFilter', 'recoveryToggle',
+      'recoveryToggleAllVisible', 'recoveryMarkImported', 'loadRecoveryStatus', 'recoveryRetryOne', 'recoveryRetrySelected'];
+    const recStateStmt = scriptText.match(/state\.recovery = \{[^;]*\};/)[0];
+    const recTabsStmt = scriptText.match(/var RECOVERY_TABS = [^;]*;/)[0];
+    const makeRec = function () {
+      const els = {};
+      const el = (id) => els[id] || (els[id] = { id, innerHTML: '', textContent: '', value: '', disabled: false, dataset: {}, classList: { add() {}, remove() {} } });
+      const calls = [];
+      const pending = [];
+      const dashboards = [];
+      const chain = (success, failure) => new Proxy({}, {
+        get(_, name) {
+          if (name === 'withSuccessHandler') return (fn) => chain(fn, failure);
+          if (name === 'withFailureHandler') return (fn) => chain(success, fn);
+          return (...args) => { const c = { name, args, success, failure }; calls.push(c); pending.push(c); };
+        }
+      });
+      const sb = {
+        document: {
+          getElementById: el,
+          createElement() { let t = ''; return { set textContent(v) { t = v; }, get innerHTML() { return String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); } }; }
+        },
+        google: { script: { run: chain(null, null) } },
+        setTimeout() {}, Date, JSON, Object, Array, String, isNaN,
+        renderDashboard(d) { dashboards.push(d); },
+        state: { scan: null, scanSort: 'original' }
+      };
+      vmHtml.createContext(sb);
+      vmHtml.runInContext(REC_FNS.map((n) => extractFn(scriptText, n)).join('\n') + '\n' + recStateStmt + '\n' + recTabsStmt, sb);
+      return {
+        S: sb, calls, pending, dashboards, el,
+        text: (id) => (els[id] ? els[id].innerHTML : ''),
+        toast: () => el('toast').textContent,
+        resolve(i, value) { const c = pending.splice(i, 1)[0]; if (c.success) c.success(value); return c; },
+        reject(i, err) { const c = pending.splice(i, 1)[0]; if (c.failure) c.failure(err); return c; }
+      };
+    };
+    const recPending = [
+      { documentId: 'DOC-P1', driveFileId: 'FID-P1', drivePath: '2026-W15.pdf', period: '2026-04-06~2026-04-12', status: 'Pending', attemptCount: 0 },
+      { documentId: 'DOC-P2', driveFileId: 'FID-P2', drivePath: '2026-W16.pdf', status: 'Pending', evidenceUnavailable: true }
+    ];
+    const recFailed = [
+      { documentId: 'DOC-F1', driveFileId: 'FID-F1', drivePath: '2026-W06.pdf', period: '2026-02-02~2026-02-08', status: 'Failed', lastError: 'LLM API 回传错误：This model is currently experiencing high demand', lastAttemptAt: '2026-10-02T03:14:00.000Z', attemptCount: 3 },
+      { documentId: 'DOC-F2', driveFileId: 'FID-F2', drivePath: '2026-W07.pdf', status: 'Failed', lastError: '候选资料已抽取出来，但后续验证没有通过', lastAttemptAt: '2026-10-03', attemptCount: 1 },
+      { documentId: 'DOC-F3\'x"<y>', driveFileId: '', drivePath: '<img src=x onerror=alert(1)>.pdf', status: 'Failed', lastError: 'x', lastAttemptAt: null, attemptCount: 1 }
+    ];
+    const recCompleted = [{ documentId: 'DOC-C1', driveFileId: 'FID-C1', drivePath: '2026-W14.pdf', incomeIds: ['CMP-INCOME-2026-W14'], period: '2026-03-30~2026-04-05' }];
+    const recStatus = (over) => plain(Object.assign({ evidenceFolderConfigured: true, pending: recPending, failed: recFailed, completed: recCompleted }, over || {}));
+    const recLoaded = function (over) { const h = makeRec(); h.S.loadRecoveryStatus(); h.resolve(0, recStatus(over)); return h; };
+    const allTrue = (checks) => Object.keys(checks).reduce((o, k) => { o[k] = true; return o; }, {});
+
+    const hf = makeRec();
+    const mf = (item, text) => hf.S.recoveryMatchesFilter(item, text);
+    assertEqual_('170.html·Recovery·Filter：不分大小写、空白分隔的每个词都要命中；比对路径/document id/期间/失败原因/income id；空筛选全过、缺栏位不抛错',
+      [mf(recFailed[0], 'w06'), mf(recFailed[0], 'W06 HIGH'), mf(recFailed[0], 'doc-f1'), mf(recFailed[0], '2026-02-02'), mf(recFailed[0], 'high demand'), mf(recCompleted[0], 'cmp-income-2026-w14'), mf(recFailed[0], 'w06 nothere'), mf(recFailed[1], 'w06'), mf(recFailed[0], ''), mf({}, ''), mf({}, 'x')],
+      [true, true, true, true, true, true, false, false, true, true, false], results);
+
+    const hv = recLoaded();
+    const vis = (tab, f) => plain(hv.S.recoveryVisibleItems(hv.S.state.recovery.data, tab, f)).map((i) => i.documentId);
+    assertEqual_('170.html·Recovery·分页 + Filter 取得「目前看得到的」清单；未知分页回空阵列',
+      { failed: vis('failed', ''), failedW06: vis('failed', 'w06'), pending: vis('pending', ''), completed: vis('completed', ''), unknown: vis('bogus', ''), none: vis('failed', 'zzz') },
+      { failed: ['DOC-F1', 'DOC-F2', 'DOC-F3\'x"<y>'], failedW06: ['DOC-F1'], pending: ['DOC-P1', 'DOC-P2'], completed: ['DOC-C1'], unknown: [], none: [] }, results);
+
+    const hs = recLoaded();
+    const recS = hs.S.state.recovery;
+    // 刻意连一个 Completed 的 DOC-C1 也塞进选取：真实使用里它只可能是「选了之后才变成 Completed」的残留，
+    // 没有这一笔，Completed 分页的守卫（永远回空）就没有任何测试会碰到
+    ['DOC-F1', 'DOC-F2', 'DOC-F3\'x"<y>', 'DOC-P1', 'DOC-C1', 'ghost'].forEach((id) => { recS.selected[id] = true; });
+    const refsFailed = plain(hs.S.recoverySelectedRefs(recS));
+    recS.filter = 'w06';
+    const refsFiltered = plain(hs.S.recoverySelectedRefs(recS));
+    recS.filter = ''; recS.tab = 'completed';
+    const refsCompleted = plain(hs.S.recoverySelectedRefs(recS));
+    recS.tab = 'pending';
+    const refsPending = plain(hs.S.recoverySelectedRefs(recS));
+    assertEqual_('170.html·Recovery·「重试选中的」只动：选中 ∩ 目前分页+筛选看得到 ∩ 有 Drive file id；被筛掉的选取不会被偷偷重试；Completed 分页永远是空',
+      { failedTab: refsFailed, failedTabFiltered: refsFiltered, completedTab: refsCompleted, pendingTab: refsPending },
+      { failedTab: [{ fileId: 'FID-F1', fileName: '2026-W06.pdf' }, { fileId: 'FID-F2', fileName: '2026-W07.pdf' }], failedTabFiltered: [{ fileId: 'FID-F1', fileName: '2026-W06.pdf' }], completedTab: [], pendingTab: [{ fileId: 'FID-P1', fileName: '2026-W15.pdf' }] }, results);
+
+    const ft = hv.S.formatAttemptTime;
+    assertEqual_('170.html·Recovery·formatAttemptTime：空 → —；不是日期就原样；纯日期原样；完整时间 → YYYY-MM-DD HH:MM',
+      { empty: ft(null), invalid: ft('not a date'), dateOnly: ft('2026-10-03'), full: /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(ft('2026-10-02T03:14:00.000Z')) },
+      { empty: '—', invalid: 'not a date', dateOnly: '2026-10-03', full: true }, results);
+
+    const hr = recLoaded();
+    const failedHtml = hr.text('recoveryList');
+    const failedChecks = {
+      reason: failedHtml.indexOf('失败原因：LLM API 回传错误：This model is currently experiencing high demand') !== -1,
+      attempts: failedHtml.indexOf('证据档共 3 份') !== -1,
+      time: /最近一次尝试 \d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(failedHtml),
+      badge: failedHtml.indexOf('<span class="badge failed">Failed</span>') !== -1,
+      retryButton: failedHtml.indexOf('onclick="recoveryRetryOne(\'DOC-F1\')"') !== -1,
+      checkbox: failedHtml.indexOf('onchange="recoveryToggle(\'DOC-F1\', this.checked)"') !== -1,
+      nameEscaped: failedHtml.indexOf('<img') === -1 && failedHtml.indexOf('&lt;img src=x onerror=alert(1)&gt;.pdf') !== -1,
+      argEncoding: failedHtml.indexOf('recoveryToggle(\'DOC-F3\\\'x&quot;&lt;y&gt;\', this.checked)') !== -1,
+      noRetryWithoutFileId: failedHtml.indexOf('recoveryRetryOne(\'DOC-F3') === -1,
+      noFileIdNote: failedHtml.indexOf('缺少 Drive file id') !== -1,
+      defaultTabIsFailed: hr.S.state.recovery.tab === 'failed'
+    };
+    assertEqual_('170.html·Recovery·Failed 清单渲染：失败原因/次数/时间、Retry 与勾选框的 onclick；文件名跟 onclick 参数都经过转义；没有 Drive file id 的不给 Retry', failedChecks, allTrue(failedChecks), results);
+
+    hr.S.recoverySetTab('pending');
+    const pendingHtml = hr.text('recoveryList');
+    const pendingChecks = {
+      badge: pendingHtml.indexOf('<span class="badge pending">Pending</span>') !== -1,
+      noEvidence: pendingHtml.indexOf('证据资料夹里还没有这份文件的抽取证据') !== -1,
+      evidenceUnavailable: pendingHtml.indexOf('证据资料夹没接上，判断不出是否尝试过') !== -1,
+      retryButton: pendingHtml.indexOf('recoveryRetryOne(\'DOC-P1\')') !== -1,
+      selectAll: pendingHtml.indexOf('全选目前列出的 2 份') !== -1,
+      activeTab: hr.text('recoveryTabs').indexOf('rec-tab secondary active" onclick="recoverySetTab(\'pending\')"') !== -1
+    };
+    assertEqual_('170.html·Recovery·Pending 清单渲染：区分「证据档里没有」跟「证据资料夹没接上、判断不出」；当前分页高亮', pendingChecks, allTrue(pendingChecks), results);
+
+    hr.S.recoverySetTab('completed');
+    const doneHtml = hr.text('recoveryList');
+    const doneChecks = {
+      noCheckbox: doneHtml.indexOf('type="checkbox"') === -1,
+      noRetry: doneHtml.indexOf('recoveryRetryOne') === -1,
+      income: doneHtml.indexOf('CMP-INCOME-2026-W14 · 2026-03-30~2026-04-05') !== -1,
+      stamp: doneHtml.indexOf('badge stamp') !== -1,
+      noActionBar: hr.text('recoveryActions') === ''
+    };
+    assertEqual_('170.html·Recovery·Completed 清单渲染：只显示、没有勾选框/Retry/操作列（它们不是卡住的文件）', doneChecks, allTrue(doneChecks), results);
+
+    const hn = recLoaded({ evidenceFolderConfigured: false });
+    const hStale = recLoaded();
+    hStale.S.state.recovery.error = 'boom';
+    hStale.S.renderRecovery();
+    const statusChecks = {
+      counts: hr.text('recoveryStatusLine').indexOf('Failed 3 · Pending 2 · Completed 1') !== -1,
+      noNoteWhenConfigured: hr.text('recoveryStatusLine').indexOf('EXTRACTION_EVIDENCE_FOLDER_ID') === -1,
+      noteWhenUnconfigured: hn.text('recoveryStatusLine').indexOf('EXTRACTION_EVIDENCE_FOLDER_ID') !== -1,
+      errorKeepsStaleData: hStale.text('recoveryStatusLine').indexOf('rec-error') !== -1 && hStale.text('recoveryStatusLine').indexOf('下面显示的是上一次读取的结果') !== -1 && hStale.text('recoveryList').indexOf('DOC-F1') !== -1
+    };
+    assertEqual_('170.html·Recovery·状态列：显示三个分页的数量；证据资料夹没接上时明说（不假装分得出 Failed/Pending）；读取失败时保留上一次的资料并标明', statusChecks, allTrue(statusChecks), results);
+
+    const he = recLoaded({ pending: [] });
+    he.S.recoverySetTab('pending');
+    const emptyTab = he.text('recoveryList');
+    hr.S.recoverySetTab('failed');
+    hr.S.recoverySetFilter('zzz-no-match');
+    const emptyFilter = hr.text('recoveryList');
+    assertEqual_('170.html·Recovery·空状态：分页本来就是空 vs 被筛选条件筛光，两种讯息不同',
+      { tab: emptyTab.indexOf('目前没有 pending 的文件') !== -1, filtered: emptyFilter.indexOf('没有符合筛选条件的文件') !== -1 && emptyFilter.indexOf('3 份都被筛掉了') !== -1 },
+      { tab: true, filtered: true }, results);
+
+    const hl = makeRec();
+    hl.S.loadRecoveryStatus();
+    const midLoad = { callName: hl.calls[0].name, argCount: hl.calls[0].args.length, loading: hl.S.state.recovery.loading, refreshDisabled: hl.el('recoveryRefreshBtn').disabled, hint: hl.text('recoveryStatusLine').indexOf('读取中') !== -1 };
+    hl.S.loadRecoveryStatus();
+    const callsWhileLoading = hl.calls.length;
+    hl.resolve(0, recStatus());
+    assertEqual_('170.html·Recovery·读取：呼叫 consoleGetRecoveryStatus（无参数）、进行中禁用刷新、进行中再点不会发第二个请求；回来后默认落在 Failed，刷新钮恢复',
+      { midLoad, callsWhileLoading, after: { loading: hl.S.state.recovery.loading, tab: hl.S.state.recovery.tab, refreshDisabled: hl.el('recoveryRefreshBtn').disabled, hasTabs: hl.text('recoveryTabs').indexOf('Failed <span class="rec-count">3</span>') !== -1 } },
+      { midLoad: { callName: 'consoleGetRecoveryStatus', argCount: 0, loading: true, refreshDisabled: true, hint: true }, callsWhileLoading: 1, after: { loading: false, tab: 'failed', refreshDisabled: false, hasTabs: true } }, results);
+
+    const hj = makeRec();
+    hj.S.loadRecoveryStatus();
+    hj.resolve(0, JSON.stringify(recStatus()));
+    const hNull = makeRec(); hNull.S.loadRecoveryStatus(); hNull.resolve(0, null);
+    const hBad = makeRec(); hBad.S.loadRecoveryStatus(); hBad.resolve(0, { pending: 1 });
+    const hFail = makeRec(); hFail.S.loadRecoveryStatus(); hFail.reject(0, { message: 'boom' });
+    const hOnlyPending = makeRec(); hOnlyPending.S.loadRecoveryStatus(); hOnlyPending.resolve(0, recStatus({ failed: [] }));
+    const hOnlyDone = makeRec(); hOnlyDone.S.loadRecoveryStatus(); hOnlyDone.resolve(0, recStatus({ failed: [], pending: [] }));
+    assertEqual_('170.html·Recovery·读取的各种回传：JSON 字串照样解析；null / 格式不对 = 明确的错误讯息、不崩、不留半套资料（真实 GAS 传输失败的样子）；失败 handler；首次读取依序落在 Failed → Pending → Completed',
+      { json: plain(hj.S.state.recovery.data).failed.length, nullErr: hNull.S.state.recovery.error.indexOf('收到 null') !== -1 && hNull.S.state.recovery.data === null, badErr: hBad.S.state.recovery.error.indexOf('格式不对') !== -1 && hBad.S.state.recovery.data === null, fail: hFail.S.state.recovery.error, loadingReset: [hNull, hBad, hFail].every((h) => h.S.state.recovery.loading === false), tabPending: hOnlyPending.S.state.recovery.tab, tabCompleted: hOnlyDone.S.state.recovery.tab },
+      { json: 3, nullErr: true, badErr: true, fail: '读取失败：boom', loadingReset: true, tabPending: 'pending', tabCompleted: 'completed' }, results);
+
+    const hp = recLoaded();
+    hp.S.recoveryToggle('DOC-F1', true);
+    hp.S.recoveryToggle('DOC-F2', true);
+    hp.S.loadRecoveryStatus();
+    hp.resolve(0, recStatus({ failed: recStatus().failed.filter((f) => f.documentId !== 'DOC-F1'), completed: recStatus().completed }));
+    assertEqual_('170.html·Recovery·重新读取后，已经不在 Pending/Failed 里的选取（例如刚重试成功）会被清掉，还在的保留',
+      Object.keys(plain(hp.S.state.recovery.selected)), ['DOC-F2'], results);
+
+    // ---- 单档 Retry ----
+    const ho = recLoaded();
+    ho.S.state.scan = { files: [{ id: 'FID-F1', name: '2026-W06.pdf', alreadyImported: false }] };
+    ho.S.recoveryRetryOne('DOC-F1');
+    const retryCall = ho.calls[ho.calls.length - 1];
+    const busyHtml = ho.text('recoveryList');
+    const callsBefore = ho.calls.length;
+    ho.S.recoveryRetryOne('DOC-F2');
+    ho.S.recoveryRetryOne('nonexistent');
+    ho.S.recoveryRetryOne('DOC-F3\'x"<y>');
+    ho.S.loadRecoveryStatus();
+    const duringChecks = {
+      callContract: JSON.stringify([retryCall.name, plain(retryCall.args)]) === JSON.stringify(['consoleRetryFile', ['FID-F1', '2026-W06.pdf']]),
+      busy: ho.S.state.recovery.busy === true,
+      allRetryButtonsDisabled: (busyHtml.match(/<button class="small secondary" disabled/g) || []).length === 2 && busyHtml.indexOf('<button class="small secondary" onclick') === -1,
+      allCheckboxesDisabled: (busyHtml.match(/class="rec-check" disabled/g) || []).length === 3,
+      refreshDisabled: ho.el('recoveryRefreshBtn').disabled === true,
+      busyLabel: ho.text('recoveryActions').indexOf('重试中：2026-W06.pdf') !== -1,
+      noSecondRequest: ho.calls.length === callsBefore
+    };
+    assertEqual_('170.html·Recovery·单档 Retry：呼叫 consoleRetryFile(driveFileId, drivePath)；进行中全部按钮/勾选框/刷新都禁用、再点其他的（含不存在的、没有 file id 的、刷新）都不会发第二个请求', duringChecks, allTrue(duringChecks), results);
+
+    ho.resolve(0, { fileId: 'FID-F1', fileName: '2026-W06.pdf', stage: 'Verified', incomeId: 'CMP-INCOME-2026-W06', net: 123.4, rebuild: { marker: 'rebuild' } });
+    const afterChecks = {
+      busyCleared: ho.S.state.recovery.busy === false,
+      toast: ho.toast() === '重试成功：2026-W06.pdf',
+      dashboardRefreshed: ho.dashboards.length === 1 && ho.dashboards[0].marker === 'rebuild',
+      statusReread: ho.pending.length === 1 && ho.pending[0].name === 'consoleGetRecoveryStatus',
+      scanMarked: ho.S.state.scan.files[0].alreadyImported === true,
+      summary: ho.text('recoverySummary').indexOf('最近一次重试：处理了 1 份') !== -1 && ho.text('recoverySummary').indexOf('Verified') !== -1 && ho.text('recoverySummary').indexOf('CMP-INCOME-2026-W06') !== -1
+    };
+    assertEqual_('170.html·Recovery·单档 Retry 成功后：解除忙碌、toast、Dashboard 用 rebuild 刷新、扫描清单里那笔标成已汇入、显示结果摘要、自动重新读取现况', afterChecks, allTrue(afterChecks), results);
+
+    const hq = recLoaded();
+    hq.S.recoveryRetryOne('DOC-F1');
+    hq.resolve(0, { fileId: 'FID-F1', fileName: '2026-W06.pdf', stage: 'Extraction_Failed', error: '503', rebuild: {} });
+    const hq2 = recLoaded();
+    hq2.S.recoveryRetryOne('DOC-F1');
+    hq2.reject(0, { message: 'Exceeded maximum execution time' });
+    assertEqual_('170.html·Recovery·单档 Retry 仍失败 / 后端丢例外：toast 照实说、不假装成功、解除忙碌',
+      { stillFailed: hq.toast(), stillFailedNotImported: hq.S.state.scan === null, errToast: hq2.toast(), errBusyCleared: hq2.S.state.recovery.busy === false, errNoRefresh: hq2.pending.length === 0 },
+      { stillFailed: '重试后仍是：Extraction_Failed', stillFailedNotImported: true, errToast: '重试失败：Exceeded maximum execution time', errBusyCleared: true, errNoRefresh: true }, results);
+
+    // ---- 选取多档 Retry ----
+    const hm = recLoaded();
+    hm.S.recoveryRetrySelected();
+    const noneChecks = { noCall: hm.calls.length === 1, toast: hm.toast() === '还没有选任何可以重试的文件', buttonDisabled: hm.text('recoveryActions').indexOf('<button class="small" disabled') !== -1 };
+    assertEqual_('170.html·Recovery·没选任何文件时：按钮是禁用的，硬呼叫也不会发请求（只有 toast）', noneChecks, allTrue(noneChecks), results);
+
+    hm.S.recoveryToggle('DOC-F1', true);
+    hm.S.recoveryToggle('DOC-F2', true);
+    const barBefore = hm.text('recoveryActions');
+    hm.S.recoveryRetrySelected();
+    const selCall = hm.calls[hm.calls.length - 1];
+    const selChecks = {
+      barCount: barBefore.indexOf('已选 2 份') !== -1 && barBefore.indexOf('重试选中的 2 份') !== -1 && barBefore.indexOf('<button class="small" disabled') === -1,
+      callContract: JSON.stringify([selCall.name, plain(selCall.args)]) === JSON.stringify(['consoleRetrySelectedFiles', [[{ fileId: 'FID-F1', fileName: '2026-W06.pdf' }, { fileId: 'FID-F2', fileName: '2026-W07.pdf' }]]]),
+      busyLabel: hm.text('recoveryActions').indexOf('批次重试中：2 份') !== -1,
+      buttonDisabledWhileBusy: hm.text('recoveryActions').indexOf('<button class="small" disabled') !== -1
+    };
+    assertEqual_('170.html·Recovery·重试选中的：呼叫 consoleRetrySelectedFiles([{fileId, fileName}…])（只有选中且能重试的），进行中按钮禁用并显示进度', selChecks, allTrue(selChecks), results);
+
+    hm.resolve(0, { attemptedCount: 1, remainingCount: 1, stoppedEarly: true, results: [{ fileId: 'FID-F1', fileName: '2026-W06.pdf', stage: 'Verified', incomeId: 'CMP-INCOME-2026-W06', net: 10 }], rebuild: { marker: 'rebuild2' } });
+    const summaryHtml = hm.text('recoverySummary');
+    const stopChecks = {
+      busyCleared: hm.S.state.recovery.busy === false,
+      stillSelected: JSON.stringify(Object.keys(plain(hm.S.state.recovery.selected))) === JSON.stringify(['DOC-F2']),
+      stoppedEarlyNote: summaryHtml.indexOf('时间预算用完，提早停止') !== -1 && summaryHtml.indexOf('还剩 1 份') !== -1,
+      resultListed: summaryHtml.indexOf('2026-W06.pdf') !== -1 && summaryHtml.indexOf('Verified') !== -1,
+      toast: hm.toast().indexOf('提早停止') !== -1,
+      dashboard: hm.dashboards.length === 1 && hm.dashboards[0].marker === 'rebuild2',
+      reread: hm.pending.length === 1 && hm.pending[0].name === 'consoleGetRecoveryStatus'
+    };
+    assertEqual_('170.html·Recovery·重试选中的回来后（时间预算提早停止）：处理过的从选取拿掉、没处理到的保持选中、明说「不是失败」并提示再点一次、Dashboard 刷新、自动重新读取', stopChecks, allTrue(stopChecks), results);
+
+    const hz = recLoaded();
+    hz.S.recoveryToggle('DOC-F1', true);
+    hz.S.recoveryRetrySelected();
+    hz.resolve(0, null);
+    const nullChecks = {
+      toast: hz.toast().indexOf('后端回传是空的') !== -1,
+      noFakeSummary: hz.text('recoverySummary') === '',
+      busyCleared: hz.S.state.recovery.busy === false,
+      reread: hz.pending.length === 1 && hz.pending[0].name === 'consoleGetRecoveryStatus',
+      selectionKept: JSON.stringify(Object.keys(plain(hz.S.state.recovery.selected))) === JSON.stringify(['DOC-F1'])
+    };
+    assertEqual_('170.html·Recovery·重试选中的拿到 null（google.script.run 传输失败的样子）：不假装知道结果、不显示假的摘要、重新读取现况；选取保持原样', nullChecks, allTrue(nullChecks), results);
+
+    const ht = recLoaded();
+    ht.S.recoverySetTab('pending');
+    ht.S.recoveryToggleAllVisible(true);
+    const afterAll = Object.keys(plain(ht.S.state.recovery.selected)).sort();
+    ht.S.recoverySetFilter('w15');
+    ht.S.recoveryToggleAllVisible(false);
+    const afterPartialClear = Object.keys(plain(ht.S.state.recovery.selected)).sort();
+    ht.S.recoverySetTab('completed');
+    ht.S.recoveryToggleAllVisible(true);
+    const afterCompleted = Object.keys(plain(ht.S.state.recovery.selected)).sort();
+    assertEqual_('170.html·Recovery·全选只作用于目前看得到的（被筛掉的不受影响）；Completed 分页的全选什么都不做',
+      { afterAll, afterPartialClear, afterCompleted }, { afterAll: ['DOC-P1', 'DOC-P2'], afterPartialClear: ['DOC-P2'], afterCompleted: ['DOC-P2'] }, results);
+
+    // ---- 页面结构（不靠 vm，直接检查 HTML 文本）----
+    const iImport = htmlText.indexOf('<div id="importResults"></div>');
+    const iRecovery = htmlText.indexOf('<section id="recoverySection">');
+    const iFallback = htmlText.indexOf('<details class="fallback">');
+    const initTail = scriptText.slice(scriptText.lastIndexOf('loadDashboard();') - 40);
+    const structureChecks = {
+      sectionBetweenImportAndFallback: iImport !== -1 && iRecovery > iImport && iFallback > iRecovery,
+      allContainers: ['recoveryRefreshBtn', 'recoveryFilter', 'recoveryStatusLine', 'recoveryTabs', 'recoveryActions', 'recoverySummary', 'recoveryList'].every((id) => htmlText.indexOf('id="' + id + '"') !== -1),
+      filterWiredStatic: htmlText.indexOf('id="recoveryFilter" type="text"') !== -1 && htmlText.indexOf('oninput="recoverySetFilter(this.value)"') !== -1,
+      // 说明文字里会出现「没有『全部重试』」这几个字，所以不能比对中文；改成比对程式结构：重试入口只有这两个、没有任何 retryAll 标识符
+      noRetryAll: !/retry_?all/i.test(htmlText) && JSON.stringify(Array.from(new Set(scriptText.match(/recoveryRetry\w*/g) || [])).sort()) === JSON.stringify(['recoveryRetryOne', 'recoveryRetrySelected']),
+      firstRenderButNoAutoLoad: initTail.indexOf('renderRecovery();') !== -1 && initTail.indexOf('loadRecoveryStatus') === -1
+    };
+    assertEqual_('170.html·Recovery·页面结构：区块在「Drive 汇入」之后、Debug/Fallback 之前；容器齐全；Filter 是静态输入框（重绘清单不会抢走焦点）；没有「全部重试」功能（重试入口只有单档跟选取多档两个）；页面载入只渲染初始提示、不自动打后端', structureChecks, allTrue(structureChecks), results);
+  }
 
   const allPass = results.every((r) => r.pass);
   results.forEach((r) => {
@@ -603,4 +1044,19 @@ if (typeof module !== 'undefined') {
  * [ ] 2026-08-23 新增·卡住文件自动重试：故意让某份文件的抽取失败一次
  *     （例如暂时关闭网络或用一份格式很怪的 PDF），确认下次批次汇入会
  *     自动重新尝试这份文件，不会永久消失在扫描结果里
+ * [ ] 2026-10-07 新增·扫描结果排序（170.html）：真实浏览器里扫描一个有多份 PDF 的资料夹，
+ *     切换「原始顺序 / 文件名升序 / 文件名降序」确认顺序真的变、切回原始顺序时跟 Drive
+ *     回传一致；标题的「X 份待处理、Y 份已汇入」数字不会因排序改变；排序后对某一笔点
+ *     Retry/汇入，清单显示没有错位。Node 只测了排序逻辑跟 render 输出，没有在真实
+ *     HTML Service 里渲染过
+ * [ ] 2026-10-07 新增·PDF 汇入恢复中心 UI（170.html 的「PDF 汇入恢复中心」区块），部署到真实 GAS 后逐项确认：
+ *     (a) 点「刷新状态」后三个分页的数量，跟 Documents / Verified_Income / 证据资料夹的实际情况对得上；
+ *         特别是 2026-W06.pdf 这个真实案例是否被正确分类、失败原因是否是人看得懂的一句话；
+ *     (b) 真实 google.script.run 回传的 consoleGetRecoveryStatus 不是 null（2026-09-27 consoleGetDashboard 撞过
+ *         Date 传输问题；如果这里收到 null，区块会显示「后端回传的资料格式不对」——那就改成回传 JSON 字串）；
+ *     (c) 单档 Retry、选取多档「重试选中的」真的能跑完、Dashboard 跟月度总览随后更新、该文件移到 Completed；
+ *     (d) 选很多份、让它碰到时间预算：确认显示「时间预算用完，提早停止」、没处理到的仍保持选中、再点一次会接着处理；
+ *     (e) 证据资料夹没设定（EXTRACTION_EVIDENCE_FOLDER_ID 留空）时，区块有明确的警告、所有未完成的都在 Pending；
+ *     (f) 手机/窄萤幕上勾选框、按钮、Filter 输入框排版没有爆版。Node 只测了 UI 逻辑跟 render 输出，没有在真实
+ *         HTML Service 里渲染过
  */

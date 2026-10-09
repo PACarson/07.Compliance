@@ -1,6 +1,6 @@
 # ADR-005: Butiran Tempahan（订单层级）抽取改用 Gemini Extraction Adapter + 确定性验证
 
-- **Status**: **CLOSED**（Gate 2 完整验证链完成，2026-09-15；见下方"含义"说明，`CLOSED` 不等于 `VERIFIED` 或 `IMPLEMENTED` 覆盖全部范围——本 ADR 只对锁定的 W01 fixture 做过完整验证）。**2026-09-29 新增一个独立于此状态的 open item**：Gemini 免费额度是目前的 availability 瓶颈，不影响这里的 accuracy CLOSED 判定——见下方同日期段落。**2026-10-01**：第二份真实 statement（W05）的 accuracy 证据（非完整管线）+ 503 自动切模型修复，同样不影响、不重开 Gate 2——见下方同日期段落
+- **Status**: **CLOSED**（Gate 2 完整验证链完成，2026-09-15；见下方"含义"说明，`CLOSED` 不等于 `VERIFIED` 或 `IMPLEMENTED` 覆盖全部范围——本 ADR 只对锁定的 W01 fixture 做过完整验证）。**2026-09-29 新增一个独立于此状态的 open item**：Gemini 免费额度是目前的 availability 瓶颈，不影响这里的 accuracy CLOSED 判定——见下方同日期段落。**2026-10-01**：第二份真实 statement（W05）的 accuracy 证据（非完整管线）+ 503 自动切模型修复，同样不影响、不重开 Gate 2——见下方同日期段落。**2026-10-07**：真实 GAS 日志命中 fail-closed 的未知 platform gate（`4-Hour Delivery`），以带证据的别名表修复，同样不影响、不重开 Gate 2——见下方同日期段落
 - **Historical date**: 2026-08-25（方向决定），Gate 2 验证链 2026-09-06～2026-09-15
 - **Recovery evidence**: `compliance-os-governance-draft.md` §2.8、§8（原始决策）；`900_Constitution.js` ADR-005 条目全文（changelog 多笔，2026-08-21/25、2026-09-06/09/10/15）；`Gate2_ReClose_Evidence_Proposal_2026-09-10.md`；`Gate2_Independent_Source_Verification_v2_2026-09-14.md`
 
@@ -72,6 +72,35 @@ Insentif/Tip/Bayaran lain-lain 目前没有逐笔可靠日期抽取能力——�
 **未完全解决的部分，诚实记录**：这是缓解（大幅降低风险），不是数学上证明过的绝对上限——`consoleRunDailyAllocation_` 经 `142` 最坏情况仍可能呼叫三次 `extractOrders()`（full_document + 两个 chunk），每次都可能走完整三层模型链，理论最坏情况的总耗时仍有可能逼近甚至超过 6 分钟，只是 `BATCH_RETRY_BUDGET_` 单独解决了已经真实发生过的那个事故（consoleBatchImport 多文件情境）。`'single'` 情境尚未真实复现过类似的硬杀，这次没有进一步收紧，留作已知、未解决的理论风险。
 
 **真实 GAS 重新验证**：PENDING——这整段修复目前只有 Node 测试验证过，`consoleBatchImport`/`consoleRunDailyAllocation` 都还没有在真实 GAS 环境重新跑过确认。
+
+## 2026-10-07 新增——Platform 别名表：未知 platform 的 fail-closed gate 抓到真实的新原文 "4-Hour Delivery"（Steven 提供 debug 日志 + W14 原件）
+
+**触发**：Steven 提供 `debug.pdf`（真实 GAS Cloud log，2026-10-03 20:48:18，`[DailyAllocation] 未能完全分配`）：`attempts` 只有 `full_document`（`stage: null, errorCount: 0`——Gemini 抽取跟 `125` 的四层验证都过了），`nonRetryableErrors` 只有一条：`{day: "Jumaat 3 April", errors: ["platform_raw 无法归类到已知 platform：4-Hour Delivery"]}`。随后 Steven 上传了该 Statement 的原件 `2026-W14.pdf`（30 Mac–5 April 2026，25 页）。
+
+**根因（对照实际代码核实，不是照抄外部分析）**：Gemini 照 `127` schema 的要求（`platform_raw` 照 PDF 原文、不正规化）忠实回报了 `"4-Hour Delivery"`；`142` 的 `candidateFromGeminiOrderRow_` 原本只认 `PLATFORM_NAMES_`（`GrabExpress`/`GrabFood`/`GrabMart`）的子字串，认不出就回 `valid:false`，该笔订单不进 `orderRows`；当天 `computeDailyChecksum_` 因此少算该笔 → `Discrepancy_Flagged` → 整批 `Needs_Review`；跨月 Statement 因此不会被拆月。
+
+**这是 gate 在正常工作，不是 gate 太严**：拒收未知 platform 是刻意的 fail-closed（CMP-P10）。这次它抓到的是 Grab 真实印出来的新原文。正确的修法是把「已确认归属的」名称显式加进别名表，不是放宽 gate。
+
+**修复**（只动 `142`，不动 `127` 的 schema/prompt——Gemini 抽得没错，不碰 LLM 端的契约）：
+- 新增 `PLATFORM_ALIASES_`（`alias` → 规范 `platform`，必填 `evidence`）、`normalizePlatformLabel_`、`classifyPlatform_`。规范名称的比对规则**完全不变**（区分大小写的子字串）；找不到才查别名表，别名比对是「小写 + 连续空白/连字号折成单一空格 + 完整词边界」（"4-Hour Delivery"/"4 hour delivery"/换行写法都命中，"24-Hour Delivery" 不命中——Grab 自己的模板里同一个服务名的连字号写法就不一致，真实 fixture 里 "Instant -- Bike" 跟 "Instant - Bike" 并存）。认不出来仍回 null、仍然 fail closed。
+- `classifyPlatform_` 是全专案唯一做这个判定的地方：`candidateFromGeminiOrderRow_`（生产路径）跟 `parseOrderRowCandidate_`（Phase 1-3 遗留死代码）都改成呼叫它，不再各自保留一份白名单（单一事实来源）。
+- 候选新增 `platform_raw`（PDF 原文）跟 `platform`（判定出的规范名称）并存，别名判定的依据留得下来（加法性，不是 schema 变更——`Daily_Allocation`/`Non_Order_Income_Allocation` 的栏位没动）。
+- 未知 platform 的错误讯息带出订单号、PDF 页码、已知名称/别名，原有前缀文字不变——这次 debug 是靠人工翻 PDF 才定位到那一笔。
+
+**别名 `4-Hour Delivery` → `GrabExpress` 的证据**（依强度排序）：
+1. **Statement 自己的汇总（W14 原件，最硬）**：印刷的「Pendapatan asas Express」53.50 = 7 笔 GrabExpress(Instant) 基本收入 47.50 + 这笔 4-Hour Delivery 的 6.00。Grab 自己就把它算进 Express，拿掉它就对不上。`143` 的 `W14真实.别名证据` 测试把这个对帐写成可执行的算术。
+2. Grab 官网 `https://www.grab.com/my/express/` 把 4-Hour Delivery 列为 GrabExpress 的服务之一，跟 Instant、Scheduled 并列。
+3. 本 repo 两份真实 fixture（W01、W33）各 19 笔 `PLAN-1-` 订单号、各 19 个 GrabExpress 平台栏位，笔数一一对应；W14 那笔订单号同样是 `PLAN-1-HWRQ5Q8GW4QH`。
+
+**用 W14 原件核对 `debug.pdf` 里的外部分析时发现的差异**：(1) 外部分析说 3 April 的印刷小计是 RM207.70——**不对**：每天的小计印在该天表格的末尾（下一天标题之上），RM207.70 是 4 April 的，3 April 的是 RM222.20；「丢掉这笔就差 9.10」的机制不变（逐笔加总 222.20，少了这笔是 213.10）。(2) 那笔的 3.10 在「Pelarasan Pendapatan」栏，不是「Pendapatan lain」栏——外部分析写的「调整 3.10」是对的。(3) 外部分析引用的行号（138/575）跟 repo 对不上（实际在 83/591），逻辑一致。原件的订单号、金额、平台原文都已逐项核对（PDF 第 14 页）。
+
+**验证**（层级见 `VERIFICATION_STATUS.md` 第 8–9 项）：
+- Node：`143` 新增 17 项；mutation 测试 10 种破坏全数被抓到；GAS 式单一全域 scope 模拟同样通过。
+- **整份真实 W14 数据（166 笔订单、7 天，用 pdfplumber 对原件逐笔抽出，当作「Gemini 抽对了会长什么样」的确定性替身，通过 `125` 的订单层级验证）喂进真实管线**：修复前 = `Needs_Review`、165 笔、只有 2026-04-03 被标 `Discrepancy_Flagged`（-9.10）、statement 差 -9.10、`nonRetryableErrors` 指向 "Jumaat 3 April"——跟 debug 日志同一个形状；修复后 = `Fully_Allocated`、166 笔、7 天全 `Matched`、statement `Matched`，跨月拆分 2026-03 = 333.70 / 2026-04 = 964.10。
+- **仍然 PENDING**：真实 GAS 重新跑一次 `consoleRunDailyAllocation`。上面的替身证明的是「Gemini 抽出一份通过验证的候选之后，确定性管线的行为」，不证明真实 Gemini 对这份原件抽出来的就是同一份候选（debug 日志的 `errorCount: 0` 只说明上次抽出的候选通过了验证）。Daily_Allocation 是 append-only：重跑追加新 batch（`batch_id` 带时间戳，最新的为准），旧的 `Needs_Review` batch 留作历史，不会被改写。
+- 顺带观察：W14 是 25 页（订单在第 8–23 页），`ASSUMED_STATEMENT_TOTAL_PAGES_` 是 24——chunk fallback 的页码范围（1–13 / 12–24）仍然覆盖所有订单页，这次没有实际影响；但这个假设值仍是 handoff 的 O 项（真实页数应该来自 Documents）。
+
+**以后遇到新的 platform 名称怎么办**：它会继续被拒收、整批 `Needs_Review`——这是设计，不是缺陷。流程：先确认它的归属（最好是 statement 自己的汇总能对上，其次官方来源或真实订单号模式），再在 `PLATFORM_ALIASES_` 加一行带 `evidence` 的条目并补一条测试；`143` 的别名表完整性测试会挡下没有证据、或指向不存在 platform 的条目。不做自动学习/猜测。
 
 ## Related
 

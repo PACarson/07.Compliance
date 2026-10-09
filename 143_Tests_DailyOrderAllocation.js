@@ -40,6 +40,194 @@ var DOAL_W01_PERIOD_END_   = { year: 2026, month: 1,  day: 4  };
 var DOAL_W33_PERIOD_START_ = { year: 2026, month: 8,  day: 10 };
 var DOAL_W33_PERIOD_END_   = { year: 2026, month: 8,  day: 16 };
 
+// ---- 2026-W14 真实 statement（Steven 提供的原件 2026-W14.pdf，2026-10-07 取得；30 Mac–5 April 2026，25 页）----
+// 来源：用 pdfplumber 的字元座标 + 表格单元格矩形，把第 8–23 页的 166 笔订单行逐笔抽出来。这「不是 Gemini」——
+// 是独立于被测系统的确定性解析，当作「Gemini 抽对了会长什么样」的替身；只保留订单层级栏位（日期、平台原文、订单号、
+// 付款方式、金额、页码），不含姓名/银行帐号等个人资料。已对帐：statement 自己印的 Pendapatan asas makanan 994.20、
+// Pendapatan asas Express 53.50、Pelarasan Pendapatan 250.10、Pendapatan bersih penghantaran 1,297.80、7 天印刷小计合计
+// 1,297.80，跟逐笔加总逐项一致（见下方 W14真实.* 测试）；整份数据也通过 125 的订单层级验证。
+// ⚠️ 每天的印刷小计印在该天表格「末尾」（下一天标题之上），不是紧跟在标题之后——debug.pdf 里外部分析把 RM207.70 当成
+// 3 April 的小计是错的：207.70 是 4 April 的，3 April 的是 222.20。
+// DAYS: [weekday, day, month, 该天印刷小计]；
+// ROWS: [dayIndex, 'T'=Tunggal|'S'=Sekaligus, platform_raw（PDF 原文）, 'id|id', and_more_count, payment_raw, base, other, adjustment, net, 页码]
+var DOAL_FIXTURE_W14_DAYS_ = [
+  ['Ahad', 5, 'April', 186],
+  ['Sabtu', 4, 'April', 207.7],
+  ['Jumaat', 3, 'April', 222.2],
+  ['Khamis', 2, 'April', 181.3],
+  ['Rabu', 1, 'April', 166.9],
+  ['Selasa', 31, 'Mac', 147.2],
+  ['Isnin', 30, 'Mac', 186.5]
+];
+var DOAL_FIXTURE_W14_ROWS_ = [
+  [0, 'T', 'GrabFood', 'A-96CHGVFWWLQCAV', 0, 'Tanpa tunai', 5, 0, 1.8, 6.8, 8],
+  [0, 'T', 'GrabFood', 'A-96CEMWVG22KMAV', 0, 'Tanpa tunai', 3.6, 0, 1.5, 5.1, 8],
+  [0, 'T', 'GrabFood', 'A-96C8X94WWT7RAV', 0, 'Tanpa tunai', 1.3, 0, 3.1, 4.4, 9],
+  [0, 'T', 'GrabMart', 'A-96C7DX5G26GFAV', 0, 'Tanpa tunai', 2.9, 0, 1.6, 4.5, 9],
+  [0, 'S', 'GrabMart', 'A-96C8XDSG2XC9AV|A-96CACTRGXDWEAV', 0, 'Tunai', 7.1, 0, 0, 7.1, 9],
+  [0, 'T', 'GrabFood', 'A-96C4CJGW3E5QAV', 0, 'Tanpa tunai', 4.2, 0, 1.5, 5.7, 9],
+  [0, 'S', 'GrabFood', 'A-96C3B56GX7VOAV|A-96C4RRFGW9JAAV', 0, 'Tanpa tunai', 12.2, 0, 1, 13.2, 9],
+  [0, 'T', 'GrabFood', 'A-96BVQ4QGWDKEAV', 0, 'Tanpa tunai', 4.9, 0, 0.3, 5.2, 9],
+  [0, 'T', 'GrabFood', 'A-96BMN54GWOKVAV', 0, 'Tanpa tunai', 4.4, 0, 1.8, 6.2, 9],
+  [0, 'T', 'GrabFood', 'A-96BUXVHGWRRDAV', 0, 'Tanpa tunai', 7.4, 0, 0, 7.4, 9],
+  [0, 'T', 'GrabFood', 'A-96BQH9CWWN3OAV', 0, 'Tanpa tunai', 4.8, 0, 0, 4.8, 9],
+  [0, 'T', 'GrabMart', 'A-96BM2NFWX4EDAV', 0, 'Tanpa tunai', 0, 0, 4.7, 4.7, 9],
+  [0, 'T', 'GrabFood', 'A-96BLWKTGX95SAV', 0, 'Tanpa tunai', 4.6, 0, 0, 4.6, 9],
+  [0, 'S', 'GrabMart', 'A-96B6SEKGWRRDAV|A-96BJ9QDWXW92AV', 0, 'Tunai / Tanpa tunai', 10.1, 0, 0, 10.1, 9],
+  [0, 'T', 'GrabFood', 'A-96BEWMPWX93RAV', 0, 'Tanpa tunai', 5.8, 0, 1.2, 7, 10],
+  [0, 'T', 'GrabMart', 'A-96ARI8MWWLXLAV', 0, 'Tanpa tunai', 3.7, 0, 0.7, 4.4, 10],
+  [0, 'T', 'GrabFood', 'A-96B24CXWXXREAV', 0, 'Tanpa tunai', 2.9, 0, 2.2, 5.1, 10],
+  [0, 'T', 'GrabFood', 'A-96BWAQIGWV7UAV', 0, 'Tanpa tunai', 5.8, 0, 0.8, 6.6, 10],
+  [0, 'T', 'GrabMart', 'A-96AVI88GWDKEAV', 0, 'Tanpa tunai', 3.5, 0, 1.7, 5.2, 10],
+  [0, 'T', 'GrabFood', 'A-96AQ3SNGWOKVAV', 0, 'Tanpa tunai', 4.8, 0, 2.4, 7.2, 10],
+  [0, 'T', 'GrabFood', 'A-96AOJJNW2DKEAV', 0, 'Tanpa tunai', 7.3, 0, 0, 7.3, 10],
+  [0, 'T', 'GrabFood', 'A-96ANDJ9GWFTBAV', 0, 'Tanpa tunai', 6.9, 0, 2.4, 9.3, 10],
+  [0, 'T', 'GrabFood', 'A-96AKU3XGWOKVAV', 0, 'Tanpa tunai', 5.4, 0, 1.5, 6.9, 10],
+  [0, 'S', 'GrabFood', 'A-96AI2VKWWHIFAV|A-96AFLP9WWFKCAV', 0, 'Tanpa tunai', 11.9, 0, 0, 11.9, 10],
+  [0, 'S', 'GrabFood', 'A-96ADBK6GWDKEAV|A-96AFAU4WWFKCAV', 0, 'Tanpa tunai', 6.3, 0, 2.9, 9.2, 10],
+  [0, 'S', 'GrabMart', 'A-963P4V5WWNODAV', 3, 'Tanpa tunai', 3.7, 0, 8.4, 12.1, 10],
+  [0, 'T', 'GrabFood', 'A-96A7RAJGWUIVAV', 0, 'Tanpa tunai', 2.4, 0, 1.6, 4, 11],
+  [1, 'T', 'GrabExpress Instant -- Bike', 'PLAN-1-HXX25KTWW9ON', 0, 'Tanpa tunai', 6, 0, 0.4, 6.4, 11],
+  [1, 'T', 'GrabFood', 'A-968DL7GGX4L4AV', 0, 'Tanpa tunai', 3.9, 0, 1.5, 5.4, 11],
+  [1, 'T', 'GrabFood', 'A-968BIO6GW85JAV', 0, 'Tanpa tunai', 6.7, 0, 1, 7.7, 11],
+  [1, 'T', 'GrabFood', 'A-9684E7RGXXQSAV', 0, 'Tanpa tunai', 6.7, 0, 1.2, 7.9, 11],
+  [1, 'T', 'GrabFood', 'A-9684RICGWDQUAV', 0, 'Tanpa tunai', 4.2, 0, 2.9, 7.1, 11],
+  [1, 'T', 'GrabFood', 'A-96845P9WWRRDAV', 0, 'Tanpa tunai', 6.1, 0, 1.5, 7.6, 11],
+  [1, 'S', 'GrabFood', 'A-968WD63GWBA7AV|A-968X4ESWWDUVAV', 0, 'Tanpa tunai', 6.9, 0, 2.8, 9.7, 11],
+  [1, 'T', 'GrabFood', 'A-967TE55WXBR3AV', 0, 'Tanpa tunai', 3.2, 0, 1.7, 4.9, 11],
+  [1, 'S', 'GrabFood', 'A-967R75EGWX3SAV|A-967QFVIGW8ELAV', 0, 'Tanpa tunai', 13.6, 0, 0, 13.6, 11],
+  [1, 'S', 'GrabFood', 'A-967MASPWWM68AV', 2, 'Tunai / Tanpa tunai', 15, 0, 0.8, 15.8, 12],
+  [1, 'T', 'GrabFood', 'A-967K2SHWWV6DAV', 0, 'Tanpa tunai', 5.9, 0, 0.8, 6.7, 12],
+  [1, 'T', 'GrabMart', 'A-967I3CBWWX3SAV', 0, 'Tanpa tunai', 4.9, 0, 0.7, 5.6, 12],
+  [1, 'T', 'GrabExpress Instant - Bike', 'PLAN-1-HWVLJ6HGWXML', 0, 'Tanpa tunai', 5.1, 0, 0, 5.1, 12],
+  [1, 'T', 'GrabFood', 'A-967B2MFWX8R3AV', 0, 'Tanpa tunai', 6, 0, 0, 6, 12],
+  [1, 'T', 'GrabMart', 'A-966V68AGWDQUAV', 0, 'Tunai', 5, 0, 0, 5, 12],
+  [1, 'T', 'GrabMart', 'A-966TD7IGX4L4AV', 0, 'Tanpa tunai', 4.4, 0, 1.4, 5.8, 12],
+  [1, 'T', 'GrabFood', 'A-966TV7EWWV6DAV', 0, 'Tanpa tunai', 5.9, 0, 1.1, 7, 12],
+  [1, 'T', 'GrabFood', 'A-966SHROWXEU5AV', 0, 'Tanpa tunai', 2.4, 0, 2.2, 4.6, 12],
+  [1, 'T', 'GrabFood', 'A-966P54CGWCLMAV', 0, 'Tanpa tunai', 3, 0, 2.7, 5.7, 12],
+  [1, 'S', 'GrabFood', 'A-966KQF3WWBF9AV|A-966LVF7W2BF9AV', 0, 'Tanpa tunai', 5.1, 0, 5.9, 11, 12],
+  [1, 'T', 'GrabFood', 'A-966J5VSG2DUVAV', 0, 'Tanpa tunai', 3.1, 0, 4.5, 7.6, 12],
+  [1, 'T', 'GrabFood', 'A-966HDR2GWJNVAV', 0, 'Tanpa tunai', 3.6, 0, 3.5, 7.1, 12],
+  [1, 'S', 'GrabMart', 'A-966FLBJWXC7NAV|A-9666Q3NWWQVPAV', 0, 'Tanpa tunai', 7.6, 0, 2.3, 9.9, 13],
+  [1, 'T', 'GrabFood', 'A-966ECC4WWCLMAV', 0, 'Tanpa tunai', 3.9, 0, 1.2, 5.1, 13],
+  [1, 'T', 'GrabMart', 'A-96656NJGWBF9AV', 0, 'Tanpa tunai', 4.1, 0, 1.7, 5.8, 13],
+  [1, 'T', 'GrabFood', 'A-9669DTLWWDUVAV', 0, 'Tunai', 5.8, 0, 1.1, 6.9, 13],
+  [1, 'T', 'GrabFood', 'A-9669HLKWX8FQAV', 0, 'Tanpa tunai', 4.7, 0, 0, 4.7, 13],
+  [1, 'T', 'GrabFood', 'A-9666QGTWWQVPAV', 0, 'Tanpa tunai', 4.5, 0, 1.3, 5.8, 13],
+  [1, 'T', 'GrabFood', 'A-965TNC2GWM68AV', 0, 'Tunai', 6.2, 0, 0, 6.2, 13],
+  [2, 'T', 'GrabExpress Instant - Bike', 'PLAN-1-HWSGW45WWBTT', 0, 'Tanpa tunai', 6.3, 0, 0, 6.3, 13],
+  [2, 'S', 'GrabFood', 'A-9647WLMWWHOEAV|A-96475TRWX27VAV', 0, 'Tanpa tunai', 13.1, 0, 0, 13.1, 13],
+  [2, 'T', 'GrabFood', 'A-9643JFWGWKEBAV', 0, 'Tanpa tunai', 6.2, 0, 0.1, 6.3, 13],
+  [2, 'T', 'GrabMart', 'A-964WSBWGW7CPAV', 0, 'Tanpa tunai', 7.6, 0, 0.3, 7.9, 14],
+  [2, 'T', 'GrabExpress Instant -- Bike', 'PLAN-1-HWS3PS3GW4QH', 0, 'Tanpa tunai', 7.8, 0, 0, 7.8, 14],
+  [2, 'S', 'GrabMart', 'A-963UCNSWWPVAAV|A-963UT8HGWJLCAV', 0, 'Tanpa tunai', 4.5, 0, 2.4, 6.9, 14],
+  [2, 'S', 'GrabFood', 'A-963QHS7GX7TAAV|A-963QDEBGWM8UAV', 0, 'Tanpa tunai', 12.3, 0, 0.7, 13, 14],
+  [2, 'T', 'GrabFood', 'A-963PW6FGW8JBAV', 0, 'Tanpa tunai', 2.8, 0, 2.6, 5.4, 14],
+  [2, 'T', 'GrabFood', 'A-963OPW5WW7SVAV', 0, 'Tunai', 3.7, 0, 2.3, 6, 14],
+  [2, 'T', 'GrabFood', 'A-963LVQQGX7TAAV', 0, 'Tanpa tunai', 5.6, 0, 1.8, 7.4, 14],
+  [2, 'T', '4-Hour Delivery', 'PLAN-1-HWRQ5Q8GW4QH', 0, 'Tanpa tunai', 6, 0, 3.1, 9.1, 14],
+  [2, 'T', 'GrabFood', 'A-963J2Q4GWXKBAV', 0, 'Tanpa tunai', 11.6, 0, 0, 11.6, 14],
+  [2, 'T', 'GrabFood', 'A-963HVTJWX7TAAV', 0, 'Tanpa tunai', 3.1, 0, 1.9, 5, 14],
+  [2, 'S', 'GrabFood', 'A-963F9QOWW7CPAV|A-963F6VPGXC73AV', 0, 'Tanpa tunai', 7.1, 0, 1.5, 8.6, 14],
+  [2, 'T', 'GrabExpress Instant -- Bike', 'PLAN-1-HWRFA2AWW4QH', 0, 'Tanpa tunai', 10.3, 0, 0, 10.3, 14],
+  [2, 'S', 'GrabFood', 'A-963E2CMWWLQOAV|A-963D26JWX6ITAV', 0, 'Tanpa tunai', 5, 0, 2, 7, 15],
+  [2, 'T', 'GrabFood', 'A-9633G7QGWGSPAV', 0, 'Tanpa tunai', 3.5, 0, 3.6, 7.1, 15],
+  [2, 'T', 'GrabFood', 'A-962TQ9RGW7SVAV', 0, 'Tanpa tunai', 2, 0, 2.7, 4.7, 15],
+  [2, 'T', 'GrabFood', 'A-962RQHQGXBVTAV', 0, 'Tanpa tunai', 5.1, 0, 1.4, 6.5, 15],
+  [2, 'S', 'GrabFood', 'A-962MQ7SGWRROAV', 3, 'Tanpa tunai', 13, 0, 4.3, 17.3, 15],
+  [2, 'T', 'GrabFood', 'A-962JG8RGWD4HAV', 0, 'Tanpa tunai', 1.7, 0, 3, 4.7, 15],
+  [2, 'S', 'GrabFood', 'A-962K5C4G2GSPAV|A-962JEGOWWPVAAV', 0, 'Tanpa tunai', 5.5, 0, 4.2, 9.7, 15],
+  [2, 'T', 'GrabFood', 'A-962DMF4WXWFLAV', 0, 'Tanpa tunai', 3.1, 0, 4.8, 7.9, 15],
+  [2, 'S', 'GrabFood', 'A-962DIRIWXBJBAV|A-962AU34GW7CPAV', 0, 'Tanpa tunai', 6.6, 0, 3.2, 9.8, 15],
+  [2, 'T', 'GrabFood', 'A-962CWXDWWKEBAV', 0, 'Tanpa tunai', 4.8, 0, 2.2, 7, 15],
+  [2, 'T', 'GrabFood', 'A-962AVN5WX27VAV', 0, 'Tanpa tunai', 3.8, 0, 1.9, 5.7, 15],
+  [2, 'T', 'GrabFood', 'A-96XRA99WW8JBAV', 0, 'Tunai', 4.5, 0, 0.5, 5, 15],
+  [2, 'T', 'GrabFood', 'A-96XHLOGWWSSNAV', 0, 'Tanpa tunai', 3.3, 0, 1.8, 5.1, 16],
+  [3, 'T', 'GrabFood', 'A-96W7DTHWWA5FAV', 0, 'Tunai', 7.4, 0, 0.9, 8.3, 16],
+  [3, 'T', 'GrabMart', 'A-96W64NPWWE8UAV', 0, 'Tanpa tunai', 2.8, 0, 1.4, 4.2, 16],
+  [3, 'S', 'GrabFood', 'A-96W3HRSGWE8UAV|A-96W2LGVWX2STAV', 0, 'Tanpa tunai', 13.5, 0, 0, 13.5, 16],
+  [3, 'S', 'GrabFood', 'A-95VUUUVWW5LVAV|A-95VUOBAGXDLRAV', 0, 'Tanpa tunai', 8.5, 0, 0, 8.5, 16],
+  [3, 'S', 'GrabFood', 'A-95VSKBRWXDLRAV|A-95VSIPWWW64IAV', 0, 'Tanpa tunai', 7, 0, 1, 8, 16],
+  [3, 'S', 'GrabFood', 'A-95VO3MTGWAWVAV', 2, 'Tunai / Tanpa tunai', 14.8, 0, 0, 14.8, 16],
+  [3, 'S', 'GrabFood', 'A-95VJVNVWX5CKAV|A-95VKAD4GW3ATAV', 0, 'Tanpa tunai', 10.3, 0, 0, 10.3, 16],
+  [3, 'T', 'GrabFood', 'A-95VHQHOWWEPDAV', 0, 'Tanpa tunai', 3.8, 0, 1, 4.8, 16],
+  [3, 'T', 'GrabFood', 'A-95VGLB3WX35OAV', 0, 'Tanpa tunai', 4.7, 0, 1.5, 6.2, 17],
+  [3, 'T', 'GrabFood', 'A-95VDG4IWWEKUAV', 0, 'Tanpa tunai', 10.2, 0, 0, 10.2, 17],
+  [3, 'T', 'GrabFood', 'A-95VBOR7WWL2LAV', 0, 'Tanpa tunai', 3.4, 0, 2, 5.4, 17],
+  [3, 'S', 'GrabFood', 'A-95V5X2KGX35OAV', 2, 'Tunai / Tanpa tunai', 16.4, 0, 0, 16.4, 17],
+  [3, 'T', 'GrabMart', 'A-95UKWQ4GWLIQAV', 0, 'Tanpa tunai', 7.4, 0, 1.3, 8.7, 17],
+  [3, 'T', 'GrabMart', 'A-95UHMV4WWGWIAV', 0, 'Tanpa tunai', 3.2, 0, 1.4, 4.6, 17],
+  [3, 'T', 'GrabFood', 'A-95UFG4GGXCBDAV', 0, 'Tanpa tunai', 1.3, 0, 3.3, 4.6, 17],
+  [3, 'S', 'GrabFood', 'A-95UCAQWWW2HDAV', 2, 'Tanpa tunai', 14.2, 0, 2.9, 17.1, 17],
+  [3, 'T', 'GrabFood', 'A-95U87QPGWWH8AV', 0, 'Tanpa tunai', 4.5, 0, 2, 6.5, 17],
+  [3, 'S', 'GrabFood', 'A-95U88QDWWJQ3AV|A-95U8B8XWWJ3OAV', 0, 'Tanpa tunai', 7.8, 0, 2.4, 10.2, 17],
+  [3, 'T', 'GrabFood', 'A-95U8778GXAHQAV', 0, 'Tanpa tunai', 2.2, 0, 2.4, 4.6, 17],
+  [3, 'S', 'GrabFood', 'A-95U6KKEGXAHQAV|A-95U6L4PGWJQ3AV', 0, 'Tanpa tunai', 2.2, 0, 5.4, 7.6, 17],
+  [3, 'T', 'GrabFood', 'A-95UWLS8WWA3PAV', 0, 'Tunai', 2.9, 0, 3.9, 6.8, 18],
+  [4, 'S', 'GrabFood', 'A-95S2WE3GWKINAV|A-95S3BLJGWBJRAV', 0, 'Tunai / Tanpa tunai', 7.6, 0, 2.2, 9.8, 18],
+  [4, 'T', 'GrabMart', 'A-95SXE46WW64IAV', 0, 'Tunai', 3.3, 0, 1.2, 4.5, 18],
+  [4, 'T', 'GrabFood', 'A-95SWWUGGW858AV', 0, 'Tanpa tunai', 2.9, 0, 1.6, 4.5, 18],
+  [4, 'T', 'GrabFood', 'A-95RP2T6GWKINAV', 0, 'Tanpa tunai', 3.3, 0, 3.2, 6.5, 18],
+  [4, 'T', 'GrabFood', 'A-95RR3O9GW64IAV', 0, 'Tunai', 2.3, 0, 2.1, 4.4, 18],
+  [4, 'T', 'GrabExpress Instant -- Bike', 'PLAN-1-HWKWA7TWX2R4', 0, 'Tanpa tunai', 4.7, 0, 0, 4.7, 18],
+  [4, 'T', 'GrabMart', 'A-95RQXK4WX2COAV', 0, 'Tanpa tunai', 6, 0, 0.8, 6.8, 18],
+  [4, 'T', 'GrabFood', 'A-95RLESAGW5JEAV', 0, 'Tanpa tunai', 4.5, 0, 1.2, 5.7, 18],
+  [4, 'S', 'GrabMart', 'A-95RIPXUGW5BNAV|A-95QGD4WWW34VAV', 0, 'Tanpa tunai', 4.6, 0, 2.3, 6.9, 18],
+  [4, 'T', 'GrabFood', 'A-95RHQTWWXBQTAV', 0, 'Tanpa tunai', 6, 0, 1.6, 7.6, 19],
+  [4, 'S', 'GrabFood', 'A-95RDIE6WW4F7AV|A-95RD8WSWWWPMAV', 0, 'Tanpa tunai', 12.6, 0, 2, 14.6, 19],
+  [4, 'S', 'GrabFood', 'A-95R9RMRWW8BRAV', 2, 'Tunai / Tanpa tunai', 13.6, 0, 0.4, 14, 19],
+  [4, 'T', 'GrabFood', 'A-95QPGF9WX98TAV', 0, 'Tanpa tunai', 7.1, 0, 0.4, 7.5, 19],
+  [4, 'S', 'GrabMart', 'A-95RWKQNGXBQQAV|A-95R25D6WW96OAV', 0, 'Tanpa tunai', 8.7, 0, 0.8, 9.5, 19],
+  [4, 'T', 'GrabFood', 'A-95QHAQRW24OFAV', 0, 'Tanpa tunai', 2.5, 0, 2.3, 4.8, 19],
+  [4, 'T', 'GrabFood', 'A-95QGUM5GW7PKAV', 0, 'Tanpa tunai', 2.3, 0, 2.3, 4.6, 19],
+  [4, 'T', 'GrabFood', 'A-95QDHFAWWT9EAV', 0, 'Tanpa tunai', 3.7, 0, 1.9, 5.6, 19],
+  [4, 'T', 'GrabFood', 'A-95QB9I7GWNWAAV', 0, 'Tanpa tunai', 2, 0, 3.1, 5.1, 19],
+  [4, 'T', 'GrabFood', 'A-95Q94XCWWTAGAV', 0, 'Tanpa tunai', 5.7, 0, 2.4, 8.1, 19],
+  [4, 'S', 'GrabFood', 'A-95Q4XPRWW34VAV', 3, 'Tanpa tunai', 17, 0, 0, 17, 19],
+  [4, 'S', 'GrabFood', 'A-95PVDC4GWHUXAV|A-95Q33KHWWUARAV', 0, 'Tanpa tunai', 7.5, 0, 0, 7.5, 20],
+  [4, 'S', 'GrabFood', 'A-95QXPIHGX5LRAV|A-95M7B4UGWU3BAV', 0, 'Tanpa tunai', 7.2, 0, 0, 7.2, 20],
+  [5, 'S', 'GrabFood', 'A-95NRG4RGWK2MAV|A-95NSS5RGW2WOAV', 0, 'Tanpa tunai', 8.1, 0, 1.7, 9.8, 20],
+  [5, 'T', 'GrabFood', 'A-95NOM32GXC5FAV', 0, 'Tanpa tunai', 4.4, 0, 0, 4.4, 20],
+  [5, 'T', 'GrabFood', 'A-95NKJXVWXCBUAV', 0, 'Tanpa tunai', 5.7, 0, 1.9, 7.6, 20],
+  [5, 'S', 'GrabFood', 'A-95NGVE4WWS7AAV|A-95NJUNIWX4LEAV', 0, 'Tanpa tunai', 11.4, 0, 0.7, 12.1, 20],
+  [5, 'S', 'GrabFood', 'A-95NFJ99GWE5FAV|A-95NGJ67WWSARAV', 0, 'Tanpa tunai', 6.3, 0, 3.1, 9.4, 20],
+  [5, 'T', 'GrabFood', 'A-95NBMVKWX7BWAV', 0, 'Tanpa tunai', 11.6, 0, 0, 11.6, 20],
+  [5, 'T', 'GrabFood', 'A-95NAVH6GX45AAV', 0, 'Tanpa tunai', 4.1, 0, 1.9, 6, 20],
+  [5, 'S', 'GrabFood', 'A-95NA3F7GX45AAV|A-95N9ICMWXEEEAV', 0, 'Tanpa tunai', 12.1, 0, 0, 12.1, 21],
+  [5, 'S', 'GrabFood', 'A-95N62G7WW2WOAV', 0, 'Tanpa tunai', 5.3, 0, 1.5, 6.8, 21],
+  [5, 'T', 'GrabMart', 'A-95MPFMEWWPJ6AV', 0, 'Tanpa tunai', 2.1, 0, 2.5, 4.6, 21],
+  [5, 'S', 'GrabFood', 'A-95MTNXCGXX5TAV|A-95MAANBWXAU7AV', 0, 'Tanpa tunai', 12, 0, 0, 12, 21],
+  [5, 'T', 'GrabFood', 'A-95MSRNBWWU3BAV', 0, 'Tanpa tunai', 4.8, 0, 0, 4.8, 21],
+  [5, 'T', 'GrabFood', 'A-95MRAXJWXAU7AV', 0, 'Tanpa tunai', 2.5, 0, 1.9, 4.4, 21],
+  [5, 'T', 'GrabFood', 'A-95MCSS5GWHJUAV', 0, 'Tanpa tunai', 4.8, 0, 1.6, 6.4, 21],
+  [5, 'T', 'GrabFood', 'A-95MA4DWGWATOAV', 0, 'Tanpa tunai', 4.3, 0, 3.4, 7.7, 21],
+  [5, 'T', 'GrabFood', 'A-95M6DO4GXWU2AV', 0, 'Tanpa tunai', 4, 0, 3.5, 7.5, 21],
+  [5, 'T', 'GrabFood', 'A-95MWKJ7WWHJUAV', 0, 'Tanpa tunai', 7.4, 0, 0.8, 8.2, 21],
+  [5, 'T', 'GrabFood', 'A-95LV86IGWWLEAV', 0, 'Tanpa tunai', 4.2, 0, 0.9, 5.1, 21],
+  [5, 'T', 'GrabFood', 'A-95LQSG6WWK2MAV', 0, 'Tanpa tunai', 6.7, 0, 0, 6.7, 21],
+  [6, 'T', 'GrabExpress Instant - Bike', 'PLAN-1-HWCVJALWWIRW', 0, 'Tanpa tunai', 7.3, 0, 0, 7.3, 22],
+  [6, 'T', 'GrabMart', 'A-95JGN57WWVREAV', 0, 'Tanpa tunai', 6.1, 0, 0.7, 6.8, 22],
+  [6, 'T', 'GrabMart', 'A-95JCGVAGWSIKAV', 0, 'Tanpa tunai', 3.1, 0, 2.3, 5.4, 22],
+  [6, 'S', 'GrabFood', 'A-95JATCOWWJ5RAV|A-95JAU77WWLHIAV', 0, 'Tanpa tunai', 7.9, 0, 0.7, 8.6, 22],
+  [6, 'T', 'GrabFood', 'A-95J6576GX8FSAV', 0, 'Tunai', 6.3, 0, 1.6, 7.9, 22],
+  [6, 'T', 'GrabFood', 'A-95J3J3UGWUSPAV', 0, 'Tanpa tunai', 2.3, 0, 4, 6.3, 22],
+  [6, 'S', 'GrabFood', 'A-95IV6WMWX7BCAV', 2, 'Tanpa tunai', 14.3, 0, 0, 14.3, 22],
+  [6, 'S', 'GrabFood', 'A-95ITUU9WX3OFAV', 2, 'Tanpa tunai', 14.4, 0, 0, 14.4, 22],
+  [6, 'T', 'GrabFood', 'A-95IO3TOGX8TPAV', 0, 'Tanpa tunai', 4, 0, 0.8, 4.8, 22],
+  [6, 'T', 'GrabMart', 'A-95ID2HDWWFA7AV', 0, 'Tanpa tunai', 3.2, 0, 1.6, 4.8, 22],
+  [6, 'T', 'GrabMart', 'A-95IBO49WXDREAV', 0, 'Tunai', 5.4, 0, 0, 5.4, 22],
+  [6, 'S', 'GrabFood', 'A-95I88XUWX4KSAV|A-95I9U9SGX3THAV', 0, 'Tanpa tunai', 14.7, 0, 0, 14.7, 23],
+  [6, 'T', 'GrabFood', 'A-95I78FGGWJTSAV', 0, 'Tanpa tunai', 7.7, 0, 2.1, 9.8, 23],
+  [6, 'S', 'GrabMart', 'A-95I3OQ8GW5INAV|A-95I3GLXG2828AV', 0, 'Tanpa tunai', 7.7, 0, 3.3, 11, 23],
+  [6, 'S', 'GrabFood', 'A-95HTJPEWWL7QAV', 3, 'Tanpa tunai', 20.9, 0, 0, 20.9, 23],
+  [6, 'T', 'GrabFood', 'A-95HSBLHGWC5CAV', 0, 'Tanpa tunai', 7.9, 0, 2, 9.9, 23],
+  [6, 'T', 'GrabMart', 'A-95HNI6QWWOHMAV', 0, 'Tunai', 5, 0, 0, 5, 23],
+  [6, 'S', 'GrabFood', 'A-95HMM3CWX4RDAV', 2, 'Tanpa tunai', 19.5, 0, 0.5, 20, 23],
+  [6, 'T', 'GrabFood', 'A-95HLECOGX5PSAV', 0, 'Tunai', 4.6, 0, 0.4, 5, 23],
+  [6, 'T', 'GrabFood', 'A-95HJG67WWDSSAV', 0, 'Tunai', 3.7, 0, 0.5, 4.2, 23]
+];
+
 // Phase 1 手工验证过的逐日小计（交叉核对用，跟 Verified_Income 的
 // net_delivery_income 分毫不差，见 compliance-os-daily-allocation-phase2-design.md）。
 var DOAL_W01_EXPECTED_DAILY_ = {
@@ -342,19 +530,19 @@ function runDailyOrderAllocationTests_() {
   // "GrabExpress"，Gemini 照 127 schema 要求忠实回报原文）；旧逻辑整笔拒收 →
   // 当天 Discrepancy_Flagged → 整份 Needs_Review。下面这组测试是对着这条真实
   // 失败链条设计的，不是泛泛的 alias 测试。
-  // ⚠️ 诚实标注：订单号 PLAN-1-HWRQ5Q8GW4QH 跟金额（基本 6.00 + 调整 3.10 =
-  // 9.10）取自 Steven 提供的 debug 分析对该行的描述，不是直接从原 PDF 抽的
-  // （写这组测试的 session 没有拿到原 PDF）；platform_raw 原文跟 day 名称
-  // "Jumaat 3 April" 才是 debug 日志（真实 GAS 输出）本身印出来的。
+  // 已对照 2026-W14.pdf 原件核对（2026-10-07 取得）：PDF 第 14 页、Jumaat 3 April 那天的 4-Hour Delivery 订单行——
+  // 订单号 PLAN-1-HWRQ5Q8GW4QH、基本 6.00、Pelarasan Pendapatan 3.10（在「Pelarasan Pendapatan」栏，不是
+  // 「Pendapatan lain」栏）、净 9.10。platform_raw 原文跟 day 名称 "Jumaat 3 April" 也是 debug 日志本身印出来的。
+  // 这组单日合成测试之外，下面另有用整份真实 W14 数据的端到端测试（W14真实.*）。
   // 刻意不用跟 142 同名的 const 解构：GAS 里 142 的函式/变数是全域，同名 const
   // 会遮蔽全域、让 resolver 在初始化期间踩 TDZ（上面 resolveDoalTestDeps143_
   // 那段注释讲的同一类问题）——改成挂在命名空间物件上。
   function resolveDoalPlatformDeps143_() {
     if (typeof require === 'function') {
       const m = require('./142_DailyOrderAllocation.js');
-      return { classify: m.classifyPlatform_, normalize: m.normalizePlatformLabel_, names: m.PLATFORM_NAMES_, aliases: m.PLATFORM_ALIASES_ };
+      return { classify: m.classifyPlatform_, normalize: m.normalizePlatformLabel_, names: m.PLATFORM_NAMES_, aliases: m.PLATFORM_ALIASES_, validateOrder: require('./125_ExtractionValidation.js').validateOrderExtractionCandidate_ };
     }
-    return { classify: classifyPlatform_, normalize: normalizePlatformLabel_, names: PLATFORM_NAMES_, aliases: PLATFORM_ALIASES_ }; // GAS：142 已经载入，直接引用全域
+    return { classify: classifyPlatform_, normalize: normalizePlatformLabel_, names: PLATFORM_NAMES_, aliases: PLATFORM_ALIASES_, validateOrder: validateOrderExtractionCandidate_ }; // GAS：142 已经载入，直接引用全域
   }
   const platformDeps143 = resolveDoalPlatformDeps143_();
 
@@ -440,6 +628,74 @@ function runDailyOrderAllocationTests_() {
     name: 'Platform.文字解析路径（旧路径，生产零引用）: 同样走 classifyPlatform_，4-Hour Delivery 行判成 GrabExpress——两条路径共用同一个判定，没有各自一份白名单',
     pass: legacyAliasRow.valid && legacyAliasRow.candidate.platform === 'GrabExpress' && legacyAliasRow.candidate.order_id_primary === 'PLAN-1-HWRQ5Q8GW4QH' && legacyAliasRow.candidate.net_income === 9.1,
     actual: legacyAliasRow, expected: 'valid, GrabExpress, PLAN-1-HWRQ5Q8GW4QH, 9.10'
+  });
+
+  // ---- 2026-W14 真实 statement 端到端（整份真实原件的数据，不是合成的）----
+  // fixture 见文件顶端 DOAL_FIXTURE_W14_*。这里的「Gemini」是确定性替身（见 fixture 说明）：证明的是
+  // 「Gemini 抽出一份通过验证的候选之后，确定性管线对这份真实 statement 的行为」，不是 Gemini 本身抽得对不对。
+  const w14R2 = (x) => Math.round((x + 1e-9) * 100) / 100;
+  const w14Sum = (list, f) => w14R2(list.reduce((acc, item) => acc + f(item), 0));
+  const w14Rows = DOAL_FIXTURE_W14_ROWS_;
+  const w14Candidate = (fourHourLabel) => ({
+    extraction_scope: { first_page_seen: 1, last_page_seen: 25 },
+    days: DOAL_FIXTURE_W14_DAYS_.map((d, di) => ({
+      weekday_name: d[0], day: d[1], month_name: d[2], day_block_complete: true, printed_daily_subtotal: d[3],
+      orders: w14Rows.filter((r) => r[0] === di).map((r) => ({
+        order_row_type: r[1] === 'T' ? 'Tunggal' : 'Sekaligus',
+        platform_raw: (fourHourLabel && r[2] === '4-Hour Delivery') ? fourHourLabel : r[2],
+        order_ids_raw: r[3] ? r[3].split('|') : [], and_more_count: r[4], payment_method_raw: r[5],
+        base_income: r[6], other_income: r[7], income_adjustment: r[8], net_income: r[9], source_page: r[10], low_confidence: false
+      }))
+    })),
+    notes: ''
+  });
+  const w14Vic = { netDeliveryIncome: 1297.80, periodStartParts: { year: 2026, month: 3, day: 30 }, periodEndParts: { year: 2026, month: 4, day: 5 }, verifiedIncomeId: 'CMP-INCOME-2026-W14' };
+  const w14Doc = { fileId: 'w14', documentId: 'doc-w14', totalPages: 25 };
+  const w14Months = (batch) => batch.dailyAllocations.reduce((m, d) => { const k = d.date.slice(0, 7); m[k] = w14R2((m[k] || 0) + d.net_delivery_income); return m; }, {});
+
+  const w14Validation = platformDeps143.validateOrder(w14Candidate());
+  results.push({
+    name: 'W14真实.验证: 真实 W14 订单数据（166 笔 / 7 天，含 12 笔 "and N" 打包单）通过 125 的订单层级验证——fixture 是「Gemini 抽对了会长什么样」的合格替身',
+    pass: w14Validation.valid === true && w14Rows.length === 166 && DOAL_FIXTURE_W14_DAYS_.length === 7,
+    actual: { valid: w14Validation.valid, stage: w14Validation.stage, errors: w14Validation.errors.slice(0, 3), rows: w14Rows.length }, expected: 'valid=true / 166 rows / 7 days'
+  });
+
+  const w14FoodBase = w14Sum(w14Rows.filter((r) => r[2] === 'GrabFood' || r[2] === 'GrabMart'), (r) => r[6]);
+  const w14InstantBase = w14Sum(w14Rows.filter((r) => r[2].indexOf('GrabExpress') === 0), (r) => r[6]);
+  const w14FourHourBase = w14Sum(w14Rows.filter((r) => r[2] === '4-Hour Delivery'), (r) => r[6]);
+  results.push({
+    name: 'W14真实.对帐: statement 自己印的汇总跟逐笔加总逐项一致——makanan 994.20 / Pelarasan 250.10 / 净 1297.80 / 7 天小计合计 1297.80，且每一天的逐笔加总 = 该天印刷小计',
+    pass: w14FoodBase === 994.2 && w14Sum(w14Rows, (r) => r[8]) === 250.1 && w14Sum(w14Rows, (r) => r[9]) === 1297.8 && w14Sum(DOAL_FIXTURE_W14_DAYS_, (d) => d[3]) === 1297.8
+      && DOAL_FIXTURE_W14_DAYS_.every((d, di) => w14Sum(w14Rows.filter((r) => r[0] === di), (r) => r[9]) === d[3]),
+    actual: { food: w14FoodBase, adjustment: w14Sum(w14Rows, (r) => r[8]), net: w14Sum(w14Rows, (r) => r[9]), printedDaySubtotals: w14Sum(DOAL_FIXTURE_W14_DAYS_, (d) => d[3]) }, expected: { food: 994.2, adjustment: 250.1, net: 1297.8, printedDaySubtotals: 1297.8 }
+  });
+  results.push({
+    name: 'W14真实.别名证据: statement 印的「Pendapatan asas Express」53.50 = 7 笔 GrabExpress(Instant) 基本收入 47.50 + 这笔 4-Hour Delivery 的 6.00——Grab 自己的汇总就把它算进 Express，拿掉它就对不上',
+    pass: w14Rows.filter((r) => r[2].indexOf('GrabExpress') === 0).length === 7 && w14InstantBase === 47.5 && w14FourHourBase === 6 && w14R2(w14InstantBase + w14FourHourBase) === 53.5,
+    actual: { instantRows: w14Rows.filter((r) => r[2].indexOf('GrabExpress') === 0).length, instantBase: w14InstantBase, fourHourBase: w14FourHourBase, sum: w14R2(w14InstantBase + w14FourHourBase) }, expected: { instantRows: 7, instantBase: 47.5, fourHourBase: 6, sum: 53.5 }
+  });
+
+  const w14Batch = runGeminiOrderExtractionWithFallback_(w14Doc, w14Vic, { extractor: mockExtractor_(w14Candidate(), []), now: fourHourNow });
+  const w14FourHourRows = w14Batch.orderRows.filter((o) => o.platform_raw === '4-Hour Delivery');
+  const w14BatchMonths = w14Months(w14Batch);
+  results.push({
+    name: 'W14真实.管线(修复后): 整份真实 W14 → Fully_Allocated、166 笔订单全进来、7 天全 Matched、statement Matched、没有 nonRetryableErrors；跨月拆分 2026-03 = 333.70 / 2026-04 = 964.10；4-Hour Delivery 那笔归为 GrabExpress',
+    pass: w14Batch.allocationStatus === 'Fully_Allocated' && w14Batch.nonRetryableErrors.length === 0 && w14Batch.orderRows.length === 166 && w14Batch.dailyAllocations.length === 7
+      && w14Batch.dailyAllocations.every((d) => d.checksum_status === 'Matched') && w14Batch.statementChecksum.status === 'Matched'
+      && Object.keys(w14BatchMonths).length === 2 && w14BatchMonths['2026-03'] === 333.7 && w14BatchMonths['2026-04'] === 964.1
+      && w14FourHourRows.length === 1 && w14FourHourRows[0].platform === 'GrabExpress' && w14FourHourRows[0].net_income === 9.1,
+    actual: { status: w14Batch.allocationStatus, orders: w14Batch.orderRows.length, errors: w14Batch.nonRetryableErrors, statement: w14Batch.statementChecksum.status, months: w14BatchMonths }, expected: 'Fully_Allocated / 166 / 0 errors / Matched / 2026-03=333.7 2026-04=964.1'
+  });
+
+  const w14Control = runGeminiOrderExtractionWithFallback_(w14Doc, w14Vic, { extractor: mockExtractor_(w14Candidate('Some New Service'), []), now: fourHourNow });
+  const w14ControlFlagged = w14Control.dailyAllocations.filter((d) => d.checksum_status !== 'Matched');
+  results.push({
+    name: 'W14真实.管线(对照组): 4-Hour Delivery 换成真的未知名称 → 重现 debug 日志的形状：Needs_Review、165 笔、只有 2026-04-03 被标 Discrepancy_Flagged（-9.10）、statement 差 -9.10、4 月桶短 9.10、nonRetryableErrors 指向 "Jumaat 3 April"——gate 仍然有效',
+    pass: w14Control.allocationStatus === 'Needs_Review' && w14Control.orderRows.length === 165 && w14ControlFlagged.length === 1 && w14ControlFlagged[0].date === '2026-04-03'
+      && w14ControlFlagged[0].checksum_status === 'Discrepancy_Flagged' && w14ControlFlagged[0].checksum_difference === -9.1
+      && w14Control.statementChecksum.status === 'Discrepancy_Flagged' && w14Control.statementChecksum.difference === -9.1
+      && w14Control.nonRetryableErrors.length === 1 && w14Control.nonRetryableErrors[0].day === 'Jumaat 3 April' && w14Months(w14Control)['2026-04'] === 955,
+    actual: { status: w14Control.allocationStatus, orders: w14Control.orderRows.length, flagged: w14ControlFlagged.map((d) => [d.date, d.checksum_status, d.checksum_difference]), statement: [w14Control.statementChecksum.status, w14Control.statementChecksum.difference], errors: w14Control.nonRetryableErrors.map((e) => e.day) }, expected: 'Needs_Review / 165 / 2026-04-03 -9.1 / statement -9.1 / Jumaat 3 April'
   });
 
   // ---- 2026-09-24 新增（Runtime Readiness Audit 静态审计发现）：

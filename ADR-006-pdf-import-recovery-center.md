@@ -1,6 +1,6 @@
 # ADR-006: PDF Import Recovery Center
 
-- **Status**: **PROPOSED**（整体架构方向——评估/分类方式本身，等 Steven 明确确认才能改 `ACCEPTED`，目前只是外部 AI 起草的 Implementation Authorization Prompt + Steven 转发/延续执行，不等同 Steven 本人明确批准这个架构）。后端代码本身（`consoleGetRecoveryStatus_` 等 4 个函式）已经写完、属于 `IMPLEMENTED`（代码已写），但只经过 Node 测试、未经真实 GAS 环境，所以不是 `VERIFIED`。UI 完全没开始，连 `PROPOSED` 都谈不上（只有文字 spec，没有代码）。逐层标注，不要把整条 ADR 概括成单一状态——见下方「实作范围」表格。
+- **Status**: **PROPOSED**（整体架构方向——评估/分类方式本身，等 Steven 明确确认才能改 `ACCEPTED`，目前只是外部 AI 起草的 Implementation Authorization Prompt + Steven 转发/延续执行，不等同 Steven 本人明确批准这个架构）。后端代码本身（`consoleGetRecoveryStatus_` 等 4 个函式）已经写完、属于 `IMPLEMENTED`（代码已写），2026-10-07 补做了 mutation testing；UI（`170_OperatorConsole.html` 的「PDF 汇入恢复中心」区块）2026-10-07 也已实作、属于 `IMPLEMENTED`。两者都只经过 Node 测试、未经真实 GAS/浏览器环境，所以都不是 `VERIFIED`。逐层标注，不要把整条 ADR 概括成单一状态——见下方「实作范围」表格。
 - **Historical date**: 2026-10-04
 - **Recovery evidence**: 本窗口对话记录（Steven 上传的 Implementation Authorization Prompt + 2026-W06.pdf 真实卡住的问题描述）；`170_OperatorConsole.js` 的 `consoleGetRecoveryStatus_`/`summarizeEvidenceFailure_`/`consoleRetrySelectedFiles_`/`realEvidenceScanner_`；`171_Tests_OperatorConsole.js` 新增约 20 项测试
 
@@ -46,11 +46,24 @@ Steven 真实撞到：`2026-W06.pdf` 从 Google Drive 汇入后，Console 报告
 |---|---|
 | 审计（10 个问题，追完整生命周期） | ✅ 完成，代码证据见上方「审计发现」 |
 | `consoleGetRecoveryStatus_`/`summarizeEvidenceFailure_`/`consoleRetrySelectedFiles_`/`realEvidenceScanner_`（后端逻辑） | ✅ 已实作 |
-| Node 测试（`171`，约 20 项，涵盖 Pending/Failed/Completed 分类、证据档读取失败、order 层级证据不误判、时间预算提早停止等） | ✅ 全部 PASS |
-| Mutation testing（刻意改坏逻辑确认测试真的抓得到） | ❌ 未执行——这批新测试目前只确认「现在的代码行为符合预期」，没有额外验证「测试本身真的会在逻辑写错时失败」，跟这次窗口其他部分（例如 127 的重试逻辑）的验证严谨度不一致，诚实记录这个落差 |
+| Node 测试（后端：`171` 约 20 项，涵盖 Pending/Failed/Completed 分类、证据档读取失败、order 层级证据不误判、时间预算提早停止等；2026-10-07 mutation testing 后另外补 4 条断言） | ✅ 全部 PASS |
+| Mutation testing（刻意改坏逻辑确认测试真的抓得到） | ✅ 2026-10-07 补做。**后端** 26 种变异：初次有 4 个幸存者——`Completed` 的 `incomeIds` 取错栏位、`Failed` 的 `lastAttemptAt` 被整个拿掉、`consoleRetrySelectedFiles_` 拿掉 `isRetry=true`（会让每次「重试」都新增重复的 Documents 记录，总数 2 → 4，而原有断言只数「原本那两个 id 还在」所以照样通过）、回传少了 `rebuild`——都是原有测试的真实缺口；补 4 条断言（只新增、没改动原有测试）后 26 种全部被抓到。**UI** 30 种变异：1 个幸存者（Completed 分页「不能重试」的守卫没有任何测试碰到），补测试后全部被抓到 |
 | 真实 GAS 环境验证 | ❌ 未执行 |
-| `170_OperatorConsole.html` 新增 Recovery Center UI（Pending/Failed/Completed 分页、单档/选取多档 Retry 按钮、Filter、Refresh） | ❌ 未开始 |
-| Steven 真实操作验证（`2026-W06.pdf` 这个真实案例是否真的被正确分类、重试后是否真的解决） | ❌ 未执行——等 UI 做完才有办法让 Steven 实际操作 |
+| `170_OperatorConsole.html` 新增 Recovery Center UI（Pending/Failed/Completed 分页、单档/选取多档 Retry 按钮、Filter、Refresh） | ✅ 2026-10-07 已实作，Node 测试 `171` 新增 21 项（从 HTML 抽出真正的函式，配假 DOM + 假 `google.script.run`，手动控制「后端什么时候回来」才测得到进行中状态）。**真实浏览器/HTML Service 里渲染 ❌ 未验证**（`171` 末尾人工验证清单 (a)–(f)） |
+| Steven 真实操作验证（`2026-W06.pdf` 这个真实案例是否真的被正确分类、重试后是否真的解决） | ❌ 未执行——UI 已有，等部署到真实 GAS 后由 Steven 实际操作 |
+
+> **2026-10-07 一致性核对（已解决）**：修完 debug 回到 handoff 时，当时上传的 repo 快照（`07_Compliance-main.zip`）里找不到上表「后端逻辑」那一行对应的函式（`consoleGetRecoveryStatus_`/`summarizeEvidenceFailure_`/`consoleRetrySelectedFiles_`/`realEvidenceScanner_`），`171` 也没有对应测试，`127`/`112` 也缺 handoff 的 H/I 项——快照跟这份 ADR 不一致。**同日 Steven 上传了那 5 个档案**（`127`/`112`/`170_OperatorConsole.js`/`128`/`171`），已逐项核对：4 个函式、公开薄壳、测试都在，合并进 repo 后 `128` 94/0、`171`（Steven 版本）103/0。缺档案期间没有凭文字描述重写后端。详见 `VERIFICATION_STATUS.md` 第 11 项。
+
+## UI（2026-10-07 实作；范围刻意守在上表写的那几样）
+
+- **手动读取**：区块有「刷新状态」钮，页面载入时只渲染一句初始提示、**不自动呼叫后端**——后端对每份文件要查一次 Drive 证据资料夹，不该拖慢页面载入（`171` 有测试挡着：页面载入不得出现 `loadRecoveryStatus`）。
+- **三个分页**：Failed / Pending / Completed 各自显示数量；首次读取依序落在第一个非空的分页（Failed → Pending → Completed）。Failed 显示失败原因、最近一次尝试时间、证据档份数；Pending 区分「证据档里还没有」跟「证据资料夹没接上、判断不出」（后者另有明确警告，不假装分得出）；Completed 只显示、没有勾选框/Retry。
+- **重试一律手动**：只有「单档 Retry」（`consoleRetryFile`）跟「重试选中的」（`consoleRetrySelectedFiles`）两个入口；**没有自动重试、没有「全部重试」**（`171` 以程式结构检查：重试入口的标识符只有这两个）。
+- **选取语义**：「重试选中的」只动「选中 ∩ 目前分页+筛选下看得到 ∩ 有 Drive file id」的文件——被 Filter 筛掉看不到的选取不会被偷偷重试；全选也只作用于看得到的。重试后处理过的从选取拿掉，没处理到的（时间预算提早停止）保持选中，再点一次接着做。
+- **Filter**：不分大小写，空白分隔的每个词都要命中（AND），比对路径/document id/期间/失败原因/income id。Filter 输入框是静态的，重绘清单不会抢走焦点。
+- **进行中的保护**：请求进行中所有 Retry 钮、勾选框、刷新都禁用，再点（含不存在的、没有 file id 的）都不会发第二个请求。
+- **诚实的错误处理**：后端回传 `null` / 格式不对（`google.script.run` 传输失败的样子，2026-09-27 `consoleGetDashboard` 撞过）= 明确显示错误、保留上一次的资料并标明、不崩；批次重试回传 `null` = 不假装知道结果、不显示假摘要、重新读取现况。
+- **还没做的**：真实 GAS/浏览器验证；窄萤幕排版；这些设计取舍（分页顺序、Filter 语义、选取语义）Steven 尚未逐项审阅，ADR-006 整体架构仍是 `PROPOSED`。
 
 ## Related
 

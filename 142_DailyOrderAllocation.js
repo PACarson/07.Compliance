@@ -107,7 +107,7 @@ var PLATFORM_ALIASES_ = [
   {
     alias: '4-Hour Delivery',
     platform: 'GrabExpress',
-    evidence: 'Grab 官网 https://www.grab.com/my/express/ 把 4-Hour Delivery 列为 GrabExpress 的服务之一（跟 Instant、Scheduled 并列）；本 repo 两份真实 fixture（W01、W33）各 19 笔 PLAN-1- 订单号、各 19 个 GrabExpress 平台栏位，笔数一一对应（GrabExpress 订单号前缀见 extractOrderIds_）。'
+    evidence: 'W14 statement 原件（2026-W14.pdf）自己的汇总：印刷的「Pendapatan asas Express」53.50 = 7 笔 GrabExpress(Instant) 基本收入 47.50 + 这笔 4-Hour Delivery 的 6.00——Grab 自己就把它算进 Express，拿掉它就对不上（143 的 W14真实.别名证据 测试把这个对帐写成可执行的算术）；另有 Grab 官网 https://www.grab.com/my/express/ 把 4-Hour Delivery 列为 GrabExpress 的服务之一，以及本 repo 两份真实 fixture（W01、W33）各 19 笔 PLAN-1- 订单号对 19 个 GrabExpress 平台栏位（笔数一一对应；GrabExpress 订单号前缀见 extractOrderIds_），W14 那笔的订单号同样是 PLAN-1- 前缀。'
   }
 ];
 
