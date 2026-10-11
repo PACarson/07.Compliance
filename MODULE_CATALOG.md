@@ -84,8 +84,8 @@
 - **Responsibility**: 订单层级抽取编排（`runGeminiOrderExtractionWithFallback_`，内部呼叫 `extractOrders()`）、逐日汇总与持久化（`writeDailyAllocationBatch_`）、幂等（skip-if-已 Fully_Allocated，`force:true` 可覆盖）
 - **Owned data**: `Daily_Allocation`、`Non_Order_Income_Allocation`
 - **Execution entry points**: 2026-09-15 前**无任何生产呼叫方**，只有自己的测试文件调用；2026-09-15 起由 170 的 `consoleRunDailyAllocation_` 调用
-- **Verification status**: **真实 GAS 已验证 PASS**（2026-09-25，`consoleRunDailyAllocation_` 真实呼叫 `extractOrders()`，针对 `CMP-INCOME-2026-W01` 173/173 笔正确映射，见 VERIFICATION_STATUS.md）。2026-09-24 修复一处真实缺陷：`runGeminiOrderExtractionWithFallback_` 原本未验证 `document.totalPages` 合法性，chunk fallback 会算出 `NaN` page range 仍然真实呼叫 Gemini——已加 guard，非法值直接落 `Needs_Review`
-- **Known limitations**: Order_Allocation/Monthly_Allocation 未实作；Insentif/Tip/Bayaran lain-lain 逐笔日期抽取未实作（`matchInsentifLineDate_` 等只做日期判定，判不出完整一行，ADR-005 明确排除范围，非缺陷）；`parseOrderRowCandidate_`/`splitIntoDayBlocks_`/`parseDayBlock_` 为 Phase 1-3 遗留死代码，grep 确认生产路径零引用，只有自己的测试文件调用
+- **Verification status**: **真实 GAS 已验证 PASS**（2026-09-25，`consoleRunDailyAllocation_` 真实呼叫 `extractOrders()`，针对 `CMP-INCOME-2026-W01` 173/173 笔正确映射，见 VERIFICATION_STATUS.md）。2026-09-24 修复一处真实缺陷：`runGeminiOrderExtractionWithFallback_` 原本未验证 `document.totalPages` 合法性，chunk fallback 会算出 `NaN` page range 仍然真实呼叫 Gemini——已加 guard，非法值直接落 `Needs_Review`。**2026-10-07 起的变更不在上述 PASS 范围内**：platform 别名表（`PLATFORM_ALIASES_`/`classifyPlatform_`，`4-Hour Delivery` → `GrabExpress`，由 2026-10-03 的真实 GAS 日志触发，见 ADR-005 2026-10-07 一节）与候选新增的 `platform_raw` 栏位，只经 Node 测试——`143` 现为 133 项、128 通过，另 5 项失败仍是 W01 那笔已知 fixture 层级 artefact，内容未变；含整份真实 W14 PDF 的端到端测试，但其中「Gemini」是 pdfplumber 确定性替身，不是真实 Gemini。W14 在真实 GAS 重跑 `consoleRunDailyAllocation`：**PENDING**
+- **Known limitations**: platform 别名表目前只有 1 条，证据写在表项的 `evidence` 栏位与 ADR-005 2026-10-07 一节，表结构 Steven 尚未逐项审阅；别的未知 `platform_raw` 仍 fail-closed 拒绝（CMP-P10），这是刻意设计，不是缺陷；Order_Allocation/Monthly_Allocation 未实作；Insentif/Tip/Bayaran lain-lain 逐笔日期抽取未实作（`matchInsentifLineDate_` 等只做日期判定，判不出完整一行，ADR-005 明确排除范围，非缺陷）；`parseOrderRowCandidate_`/`splitIntoDayBlocks_`/`parseDayBlock_` 为 Phase 1-3 遗留死代码，grep 确认生产路径零引用，只有自己的测试文件调用
 
 ### 150_ComplianceCalendar.js
 - **Responsibility**: 义务/提醒引擎（`computeObligationStatus_`/Upcoming-Due_Soon-Overdue 查询时即算，不存栏位）
@@ -100,10 +100,10 @@
 - **Known limitations**: `unallocated_non_order_income` 在同一周横跨的两个月各自查询时都会看到（跟既有 `needs_allocation` 同一逻辑），YTD 层级已正确去重，逐月数字本身不去重（设计如此，非缺陷）
 
 ### 170_OperatorConsole.js（+ .html）
-- **Responsibility**: HTMLService Console，唯一的人工操作入口（批次汇入、Retry、Dashboard、Drill-down、2026-09-15 新增 Daily Allocation 触发）
+- **Responsibility**: HTMLService Console，唯一的人工操作入口（批次汇入、Retry、Dashboard、Drill-down、2026-09-15 新增 Daily Allocation 触发、2026-10-04/07 新增 PDF 汇入恢复中心——ADR-006、扫描结果排序）
 - **Execution entry points**: 全部 `consoleXxx`（公开，无底线）转发到 `consoleXxx_`（私有，CMP-CR5）
-- **Verification status**: **真实 GAS 已验证 PASS**——2026-09-15 两轮真实 GAS 执行发现并修复环境相容性问题后第三轮 PASS；2026-09-25，`consoleRunDailyAllocation_` 真实端到端跑通（详见 VERIFICATION_STATUS.md）
-- **Known limitations**: `isoDateStringToParts_` 曾未处理 Sheets 读回的原生 Date 物件（Steven 2026-09-25 真实执行独立诊断+修复，已同步）；`.html` 至今没有任何代码呈现 `partially_allocated`/`unallocated_non_order_income`（2026-09-15 已知缺口，持续未处理，见 VERIFICATION_STATUS.md）
+- **Verification status**: **真实 GAS 已验证 PASS**——2026-09-15 两轮真实 GAS 执行发现并修复环境相容性问题后第三轮 PASS；2026-09-25，`consoleRunDailyAllocation_` 真实端到端跑通（详见 VERIFICATION_STATUS.md）。**2026-10-04 之后新增的部分不在上述 PASS 范围内**：ADR-006 Recovery Center 后端（`consoleGetRecoveryStatus_`/`summarizeEvidenceFailure_`/`consoleRetrySelectedFiles_`/`realEvidenceScanner_`，2026-10-04）、`.html` 里 2026-10-07 新增的 Recovery Center UI 与扫描结果排序，只经 Node 测试——`171` 现为 141 项全过，UI 部分是从 HTML 抽出真函式、配假 DOM 与假 `google.script.run` 跑的；真实 GAS 部署、真实浏览器渲染都**未验证**（见 ADR-006、VERIFICATION_STATUS.md 第 10–12 项）
+- **Known limitations**: Recovery Center 的 `consoleGetRecoveryStatus` 经真实 `google.script.run` 回传是否会变成 `null`（对照 2026-09-27 起 dashboard 在真实 `google.script.run` 下回传 `null` 的那次，记录里判断的根因是 Date 物件）未知——UI 对 `null`/格式错误有明确的错误显示，但没经真实传输验证；`isoDateStringToParts_` 曾未处理 Sheets 读回的原生 Date 物件（Steven 2026-09-25 真实执行独立诊断+修复，已同步）；`.html` 至今没有任何代码呈现 `partially_allocated`/`unallocated_non_order_income`（2026-09-15 已知缺口，持续未处理，见 VERIFICATION_STATUS.md）
 
 ### 190_Tests_Contracts.js
 - **Responsibility**: 验证每个 Parser/Adapter 是否满足其文档化的接口形状

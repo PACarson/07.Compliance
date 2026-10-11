@@ -8,12 +8,13 @@
 | [ADR-003](ADR-003-reconciliation-decoupled.md) | Reconciliation 与 Verified Income 解耦 | ACCEPTED / IMPLEMENTED |
 | [ADR-004](ADR-004-daily-order-level-allocation.md) | Daily Order-Level Allocation 四层数据模型 | ACCEPTED / PARTIALLY IMPLEMENTED |
 | [ADR-005](ADR-005-gemini-order-extraction.md) | Gemini Extraction Adapter（订单层级）| CLOSED |
+| [ADR-006](ADR-006-pdf-import-recovery-center.md) | PDF Import Recovery Center | PROPOSED（架构）/ 后端 IMPLEMENTED / UI IMPLEMENTED（2026-10-07）——后端与 UI 都只经 Node 测试，未 VERIFIED |
 
-全部 6 项都是**历史决策的恢复记录**，不是这次治理建设新做的决定——本次治理建设没有批准、拒绝、或重新打开任何一项。ADR-000/001/002 的原始决定日期无法从现有证据精确还原，标记为 "Historical date unknown"；ADR-003/004/005 有明确的原始日期与之后的演进记录。
+前 6 项是**历史决策的恢复记录**，不是治理建设新做的决定——本次治理建设没有批准、拒绝、或重新打开任何一项。ADR-000/001/002 的原始决定日期无法从现有证据精确还原，标记为 "Historical date unknown"；ADR-003/004/005 有明确的原始日期与之后的演进记录。**ADR-006 不是历史恢复记录，是 2026-10-04 这个窗口里真正新增的 ADR**——见该文件本身的 Status 行，分层状态不要简化成一个词。
 
 ## 编号规则
 
-三位数递增，不因整理治理文件而重新编号或补空号。下一个新 ADR 是 ADR-006。
+三位数递增，不因整理治理文件而重新编号或补空号。下一个新 ADR 是 ADR-007。
 
 ## 状态词汇
 

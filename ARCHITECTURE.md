@@ -70,6 +70,7 @@ Monthly/YTD 汇总 + Compliance Projection（SOCSO 固定值/EPF·Tax 明确 Not
 
 ## PROPOSED / NOT YET IMPLEMENTED
 
+- **PDF Import Recovery Center**（ADR-006）——架构本身仍是 `PROPOSED`（Steven 尚未确认），所以放在这一节、不放进上面的 CURRENT IMPLEMENTATION。后端（`170_OperatorConsole.js`：用「证据档案是否存在」判定 Pending/Failed、选取重试）与 `170_OperatorConsole.html` 的 UI 都已实作，**只经 Node 测试，未经真实 GAS/浏览器验证**，见 ADR-006 的分层状态
 - **Order_Allocation、Monthly_Allocation 两张表**（ADR-004 四层模型的另外两层）——完全未开始，未来阶段
 - **Insentif/Tip/Bayaran lain-lain 逐笔日期抽取**——ADR-005 明确排除的范围，目前的抽取契约（`extract()` 只回报周总额）本来就不支持
 - **Compliance Calendar 真实义务数据**——`150_ComplianceCalendar.js` 引擎本身已实作+测试，但 `Compliance_Calendar` 表里目前没有任何一笔真实义务记录（路税/保险/证件到期日都还没输入）
