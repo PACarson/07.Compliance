@@ -18,6 +18,21 @@
 
 ---
 
+## 2026-10-11 — Phase N：单笔执行预算（`consoleRunDailyAllocation_` / `extractOrders()` 的 6 分钟硬限制风险）
+
+- **类型**: Production code changes（`127`：`createExecutionBudget_`/`createBudgetExhaustedError_` + 重试／模型链的准入闸；`142`：预算耗尽时明确跳过剩余 stage 的 attempts 标签；`170_OperatorConsole.js`：预算接线 + `budgetExhausted`/`executionBudget` 回传；`170_OperatorConsole.html`：预算耗尽的明确文字）+ Verification-only changes（Node + 虚拟时钟 + 合成 HTTP 回应 + mutation testing + GAS 式 scope 模拟，非真实 GAS）
+- **流程**: Governance → Authorized Implementation（Steven 2026-10-11 的 N → O → P 分阶段授权；本条只涵盖 Phase N。Phase O〔PDF 页数识别〕、Phase P〔Documents 处理状态〕是调查／设计，不改生产代码、不改表结构，结果另外提交）
+- 详见 `ADR-005` 新增 2026-10-11 段落（调用链、各层最大次数、设计、前后对照、取舍、残余风险）、`VERIFICATION_STATUS.md` 新增第 13 项、`900_Constitution.js` 的 `changelog` 数组同日期条目、`MODULE_CATALOG.md` 的 127/142/170 条目
+- **问题**：一次 `consoleRunDailyAllocation_` 的重试预算被连乘三层——3 个 stage × 3 个模型 × 每个 `postJson` 4 次 fetch = 36 次 fetch，光睡眠最坏 540 秒，超过 GAS 360 秒硬限制；平台中止不是 catchable 例外（2026-10-01 `consoleBatchImport` 在 360.418 秒被杀）。ADR-005 2026-10-02 段落曾把它记成「已知、未解决的理论风险」
+- **修法（最小改动）**：执行级「准入控制」——次数 12（stage 与模型两个维度共用）+ 时间闸（`已耗时 + 睡眠 + max(115 秒, 最慢一次) ≤ 360 − 30 秒`）；每次 fetch 之前和每次重试睡眠之前先问预算；拒绝一次即 sticky；拒绝时抛带结构化旗标的错误、`142` 记进 attempts、走既有 `Needs_Review`，不是静默跳过
+- **没动（逐项有测试）**：`125` 四层验证、逐日 checksum、整份对帐单 checksum、`Needs_Review` 语义、`writeDailyAllocationBatch_` 的 Fully_Allocated 防重复、`142` 回传形状、Gemini schema/prompt
+- Schema changes: NONE　Extraction-contract changes: NONE　Persistence-contract changes: NONE
+- **Node 结果**：全仓回归 697 → 779 PASS／5 FAIL（5 个是既有 W01 legacy failures，内容逐字不变；UTC 与 Asia/Kuala_Lumpur 各跑一次、相同）；`128` 94 → 122、`143` 128 → 152、`171` 141 → 171；mutation 55 种、54 种被抓到、1 个等价幸存（`170.html` 的 HTML 转义，数字型别守卫仍在）
+- **过程中发现并修掉**：新增的 `executionBudget.elapsedMs` 让 `171` 既有的「公开版本转发结果一致」断言变成约 7/30 随机失败（改注入固定时钟）；`170.html` 预算文字在快照不完整时会印出 `undefined`/`NaN`（加有限数字守卫）；原本就存在的测试缺口——拿掉逐日 checksum 除已知 legacy 失败外没有任何测试失败（新增 `143` 测试补上）
+- **诚实记录**：真实 GAS、真实 Gemini、真实浏览器均 PENDING（全部证据是 Node + 虚拟时钟 + 合成 HTTP 回应，预算耗尽路径从未在真实环境触发过）。30 秒保留时间与 115 秒下限是假设值；预算管不到已经开始的那一次 `UrlFetchApp.fetch`；整份呼叫超过约 165 秒时 chunk fallback 会被明确拒绝（保守取舍，chunk 真实耗时没量过）
+- **留给 Steven 决定（本次没有做）**：(1) 部分写入窗口——`Daily_Allocation` 是 append-only、没有「这一批已写完」的标记，预算只缩小窗口、没有关掉；关掉需要持久化契约变更。(2) 治本方向——「每个 chunk 一次独立执行」需要跨执行续传，是架构决定。(3) 预算常数（12／30 秒／115 秒）与上面的 chunk 拒绝取舍尚未经 Steven 审阅
+- **观察到、未改动的既有行为**：对已 `Fully_Allocated` 的收入重跑，仍会先呼叫 Gemini 才在写入时跳过（防重复在写入时，不在呼叫之前）
+
 ## 2026-10-07 — Platform 别名 "4-Hour Delivery"（真实 GAS 触发的 fail-closed gate 命中）+ 143 测试档的 GAS-scope 既有缺陷修复 + 扫描结果排序 + PDF 汇入恢复中心 UI（ADR-006）+ Recovery 后端 mutation testing
 
 - **类型**: Production code changes（142：`PLATFORM_ALIASES_`/`normalizePlatformLabel_`/`classifyPlatform_`，生产路径与旧死代码路径共用同一个判定；170.html：扫描结果排序下拉 + 纯函数 `sortScanFiles`；**170.html：「PDF 汇入恢复中心」区块——Pending/Failed/Completed 分页、单档 Retry、选取多档 Retry、Filter、Refresh；后端 `170_OperatorConsole.js` 一行没动**）+ Verification-only changes（Node + mutation + GAS 式 scope 模拟 + 整份真实 W14 数据端到端，非真实 GAS；143 新增 17 项、171 新增 38 项：13 排序 + 21 Recovery UI + 4 项后端 mutation 缺口断言，171 是这个专案第一个会读 170.html 的自动化测试）+ 测试档缺陷修复（143 的 resolver 提到顶层）

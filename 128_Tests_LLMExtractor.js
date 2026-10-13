@@ -15,7 +15,10 @@ if (typeof require === 'function') {
     parseRetryDelaySeconds_, resolveLLMExtractorConfig_, DEFAULT_LLM_EXTRACTOR_MODEL_,
     createRetryingPostJson_, MAX_SINGLE_RETRY_SLEEP_MS_, MAX_TOTAL_RETRY_SLEEP_MS_,
     SINGLE_RETRY_BUDGET_, BATCH_RETRY_BUDGET_,
-    postJsonWithModelFallback_, DEFAULT_LLM_EXTRACTOR_FALLBACK_MODEL_, DEFAULT_LLM_EXTRACTOR_FALLBACK_MODEL_2_
+    postJsonWithModelFallback_, DEFAULT_LLM_EXTRACTOR_FALLBACK_MODEL_, DEFAULT_LLM_EXTRACTOR_FALLBACK_MODEL_2_,
+    // 2026-10-11 Phase N：执行级调用预算
+    createExecutionBudget_, createBudgetExhaustedError_, realLLMExtractor_,
+    EXECUTION_HARD_LIMIT_MS_, EXECUTION_RESERVE_MS_, EXECUTION_MIN_CALL_ESTIMATE_MS_, EXECUTION_MAX_FETCHES_
   } = require('./127_LLMExtractor.js');
   var { assertEqual_ } = require('./105_TestUtils.js');
 }
@@ -137,6 +140,39 @@ function tryPost_(postJson) {
 
 function fakeScriptProps_(map) {
   return { getProperty(key) { return Object.prototype.hasOwnProperty.call(map, key) ? map[key] : null; } };
+}
+
+// ---- 2026-10-11 Phase N 测试用 helper（名字带 PhaseN128 是因为 GAS 是单一全局作用域，
+// 不同测试文件的同名 function 会静默互相覆盖；刻意避开泛用名字）----
+/** 假时钟：fetch 的耗时跟睡眠都推进它；预算的 now 就接这个，测试不用真的等。 */
+function fakeClockPhaseN128_(startMs) {
+  const c = { t: startMs || 0 };
+  c.now = function () { return c.t; };
+  return c;
+}
+/**
+ * 跟 fakeHttpIo_ 一样依序回传预设回应，但 fetch 要花 latencyMs（数字或函数 (idx, response) => ms）、
+ * 睡眠也推进同一个假时钟，并按顺序记下 'fetch'/'sleep' 事件——用来验证「不白睡」（最后一个事件
+ * 不会是 sleep）。response.throws 会让 fetch 抛例外（模拟 UrlFetchApp 的网络例外）。
+ */
+function timedIoPhaseN128_(clock, responses, latencyMs) {
+  const calls = [];
+  const sleeps = [];
+  const events = [];
+  let i = 0;
+  return {
+    calls, sleeps, events,
+    fetch() {
+      const idx = i++;
+      const r = typeof responses === 'function' ? responses(idx) : responses[Math.min(idx, responses.length - 1)];
+      calls.push({ idx, startMs: clock.t, code: r.code });
+      events.push('fetch');
+      clock.t += typeof latencyMs === 'function' ? latencyMs(idx, r) : (latencyMs || 0);
+      if (r.throws) throw new Error(r.throws);
+      return { getResponseCode() { return r.code; }, getContentText() { return r.text; } };
+    },
+    sleep(ms) { sleeps.push(ms); events.push('sleep'); clock.t += ms; }
+  };
 }
 
 function runAllLLMExtractorTests() {
@@ -430,6 +466,212 @@ function runAllLLMExtractorTests() {
   assertEqual_('resolve·设成空白/只有空格也当没设（否则模型名变空白，URL 直接 404）', [cfgBlank.model, cfgBlank.modelSource], [DEFAULT_LLM_EXTRACTOR_MODEL_, 'default'], results);
   assertEqual_('resolve·前后空白/换行会去掉', resolveLLMExtractorConfig_(fakeScriptProps_({ LLM_EXTRACTOR_MODEL: '  gemini-2.5-flash \n' })).model, 'gemini-2.5-flash', results);
   assertEqual_('resolve·默认模型是 gemini-3.8-flash（2026-09-28 定的）', DEFAULT_LLM_EXTRACTOR_MODEL_, 'gemini-3.8-flash', results);
+
+  // =====================================================================
+  // 2026-10-11 Phase N：执行级调用预算（createExecutionBudget_ / createBudgetExhaustedError_）
+  // 背景：单个 postJson 的 4 次尝试 × 3 层模型链 × 142 的 3 个 stage 会连乘到 36 次 fetch、
+  // 纯睡眠最坏 540 秒，超过 GAS 360 秒硬限制（平台强制中止，不是 catchable 的例外）。
+  // 预算是「准入控制」：每次 fetch 之前、每次睡眠之前先问；放不下就抛 isBudgetExhausted。
+  // 全部用假时钟（Node，不真的等）。真实 GAS 重新验证：PENDING。
+  // =====================================================================
+
+  // ---- 常数：数字本身 + 它们之间必须成立的关系（设计意图）----
+  assertEqual_('Phase N·预算常数：硬限制 360 秒 / 保留 30 秒 / 最短真实呼叫 115 秒（Gate 2 真实数据）/ 最多 12 次 fetch', [EXECUTION_HARD_LIMIT_MS_, EXECUTION_RESERVE_MS_, EXECUTION_MIN_CALL_ESTIMATE_MS_, EXECUTION_MAX_FETCHES_], [360000, 30000, 115000, 12], results);
+  assertEqual_('Phase N·预算常数：次数上限 ≥ 一次完整模型链（3 模型 × 4 次 = 12，一个 stage 要能走完整条链）且 < 三层连乘（3 × 3 × 4 = 36，修的就是这个）', EXECUTION_MAX_FETCHES_ >= 3 * 4 && EXECUTION_MAX_FETCHES_ < 3 * 3 * 4, true, results);
+  assertEqual_('Phase N·预算常数：硬限制 − 保留 > 最短真实呼叫（第一次呼叫永远放得下，预算不会一开始就拒绝所有呼叫）', EXECUTION_HARD_LIMIT_MS_ - EXECUTION_RESERVE_MS_ > EXECUTION_MIN_CALL_ESTIMATE_MS_, true, results);
+
+  // ---- 次数闸 ----
+  const clkCount = fakeClockPhaseN128_();
+  const budCount = createExecutionBudget_({ now: clkCount.now });
+  const countAdmits = [];
+  for (let k = 0; k < 13; k++) countAdmits.push(budCount.tryBeginFetch().ok);
+  assertEqual_('Phase N·预算·次数闸：前 12 次放行、第 13 次拒绝（reason=max_fetches），snapshot 记着已开始 12 次', { first12: countAdmits.slice(0, 12).every(Boolean), thirteenth: countAdmits[12], reason: budCount.snapshot().exhaustedReason, started: budCount.snapshot().fetchesStarted, exhausted: budCount.snapshot().exhausted }, { first12: true, thirteenth: false, reason: 'max_fetches', started: 12, exhausted: true }, results);
+
+  // ---- 时间闸边界（用小数字，起点故意不是 0：经过时间必须用差值算）----
+  const tinyOpts = { hardLimitMs: 1000, reserveMs: 100, minCallEstimateMs: 300, maxFetches: 99 }; // 最晚开始时间 = 1000 − 100 − 300 = 600
+  const clkAtEdge = fakeClockPhaseN128_(5000);
+  const budAtEdge = createExecutionBudget_(Object.assign({ now: clkAtEdge.now }, tinyOpts));
+  clkAtEdge.t = 5000 + 600;
+  const atEdge = budAtEdge.tryBeginFetch();
+  const clkOverEdge = fakeClockPhaseN128_(5000);
+  const budOverEdge = createExecutionBudget_(Object.assign({ now: clkOverEdge.now }, tinyOpts));
+  clkOverEdge.t = 5000 + 601;
+  const overEdge = budOverEdge.tryBeginFetch();
+  assertEqual_('Phase N·预算·时间闸边界：已耗时 + 预计呼叫时间 恰好 == 硬限制 − 保留 → 放行（含边界）；多 1 毫秒 → 拒绝（reason=time），而且拒绝时不计入已开始的 fetch', [atEdge.ok, overEdge.ok, overEdge.reason, budOverEdge.snapshot().fetchesStarted], [true, false, 'time', 0], results);
+
+  // ---- 预计呼叫时间 = max(下限, 本次执行最慢的一次)：慢呼叫会拉高估计，快呼叫不会拉低 ----
+  const slowOpts = { hardLimitMs: 2000, reserveMs: 100, minCallEstimateMs: 300, maxFetches: 99 };
+  function admitAfterCall_(callMs, elapsedAtNextMs) {
+    const clk = fakeClockPhaseN128_();
+    const bud = createExecutionBudget_(Object.assign({ now: clk.now }, slowOpts));
+    const g = bud.tryBeginFetch();
+    clk.t += callMs;
+    bud.endFetch(g.startedAtMs);
+    clk.t = elapsedAtNextMs;
+    return bud.tryBeginFetch().ok;
+  }
+  assertEqual_('Phase N·预算·预计呼叫时间取本次执行最慢的一次：刚才那次花 500ms（> 下限 300ms）→ 最晚开始时间 = 2000−100−500 = 1400（1400 放行、1401 拒绝；只看下限的话 1500 本来会放行）', [admitAfterCall_(500, 1400), admitAfterCall_(500, 1401), admitAfterCall_(500, 1500)], [true, false, false], results);
+  assertEqual_('Phase N·预算·快呼叫不会把预计时间拉低到下限以下：刚才那次只花 50ms → 最晚开始时间仍是 2000−100−300 = 1600', [admitAfterCall_(50, 1600), admitAfterCall_(50, 1601)], [true, false], results);
+
+  // ---- sticky + canContinueAfter 只是询问 ----
+  const clkSticky = fakeClockPhaseN128_();
+  const budSticky = createExecutionBudget_(Object.assign({ now: clkSticky.now }, tinyOpts));
+  const hypothetical = budSticky.canContinueAfter(601); // 睡 601ms 之后放不下
+  const freshAfter = budSticky.tryBeginFetch();         // 单看「现在就开始」其实放得下（elapsed=0），但预算已经喊过停
+  assertEqual_('Phase N·预算·sticky：拒绝过一次之后一律拒绝（不会出现「这次不行、下一次又行」，142 的「剩下 stage 一律跳过」跟预算状态永远一致），原因沿用第一次的', [hypothetical.ok, hypothetical.reason, freshAfter.ok, freshAfter.reason, budSticky.snapshot().fetchesStarted], [false, 'time', false, 'time', 0], results);
+  const clkAsk = fakeClockPhaseN128_();
+  const budAsk = createExecutionBudget_(Object.assign({ now: clkAsk.now }, tinyOpts));
+  const askResults = [budAsk.canContinueAfter(0).ok, budAsk.canContinueAfter(100).ok];
+  assertEqual_('Phase N·预算·canContinueAfter 只是询问：不消耗 fetch 次数', [askResults, budAsk.snapshot().fetchesStarted], [[true, true], 0], results);
+  const clkAskFull = fakeClockPhaseN128_();
+  const budAskFull = createExecutionBudget_({ now: clkAskFull.now, maxFetches: 1 });
+  budAskFull.tryBeginFetch();
+  const askAfterFull = budAskFull.canContinueAfter(0);
+  assertEqual_('Phase N·预算·次数已用完时 canContinueAfter 也拒绝（不要为一个不会发生的重试白睡）', [askAfterFull.ok, askAfterFull.reason], [false, 'max_fetches'], results);
+
+  // ---- endFetch 的防御、snapshot 形状、选项验证、预设时钟 ----
+  const clkEnd = fakeClockPhaseN128_(1000);
+  const budEnd = createExecutionBudget_({ now: clkEnd.now });
+  budEnd.endFetch(undefined);
+  budEnd.endFetch('x');
+  budEnd.endFetch(clkEnd.t + 5000); // 开始时间在「未来」= 时钟倒退，负的持续时间
+  assertEqual_('Phase N·预算·endFetch 收到缺参数/非数字/时钟倒退（负持续时间）→ 忽略，不污染预计呼叫时间', budEnd.snapshot().maxObservedCallMs, 0, results);
+  const snapShape = budEnd.snapshot();
+  assertEqual_('Phase N·预算·snapshot 只有 primitive（数字/字串/布尔/null）：会原样经 google.script.run 回传，不能有 Date；JSON 往返不变', JSON.stringify(JSON.parse(JSON.stringify(snapShape))) === JSON.stringify(snapShape) && Object.keys(snapShape).every((k) => snapShape[k] === null || ['number', 'string', 'boolean'].indexOf(typeof snapShape[k]) !== -1), true, results);
+  const budBadOpts = createExecutionBudget_({ now: 'not-a-function', hardLimitMs: -1, reserveMs: NaN, minCallEstimateMs: 'x', maxFetches: Infinity });
+  const badOptsSnap = budBadOpts.snapshot();
+  assertEqual_('Phase N·预算·选项非法（负数/NaN/字串/Infinity/now 不是函数）→ 各自退回默认值，不抛错', [badOptsSnap.hardLimitMs, badOptsSnap.reserveMs, badOptsSnap.estimatedCallMs, badOptsSnap.maxFetches], [EXECUTION_HARD_LIMIT_MS_, EXECUTION_RESERVE_MS_, EXECUTION_MIN_CALL_ESTIMATE_MS_, EXECUTION_MAX_FETCHES_], results);
+  const budRealClock = createExecutionBudget_();
+  const realClockSnap = budRealClock.snapshot();
+  assertEqual_('Phase N·预算·不给 now → 用真的 Date.now（已耗时是很小的非负数；预设预算第一次一定放行）', [typeof realClockSnap.elapsedMs, realClockSnap.elapsedMs >= 0 && realClockSnap.elapsedMs < 5000, budRealClock.tryBeginFetch().ok], ['number', true, true], results);
+
+  // ---- createBudgetExhaustedError_：结构化旗标 + 保留最后一次实际错误 ----
+  const lastReal503 = capacityError_('LLM API 回传 HTTP 503：{"error":{"code":503}}');
+  const lastReal429 = (function () { const e = new Error('LLM API 回传 HTTP 429：RESOURCE_EXHAUSTED'); e.isQuotaExhausted = true; return e; })();
+  const exhaustedFrom503 = createBudgetExhaustedError_('max_fetches', { fetchesStarted: 12, maxFetches: 12 }, lastReal503);
+  const exhaustedFrom429 = createBudgetExhaustedError_('time', { elapsedMs: 200000, estimatedCallMs: 115000, reserveMs: 30000, hardLimitMs: 360000 }, lastReal429);
+  const exhaustedNoLast = createBudgetExhaustedError_('max_fetches', { fetchesStarted: 0, maxFetches: 0 }, undefined);
+  assertEqual_('Phase N·预算错误·带结构化旗标 isBudgetExhausted/budgetReason，快照原样挂上；最后一次实际错误的 isCapacityIssue/isQuotaExhausted 照样带过来（诊断用）、错误文字保留「最后一次实际错误」',
+    { flag: exhaustedFrom503.isBudgetExhausted, reason: exhaustedFrom503.budgetReason, cap: exhaustedFrom503.isCapacityIssue, quota: exhaustedFrom503.isQuotaExhausted, keepsLast: /最后一次实际错误：LLM API 回传 HTTP 503/.test(exhaustedFrom503.message), snapshotKept: exhaustedFrom503.executionBudget.fetchesStarted, from429: [exhaustedFrom429.isQuotaExhausted, exhaustedFrom429.isCapacityIssue, exhaustedFrom429.budgetReason] },
+    { flag: true, reason: 'max_fetches', cap: true, quota: false, keepsLast: true, snapshotKept: 12, from429: [true, false, 'time'] }, results);
+  assertEqual_('Phase N·预算错误·预算一开始就用尽（没有「最后一次实际错误」）→ 两个旗标都是 false、文字里没有「最后一次实际错误」；文字明说是「明确失败，不是静默跳过」', { cap: exhaustedNoLast.isCapacityIssue, quota: exhaustedNoLast.isQuotaExhausted, noLastText: exhaustedNoLast.message.indexOf('最后一次实际错误') === -1, explicit: /不是静默跳过/.test(exhaustedNoLast.message) }, { cap: false, quota: false, noLastText: true, explicit: true }, results);
+
+  // ---- createRetryingPostJson_ + executionBudget ----
+  const ioNoBudget503 = fakeHttpIo_([{ code: 503, text: '{}' }]);
+  const rNoBudget503 = tryPost_(createRetryingPostJson_(ioNoBudget503, undefined, undefined));
+  assertEqual_('Phase N·postJson·不给 executionBudget（第三个参数 undefined）→ 跟 2026-10-02 的行为一字不差：打 4 次、睡 1/2/4 秒、错误不带预算旗标', [ioNoBudget503.calls.length, ioNoBudget503.sleeps, !!rNoBudget503.errorObj.isBudgetExhausted, rNoBudget503.errorObj.isCapacityIssue], [4, [1000, 2000, 4000], false, true], results);
+
+  const clkCut = fakeClockPhaseN128_();
+  const ioCut = timedIoPhaseN128_(clkCut, [{ code: 503, text: '{}' }], 0);
+  const rCut = tryPost_(createRetryingPostJson_(ioCut, undefined, createExecutionBudget_({ now: clkCut.now, maxFetches: 2 })));
+  assertEqual_('Phase N·postJson·次数用尽中途拒绝：只打 2 次；睡眠只有第一次重试前那次，拒绝发生在「睡之前」所以没有白睡（最后一个事件是 fetch，不是 sleep）；错误带 isBudgetExhausted + 上一次 503 的 isCapacityIssue + 最后一次实际错误',
+    { fetches: ioCut.calls.length, sleeps: ioCut.sleeps, lastEvent: ioCut.events[ioCut.events.length - 1], flag: rCut.errorObj.isBudgetExhausted === true, reason: rCut.errorObj.budgetReason, cap: rCut.errorObj.isCapacityIssue === true, mentionsLast: /HTTP 503/.test(rCut.error) },
+    { fetches: 2, sleeps: [1000], lastEvent: 'fetch', flag: true, reason: 'max_fetches', cap: true, mentionsLast: true }, results);
+
+  const clkZero = fakeClockPhaseN128_();
+  const ioZero = timedIoPhaseN128_(clkZero, [{ code: 200, text: '{"ok":1}' }], 0);
+  const rZero = tryPost_(createRetryingPostJson_(ioZero, undefined, createExecutionBudget_({ now: clkZero.now, maxFetches: 0 })));
+  assertEqual_('Phase N·postJson·预算在第一次 fetch 之前就拒绝：一次 fetch 都不打、不睡；错误明确带旗标，没有「最后一次实际错误」', { fetches: ioZero.calls.length, sleeps: ioZero.sleeps, flag: rZero.errorObj.isBudgetExhausted === true, noLast: rZero.error.indexOf('最后一次实际错误') === -1 }, { fetches: 0, sleeps: [], flag: true, noLast: true }, results);
+
+  const clkTime = fakeClockPhaseN128_();
+  const ioTime = timedIoPhaseN128_(clkTime, [{ code: 429, text: quota429Body_('53.5s') }, { code: 200, text: '{"ok":1}' }], 0);
+  const rTime = tryPost_(createRetryingPostJson_(ioTime, undefined, createExecutionBudget_({ now: clkTime.now, hardLimitMs: 100000, reserveMs: 10000, minCallEstimateMs: 40000 })));
+  assertEqual_('Phase N·postJson·时间闸在「睡之前」拒绝：429 要等 54 秒，但睡完就放不下下一次呼叫（最晚开始时间只有 50 秒）→ 不睡、不重打，错误带 isBudgetExhausted(time) + 429 的 isQuotaExhausted',
+    { fetches: ioTime.calls.length, sleeps: ioTime.sleeps, flag: rTime.errorObj.isBudgetExhausted === true, reason: rTime.errorObj.budgetReason, quota: rTime.errorObj.isQuotaExhausted === true, elapsedMs: clkTime.t },
+    { fetches: 1, sleeps: [], flag: true, reason: 'time', quota: true, elapsedMs: 0 }, results);
+
+  // 回归守卫：2026-09-28 真实验证过的「429 依 Gemini 建议秒数等待后重试」在预设预算下必须照样成功
+  const clkProven = fakeClockPhaseN128_();
+  const ioProven = timedIoPhaseN128_(clkProven, [{ code: 429, text: quota429Body_('52s') }, { code: 200, text: '{"ok":1}' }], 0);
+  const budProven = createExecutionBudget_({ now: clkProven.now });
+  const rProven = tryPost_(createRetryingPostJson_(ioProven, SINGLE_RETRY_BUDGET_, budProven));
+  assertEqual_('Phase N·postJson·回归守卫（2026-09-28 真实验证过的路径）：429 建议等 52 秒 → 预设预算下仍然睡 52.5 秒、重试、成功，不被预算拦下', { value: rProven.value, sleeps: ioProven.sleeps, fetches: ioProven.calls.length, exhausted: budProven.snapshot().exhausted }, { value: { ok: 1 }, sleeps: [52500], fetches: 2, exhausted: false }, results);
+
+  // 每次 fetch 的耗时都记下来（成功、HTTP 错误、抛例外都算）
+  const clkDur = fakeClockPhaseN128_();
+  const budDur = createExecutionBudget_({ now: clkDur.now });
+  tryPost_(createRetryingPostJson_(timedIoPhaseN128_(clkDur, [{ code: 200, text: '{"ok":1}' }], 200000), undefined, budDur));
+  const clkThrow = fakeClockPhaseN128_();
+  const budThrow = createExecutionBudget_({ now: clkThrow.now });
+  const rThrow = tryPost_(createRetryingPostJson_(timedIoPhaseN128_(clkThrow, [{ code: 0, throws: 'DNS failure' }], 70000), undefined, budThrow));
+  assertEqual_('Phase N·postJson·记录每次 fetch 的耗时：成功那次 200 秒记进 maxObservedCallMs；fetch 直接抛例外（网络例外）也记（try/finally），而且例外原样往外传、不被预算改写', { ok: budDur.snapshot().maxObservedCallMs, threw: budThrow.snapshot().maxObservedCallMs, message: rThrow.error, notBudget: !rThrow.errorObj.isBudgetExhausted }, { ok: 200000, threw: 70000, message: 'DNS failure', notBudget: true }, results);
+
+  // 同一个预算在多个 postJson 之间累计（预算是「整次执行」的，不是每个 postJson 各一份）
+  const clkShared = fakeClockPhaseN128_();
+  const sharedScript = [503, 503, 200, 503, 503, 200].map((c) => (c === 200 ? { code: 200, text: '{"ok":1}' } : { code: c, text: '{}' }));
+  const ioShared = timedIoPhaseN128_(clkShared, sharedScript, 0);
+  const budShared = createExecutionBudget_({ now: clkShared.now, maxFetches: 5 });
+  const postShared = createRetryingPostJson_(ioShared, undefined, budShared);
+  const firstShared = tryPost_(postShared);
+  const secondShared = tryPost_(postShared);
+  assertEqual_('Phase N·postJson·同一个预算跨多次 postJson 累计：第一次用 3 次 fetch 成功，第二次只剩 2 次 → 第 6 次 fetch 被拒绝（总共 5 次）', { first: firstShared.value, secondFlag: secondShared.errorObj && secondShared.errorObj.isBudgetExhausted === true, totalFetches: ioShared.calls.length }, { first: { ok: 1 }, secondFlag: true, totalFetches: 5 }, results);
+
+  // ---- postJsonWithModelFallback_：预算错误不换下一个模型 ----
+  const budgetErrCarrying503 = createBudgetExhaustedError_('max_fetches', { fetchesStarted: 12, maxFetches: 12 }, capacityError_('last 503'));
+  const httpBudgetStop = fakeHttpClientPerModel_({ 'm1': budgetErrCarrying503, 'm2': { ok: 'must-not-be-called' } });
+  let budgetStopErr = null;
+  try { postJsonWithModelFallback_(['m1', 'm2'], 'key1', httpBudgetStop, {}); } catch (e) { budgetStopErr = e; }
+  assertEqual_('Phase N·模型链·预算错误（即使带着上一次 503 的 isCapacityIssue）不换下一个模型：只打过第一个、抛出的就是那个错误；allModelsCapacityExhausted 是 false（没有全部试过——旗标的定义）',
+    { calls: httpBudgetStop._calls.map((c) => c.modelName), sameError: budgetStopErr === budgetErrCarrying503, allExhausted: budgetStopErr && budgetStopErr.allModelsCapacityExhausted }, { calls: ['m1'], sameError: true, allExhausted: false }, results);
+
+  // ---- 整条链（真的 createRetryingPostJson_ + createLLMExtractor_）：数字 ----
+  function chainWithBudget_(maxFetchesOverride) {
+    const clk = fakeClockPhaseN128_();
+    const io = timedIoPhaseN128_(clk, [{ code: 503, text: '{}' }], 0);
+    const bud = maxFetchesOverride === null ? undefined : createExecutionBudget_({ now: clk.now });
+    const extractor = createLLMExtractor_({ apiKey: 'k', model: 'm1', modelChain: ['m1', 'm2', 'm3'], evidenceFolderId: 'f' }, { driveService: fakeDriveService_(), httpClient: { postJson: createRetryingPostJson_(io, SINGLE_RETRY_BUDGET_, bud) }, now: new Date('2026-10-11T00:00:00Z') });
+    const seen = [];
+    for (let k = 0; k < 3; k++) { // 142 最多呼叫 3 次 extractOrders（full + 2 chunk）
+      let err = null;
+      try { extractor.extractOrders({ fileId: 'f1', documentId: 'd1' }, null); } catch (e) { err = e; }
+      seen.push({ fetchesSoFar: io.calls.length, budgetFlag: !!(err && err.isBudgetExhausted), threw: !!err });
+    }
+    return seen;
+  }
+  assertEqual_('Phase N·整条链（3 模型 × 4 次）全部 503：第一次 extractOrders 恰好用掉 12 次 fetch、抛的是真实的 503（不是预算错误）；第 2、3 次一进来就被预算拒绝、fetch 数不再增加', chainWithBudget_(undefined), [{ fetchesSoFar: 12, budgetFlag: false, threw: true }, { fetchesSoFar: 12, budgetFlag: true, threw: true }, { fetchesSoFar: 12, budgetFlag: true, threw: true }], results);
+  assertEqual_('Phase N·对照（没有预算 = 2026-10-02 的行为）：同样三次 extractOrders 打满 36 次 fetch——这就是被修掉的连乘', chainWithBudget_(null).map((s) => s.fetchesSoFar), [12, 24, 36], results);
+
+  // ---- 接线测试（Node-only）：用假的 GAS 全域物件跑「真的」realLLMExtractor_，确认预算真的接到打 Gemini 的那一层 ----
+  // 「建了预算却没接上」是这类修复最容易出的漏洞——上面的测试都是直接把预算交给 createRetryingPostJson_，
+  // 没有碰 realLLMExtractorDeps_ / realLLMExtractor_ 这条真正的接线。这里假装 GAS 的 UrlFetchApp /
+  // Utilities / DriveApp / PropertiesService，让真实的接线从头跑到尾。⚠️ 这仍然是 Node 里的假 GAS，
+  // 不是真实 GAS：真实 UrlFetchApp 的行为（逾时、回应大小……）这里完全没有验证。
+  if (typeof require === 'function' && typeof realLLMExtractor_ === 'function') {
+    const gScope = globalThis;
+    const gasNames = ['UrlFetchApp', 'Utilities', 'DriveApp', 'PropertiesService'];
+    const savedGas = {};
+    gasNames.forEach((k) => { savedGas[k] = { had: Object.prototype.hasOwnProperty.call(gScope, k), value: gScope[k] }; });
+    try {
+      const clkWire = fakeClockPhaseN128_();
+      let wireFetches = 0;
+      gScope.UrlFetchApp = { fetch() { wireFetches++; return { getResponseCode() { return 503; }, getContentText() { return '{}'; } }; } };
+      gScope.Utilities = { sleep(ms) { clkWire.t += ms; }, base64Encode(b) { return 'b64(' + b + ')'; }, newBlob(content, mime, name) { return { content, mime, name }; } };
+      gScope.DriveApp = { getFileById() { return { getBlob() { return { getBytes() { return 'bytes'; } }; } }; }, getFolderById() { return { createFile() { return { getId() { return 'ev-id'; } }; } }; } };
+      gScope.PropertiesService = { getScriptProperties() { return fakeScriptProps_({ GEMINI_API_KEY: 'k', EXTRACTION_EVIDENCE_FOLDER_ID: 'folder-1' }); } };
+      const threeStages_ = (extractor) => {
+        const flags = [];
+        for (let k = 0; k < 3; k++) {
+          try { extractor.extractOrders({ fileId: 'f1', documentId: 'd1' }, null); flags.push('ok'); } catch (e) { flags.push(e.isBudgetExhausted ? 'budget' : 'real'); }
+        }
+        return flags;
+      };
+      wireFetches = 0;
+      const wiredFlags = threeStages_(realLLMExtractor_('single', createExecutionBudget_({ now: clkWire.now })));
+      const wiredFetches = wireFetches;
+      wireFetches = 0;
+      const unwiredFlags = threeStages_(realLLMExtractor_('single'));
+      const unwiredFetches = wireFetches;
+      wireFetches = 0;
+      const batchFlags = threeStages_(realLLMExtractor_('batch'));
+      const batchFetches = wireFetches;
+      assertEqual_('Phase N·接线（假 GAS 全域物件跑真的 realLLMExtractor_）：给了 executionBudget → 三次 extractOrders 总共只打 12 次 UrlFetchApp.fetch，第 2、3 次是预算错误；不给 → 36 次（证明预算真的是靠这个参数接到最底层，不是别的巧合）',
+        { wired: [wiredFetches, wiredFlags], unwired: [unwiredFetches, unwiredFlags] },
+        { wired: [12, ['real', 'budget', 'budget']], unwired: [36, ['real', 'real', 'real']] }, results);
+      assertEqual_('Phase N·接线·「batch」路径（112 的 lazyLLMExtractor_ 用，不给预算）完全不受影响：只用主模型、BATCH 预算，每次 extractOrders 打 4 次，三次共 12 次', [batchFetches, batchFlags], [12, ['real', 'real', 'real']], results);
+    } finally {
+      gasNames.forEach((k) => { if (savedGas[k].had) gScope[k] = savedGas[k].value; else delete gScope[k]; });
+    }
+  }
 
   const allPass = results.every((r) => r.pass);
   results.forEach((r) => {

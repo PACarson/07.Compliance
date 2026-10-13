@@ -1066,6 +1066,22 @@
         .consoleRunDailyAllocation(incomeId);
     }
 
+    // 2026-10-11 Phase N：把后端回传的执行级预算快照（127 createExecutionBudget_().snapshot()）
+    // 翻成人看得懂的原因。budget 缺栏位（或后端是旧版本没回传）就只说结论、不编数字：
+    // 只有栏位真的是有限数字才显示它（缺栏位时不会印出 undefined / NaN，也不会把没回传的秒数
+    // 当成 0 秒——171 的前端测试用残缺快照验证过）。
+    function isFiniteNumber(x) { return typeof x === 'number' && isFinite(x); }
+    function describeBudgetExhausted(budget) {
+      var why = '';
+      if (budget && budget.exhaustedReason === 'max_fetches' && isFiniteNumber(budget.fetchesStarted) && isFiniteNumber(budget.maxFetches)) {
+        why = '（呼叫次数已用 ' + escapeHtml(String(budget.fetchesStarted)) + '/' + escapeHtml(String(budget.maxFetches)) + ' 次）';
+      } else if (budget && budget.exhaustedReason === 'time' && isFiniteNumber(budget.elapsedMs)) {
+        why = '（已耗时约 ' + escapeHtml(String(Math.round(budget.elapsedMs / 1000))) + ' 秒，剩余时间放不下再一次呼叫）';
+      }
+      return '这次执行的 Gemini 呼叫预算用完了' + why + '，所以停止了后续的重试／换模型／chunk fallback——不是静默略过，也没有写入任何 Fully_Allocated。' +
+        '重新执行会拿到全新的预算（如果只是 Gemini 暂时过载，再跑一次可能就成功）；如果同一笔每次都这样，代表这份 Statement 抽取一次就要跑很久、一次执行放不下 chunk fallback，那不是多点几次就会好，需要另外决定怎么处理。';
+    }
+
     function renderDailyAllocationResult(incomeId, periodStart, periodEnd, result) {
       var li = document.getElementById('da-' + incomeId);
       if (!li) return;
@@ -1087,7 +1103,13 @@
           : '成功写入 ' + (result.rowsWritten != null ? result.rowsWritten : '?') + ' 笔 Daily_Allocation';
       } else if (result.status === 'Done') {
         badge = '<span class="badge flagged">' + escapeHtml(result.allocationStatus || 'Needs_Review') + '</span>';
-        detail = '这次执行没有产生 Fully_Allocated 的结果——可能是 Gemini 抽取或 checksum 对不上，需要人工看一下，不是等一下自动就会好';
+        // 2026-10-11 Phase N：后端因为「单次执行的 Gemini 呼叫预算」用尽而停止了后续重试／
+        // 换模型／chunk fallback——跟一般的 Needs_Review（抽取内容或 checksum 对不上）不是
+        // 同一件事，明确讲出来，别让人以为是资料本身有问题。只认后端的结构化旗标
+        // budgetExhausted === true，不解析任何错误文字。
+        detail = result.budgetExhausted === true
+          ? describeBudgetExhausted(result.executionBudget)
+          : '这次执行没有产生 Fully_Allocated 的结果——可能是 Gemini 抽取或 checksum 对不上，需要人工看一下，不是等一下自动就会好';
       } else {
         badge = '<span class="badge pending">' + escapeHtml(result.status || '未知') + '</span>';
         detail = '';

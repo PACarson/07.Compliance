@@ -797,17 +797,35 @@ function runGeminiOrderExtractionWithFallback_(document, verifiedIncomeContext, 
   let fullCandidate = null;
   let fullValidation = null;
   let fullQuotaExhausted = false;
+  let fullBudgetExhausted = false;
   try {
     fullCandidate = deps.extractor.extractOrders(document, null).candidate;
     fullValidation = tryValidate(fullCandidate, 'full_document');
   } catch (err) {
     fullQuotaExhausted = !!(err && err.isQuotaExhausted);
-    attempts.push({ label: 'full_document', stage: 'Extraction_Failed', errorCount: 1, exception: String(err && err.message || err) });
+    // 2026-10-11 Phase N：127 的执行级预算（createExecutionBudget_）拒绝了这次呼叫
+    // （次数或时间放不下）——结构化旗标 isBudgetExhausted，跟 isQuotaExhausted 同样
+    // 只看旗标、不解析错误文字。这个 attempts 条目也带 budgetExhausted: true，
+    // 170 靠它（不靠错误文字）告诉使用者「是预算用完，不是抽取内容有问题」。
+    fullBudgetExhausted = !!(err && err.isBudgetExhausted);
+    const fullFailedEntry = { label: 'full_document', stage: 'Extraction_Failed', errorCount: 1, exception: String(err && err.message || err) };
+    if (fullBudgetExhausted) fullFailedEntry.budgetExhausted = true;
+    attempts.push(fullFailedEntry);
   }
 
   let finalCandidate = null;
   if (fullValidation && fullValidation.valid) {
     finalCandidate = fullCandidate;
+  } else if (fullBudgetExhausted) {
+    // 2026-10-11 Phase N（Steven 授权：单笔执行预算与 6 分钟硬限制风险）：full_document
+    // 阶段已经把这次执行的 LLM 调用预算（呼叫次数或剩余时间）用尽——chunk fallback
+    // 还要再多打最多 2 次呼叫，同一次 GAS 执行里放不下；GAS 撞到 6 分钟硬限制是
+    // 平台强制中止、不是 catchable 的例外，连这个 Needs_Review 都回不来。所以在这里
+    // **明确**跳过（留下可读的 attempts 条目，不是静默略过），走既有的 Needs_Review
+    // 安全状态：不降低任何验证标准、不把没做完的工作标成 Fully_Allocated、不写任何
+    // 猜测值。重新执行一次会拿到全新的预算。
+    // 跟 quota 那个分支不同的是：quota 是「重打同一个额度没有意义」；这里是「放不下」。
+    attempts.push({ label: 'chunk_fallback_skipped_budget_exhausted', stage: 'Extraction_Failed', errorCount: 1, budgetExhausted: true, reason: 'full_document 阶段已用尽单次执行的 LLM 调用预算（呼叫次数或剩余时间）——chunk fallback 会再多打最多 2 次呼叫，在同一次 GAS 执行里放不下（6 分钟硬限制，被平台中止不是 catchable 的例外），明确跳过并回 Needs_Review；重新执行会拿到全新的预算' + (fullQuotaExhausted ? '。（最后一次实际错误是额度用尽 HTTP 429，同一个额度重打本来就没有意义）' : '') });
   } else if (fullQuotaExhausted) {
     // 2026-09-29 新增（真实 GAS：同一天 4 次真实 consoleRunDailyAllocation，
     // full_document 撞 HTTP 429 RESOURCE_EXHAUSTED、依建议秒数重试后仍然
@@ -863,7 +881,19 @@ function runGeminiOrderExtractionWithFallback_(document, verifiedIncomeContext, 
           }
         } catch (err) {
           anyChunkException = true;
-          attempts.push({ label: `chunk_${range.firstPage}-${range.lastPage}`, stage: 'Extraction_Failed', errorCount: 1, exception: String(err && err.message || err) });
+          const chunkFailedEntry = { label: `chunk_${range.firstPage}-${range.lastPage}`, stage: 'Extraction_Failed', errorCount: 1, exception: String(err && err.message || err) };
+          if (err && err.isBudgetExhausted) chunkFailedEntry.budgetExhausted = true;
+          attempts.push(chunkFailedEntry);
+          // 2026-10-11 Phase N：执行级预算用尽——预算是整次执行共用、拒绝过一次就
+          // 一直拒绝（127 createExecutionBudget_ 的 sticky 行为），剩下的 page range
+          // 一定也会被拒绝，明确记一笔「因预算用尽跳过」然后结束迴圈，不是静默略过。
+          // 已经成功的 chunk 仍然留在 chunkResults 里照常走下面的合并 + 验证 + checksum；
+          // 只拿到一部分 chunk 的合并结果不会通过整份对帐单 checksum，所以不可能因此
+          // 变成 Fully_Allocated（判定标准完全没动）。
+          if (err && err.isBudgetExhausted && i < ranges.length - 1) {
+            attempts.push({ label: 'remaining_chunks_skipped_budget_exhausted', stage: 'Extraction_Failed', errorCount: 1, budgetExhausted: true, reason: `chunk_${range.firstPage}-${range.lastPage} 因单次执行的 LLM 调用预算用尽而失败，跳过剩下 ${ranges.length - 1 - i} 个 page range（预算是整次执行共用的，同一次执行里一定放不下）；重新执行会拿到全新的预算` });
+            break;
+          }
           // 2026-09-29：同一个理由——这个 chunk 已经证明额度用尽了，剩下还
           // 没打的 chunk 用的是同一个额度，不会有不同结果，直接跳过，不要
           // 为了「至少两个都试过」这种表面上的齐全而多浪费一次呼叫。

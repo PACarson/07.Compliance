@@ -445,10 +445,17 @@ function postJsonWithModelFallback_(models, apiKey, httpClient, requestBody) {
     } catch (err) {
       attemptedModelErrors.push({ model: modelName, error: err });
       const isLastModel = i === models.length - 1;
-      const canTryNext = !isLastModel && !!(err && err.isCapacityIssue);
+      // 2026-10-11 Phase N：执行级预算用尽（isBudgetExhausted）就不再换下一个模型——
+      // 预算是整次执行共用的，换模型的下一次 fetch 一样会被拒绝，白白走一圈；而且
+      // 预算错误可能带着上一次 503 的 isCapacityIssue（诊断用），不能因此被当成
+      // 「还可以换模型」。
+      const budgetExhausted = !!(err && err.isBudgetExhausted);
+      const canTryNext = !isLastModel && !!(err && err.isCapacityIssue) && !budgetExhausted;
       if (!canTryNext) {
         err.attemptedModelErrors = attemptedModelErrors;
-        err.allModelsCapacityExhausted = attemptedModelErrors.every((a) => a.error && a.error.isCapacityIssue === true);
+        // allModelsCapacityExhausted 的定义是「全部模型都试过、而且全部都是因为 503
+        // 才失败」——预算中途喊停时没有全部试过，所以一律 false（见上面的说明）。
+        err.allModelsCapacityExhausted = !budgetExhausted && attemptedModelErrors.every((a) => a.error && a.error.isCapacityIssue === true);
         if (attemptedModelErrors.length > 1) {
           err.primaryModelError = attemptedModelErrors.slice(0, -1).map((a) => `${a.model}: ${a.error.message}`).join(' | ');
         }
@@ -652,6 +659,161 @@ var SINGLE_RETRY_BUDGET_ = { maxSingleRetrySleepMs: MAX_SINGLE_RETRY_SLEEP_MS_, 
 var BATCH_RETRY_BUDGET_ = { maxSingleRetrySleepMs: 8000, maxTotalRetrySleepMs: 10000 };
 
 /**
+ * 2026-10-11 Phase N（Steven 授权：单笔执行预算与 6 分钟硬限制风险）——「执行级」
+ * 调用预算。
+ *
+ * 要解决的问题（用真实的 127 + 142 代码复算过，不是纸上推演）：上面的
+ * SINGLE_RETRY_BUDGET_ 只管「单个 postJson 内部」（最多 4 次 fetch、累计最多睡
+ * 60 秒）。但 consoleRunDailyAllocation_ 一次执行里，这个上限会被连乘三层：
+ *   - 142 最多呼叫 3 次 extractOrders()（full_document + 2 个 chunk）；
+ *   - 每次 extractOrders() 的模型链最多走 3 个模型（只有 503 才换下一个）；
+ *   - 每个模型的 postJson 最多 4 次 fetch。
+ * = 3 × 3 × 4 = 36 次 fetch；光是睡眠最坏就有 9 × 60 = 540 秒（还没算任何 HTTP
+ * 回应时间），超过 GAS 的 360 秒硬限制。ADR-005 2026-10-02 段落早就把这个记成
+ * 「已知、未解决的理论风险」。GAS 撞到硬限制是平台强制中止、不是 catchable 的
+ * 例外（2026-10-01 consoleBatchImport 真的发生过，360.418 秒），连一个结构化的
+ * Needs_Review 都回不来——跟「每个阶段都要有明确的结果状态」是冲突的。
+ *
+ * 这是「准入控制」（admission control），不是计时炸弹：每次 fetch 之前（包含第一次）、
+ * 每次睡眠之前，都先问预算「还容得下吗」；不容许就抛出带 isBudgetExhausted 旗标的
+ * 错误，由 142 记进 attempts、走既有的 Needs_Review 安全状态。它只会「拒绝再多打
+ * 一次呼叫」，从不改变任何验证标准，也不会让没做完的工作变成 Fully_Allocated——
+ * 判定 Fully_Allocated 的仍然是 125 的四层验证 + 逐日 checksum + 整份对帐单 checksum。
+ *
+ * 两道闸，任何一道不过就拒绝：
+ *   1. 次数：本次执行已经开始的 fetch 数 < EXECUTION_MAX_FETCHES_。
+ *      12 的来源：原本「stage 数」(3: 整份 + 2 chunk) × 每个 postJson 4 次 = 12，跟
+ *      「模型数」(3) × 4 次 = 12，两个维度各自的最坏次数都是 12；预算让两个维度共用
+ *      同一个 12，而不是相乘成 36。
+ *   2. 时间：已耗时 + 预计下一次呼叫要花的时间 <= 硬限制 − 保留时间。
+ *      - 硬限制 EXECUTION_HARD_LIMIT_MS_ = 360000：GAS 单次执行上限（真实证据：
+ *        2026-10-01 consoleBatchImport 在 360.418 秒被平台中止）。
+ *      - 保留时间 EXECUTION_RESERVE_MS_ = 30000：抽取结束后 consoleRunDailyAllocation_
+ *        还要读 Daily_Allocation、写一批 Daily_Allocation、回传结果。⚠️ 这个数字是
+ *        「宽松的假设」，不是量测值——真实 GAS 没有量过写入阶段花多久。
+ *      - 预计下一次呼叫时间 = max(EXECUTION_MIN_CALL_ESTIMATE_MS_, 本次执行里观察到
+ *        最慢的一次 fetch)。115 秒来自 Gate 2 真实数据（extractOrders() 单次
+ *        115–289 秒里最短的）：剩下的时间连最快的一次真实呼叫都放不下，就没有必要
+ *        开始。「本次执行最慢的一次」是保守假设（后面的 chunk 呼叫不会比已经看到的
+ *        最慢那次更慢），不是保证。
+ *
+ * 一旦拒绝过一次，之后全部拒绝（sticky）——不会出现「这次不行、下一次又行」的非单调
+ * 行为，142 的「剩下的 stage 一律跳过」跟预算的状态永远一致。
+ *
+ * 老实话（写在这里，不要假装没有）：预算只能决定「要不要开始下一次呼叫」，管不到
+ * 「已经开始的那一次 UrlFetchApp.fetch 要跑多久」（GAS 没有可调的逾时设定）。一次
+ * 呼叫如果比上面的假设更慢，仍然可能撞硬限制；这是准入控制的本质限制，不是实作遗漏。
+ */
+var EXECUTION_HARD_LIMIT_MS_ = 360000;
+var EXECUTION_RESERVE_MS_ = 30000;
+var EXECUTION_MIN_CALL_ESTIMATE_MS_ = 115000;
+var EXECUTION_MAX_FETCHES_ = 12;
+
+/**
+ * 组出一个执行级预算（设计、数字来源与限制见上面的说明）。一次 consoleRunDailyAllocation_
+ * 执行建一个，由它底下全部的 fetch 共用——不要跨执行重用。
+ * @param {{now: (function(): number), hardLimitMs: number, reserveMs: number, minCallEstimateMs: number, maxFetches: number}} [options]
+ *   全部可选；now 注入假时钟给 Node 测试用（预设 Date.now）。
+ * @return {{tryBeginFetch: function(): Object, canContinueAfter: function(number): Object, endFetch: function(number): void, snapshot: function(): Object}}
+ */
+function createExecutionBudget_(options) {
+  const opts = options || {};
+  function pickNonNegative_(value, fallback) {
+    return (typeof value === 'number' && isFinite(value) && value >= 0) ? value : fallback;
+  }
+  const now = typeof opts.now === 'function' ? opts.now : function () { return Date.now(); };
+  const hardLimitMs = pickNonNegative_(opts.hardLimitMs, EXECUTION_HARD_LIMIT_MS_);
+  const reserveMs = pickNonNegative_(opts.reserveMs, EXECUTION_RESERVE_MS_);
+  const minCallEstimateMs = pickNonNegative_(opts.minCallEstimateMs, EXECUTION_MIN_CALL_ESTIMATE_MS_);
+  const maxFetches = pickNonNegative_(opts.maxFetches, EXECUTION_MAX_FETCHES_);
+  const startedAtMs = now();
+  let fetchesStarted = 0;
+  let maxObservedCallMs = 0;
+  let exhaustion = null; // sticky：一旦非 null 就不会再回到 null
+
+  function estimatedCallMs_() {
+    return Math.max(minCallEstimateMs, maxObservedCallMs);
+  }
+  // snapshot 里只放 primitive（数字/字符串/布尔/null）——会经 170 原样带进
+  // google.script.run 的回传值，不能有 Date 之类的物件（见 170 sanitizeForClient_ 的说明）。
+  function snapshot_() {
+    return {
+      fetchesStarted,
+      maxFetches,
+      elapsedMs: now() - startedAtMs,
+      hardLimitMs,
+      reserveMs,
+      estimatedCallMs: estimatedCallMs_(),
+      maxObservedCallMs,
+      exhausted: exhaustion !== null,
+      exhaustedReason: exhaustion ? exhaustion.reason : null
+    };
+  }
+  // extraDelayMs：这次判断之前还要先睡多久（重试睡眠）；一般的「开始 fetch」传 0。
+  function evaluate_(extraDelayMs) {
+    if (exhaustion) return { ok: false, reason: exhaustion.reason, snapshot: snapshot_() };
+    let reason = null;
+    if (fetchesStarted >= maxFetches) {
+      reason = 'max_fetches';
+    } else if ((now() - startedAtMs) + extraDelayMs + estimatedCallMs_() > hardLimitMs - reserveMs) {
+      reason = 'time';
+    }
+    if (reason) {
+      exhaustion = { reason };
+      return { ok: false, reason, snapshot: snapshot_() };
+    }
+    return { ok: true };
+  }
+
+  return {
+    /** 每次 fetch 之前呼叫（包含第一次）。ok 才算「已开始」并计数。 */
+    tryBeginFetch() {
+      const gate = evaluate_(0);
+      if (!gate.ok) return gate;
+      fetchesStarted++;
+      return { ok: true, startedAtMs: now() };
+    },
+    /** 重试睡眠之前呼叫：睡完之后下一次 fetch 还放得下吗？放不下就不要白睡。 */
+    canContinueAfter(delayMs) {
+      return evaluate_(pickNonNegative_(delayMs, 0));
+    },
+    /** 每次 fetch 结束（不管成功、HTTP 错误或抛例外）都呼叫，记录最慢的一次。 */
+    endFetch(fetchStartedAtMs) {
+      if (typeof fetchStartedAtMs !== 'number') return;
+      const durationMs = now() - fetchStartedAtMs;
+      if (durationMs > maxObservedCallMs) maxObservedCallMs = durationMs;
+    },
+    snapshot: snapshot_
+  };
+}
+
+/**
+ * 预算拒绝时抛出的错误。isBudgetExhausted 是结构化旗标——142 只看旗标，不解析
+ * 错误文字（跟 isQuotaExhausted / isCapacityIssue 同一个做法）。
+ * 如果是重试到一半被拒绝，lastError 是上一次真实的 HTTP 错误：它的
+ * isQuotaExhausted/isCapacityIssue 照样带过来（跟上面「累计等待上限」那个 capped
+ * 错误同一个做法），错误文字也保留「最后一次实际错误」，诊断资讯不会因为预算拒绝而丢失。
+ * @param {string} reason 'max_fetches' | 'time'
+ * @param {Object} snapshot createExecutionBudget_().snapshot() 的回传值
+ * @param {(Error|undefined)} lastError
+ * @return {Error}
+ */
+function createBudgetExhaustedError_(reason, snapshot, lastError) {
+  const s = snapshot || {};
+  const sec = (ms) => Math.round((ms || 0) / 1000);
+  const detail = reason === 'max_fetches'
+    ? `已用 ${s.fetchesStarted}/${s.maxFetches} 次 fetch`
+    : `已耗时 ${sec(s.elapsedMs)} 秒，预计再呼叫一次要 ${sec(s.estimatedCallMs)} 秒、还要保留 ${sec(s.reserveMs)} 秒给后续写入，放不进 ${sec(s.hardLimitMs)} 秒的执行上限`;
+  const err = new Error(`单次执行的 LLM 调用预算已耗尽（${detail}）——不再重试／换模型／切 chunk，明确失败（Needs_Review），不是静默跳过` + (lastError ? `；最后一次实际错误：${lastError.message}` : ''));
+  err.isBudgetExhausted = true;
+  err.budgetReason = reason;
+  err.executionBudget = snapshot || null;
+  err.isQuotaExhausted = !!(lastError && lastError.isQuotaExhausted === true);
+  err.isCapacityIssue = !!(lastError && lastError.isCapacityIssue === true);
+  return err;
+}
+
+/**
  * 组出带重试的 postJson。I/O 从参数注入（真实环境是 UrlFetchApp.fetch /
  * Utilities.sleep，Node 测试用假的），重试策略本身因此可以在 Node 里测——原本
  * 这段整个躲在 realLLMExtractorDeps_ 里面，「只能在真实 GAS 环境跑，Node 测不了」。
@@ -671,10 +833,19 @@ var BATCH_RETRY_BUDGET_ = { maxSingleRetrySleepMs: 8000, maxTotalRetrySleepMs: 1
  * 到就退回原本的 exponential backoff）；503 维持原本的 exponential backoff（503
  * 是容量问题，Google 没给明确等待秒数）。等待有上限，见 MAX_*_RETRY_SLEEP_MS_。
  *
+ * 2026-10-11 Phase N：第三个参数 executionBudget（createExecutionBudget_，可选）是
+ * 「整次执行」共用的准入控制——上面两个上限只管单个 postJson，连乘三层（stage × 模型 ×
+ * 次数）之后可以到 36 次 fetch / 540 秒睡眠，见 createExecutionBudget_ 的说明。给了的话：
+ * 每次 fetch 之前（包含第一次）、每次重试睡眠之前都先问预算；预算不容许就抛出带
+ * isBudgetExhausted 旗标的错误（见 createBudgetExhaustedError_），不再多打、也不再白睡。
+ * 没给就跟 2026-10-02 的行为一字不差（既有呼叫方——包括 112 的 'batch' 路径——不受影响）。
+ *
  * @param {{fetch: function(string, Object): {getResponseCode: function(): number, getContentText: function(): string}, sleep: function(number): void}} io
+ * @param {{maxSingleRetrySleepMs: number, maxTotalRetrySleepMs: number}} [retryBudget]
+ * @param {Object} [executionBudget] createExecutionBudget_() 的回传值
  * @return {function(string, Object, Object): Object} postJson(url, headers, body)
  */
-function createRetryingPostJson_(io, retryBudget) {
+function createRetryingPostJson_(io, retryBudget, executionBudget) {
   // 2026-10-02：retryBudget 是可选的覆盖值（见上面 SINGLE_RETRY_BUDGET_/
   // BATCH_RETRY_BUDGET_ 的说明）——没给就照旧用模组层级的默认值，既有呼叫方
   // （只传一个参数）行为完全不变。
@@ -685,13 +856,29 @@ function createRetryingPostJson_(io, retryBudget) {
     let lastError;
     let totalSleptMs = 0;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const response = io.fetch(url, {
-        method: 'post',
-        contentType: 'application/json',
-        headers,
-        payload: JSON.stringify(body),
-        muteHttpExceptions: true
-      });
+      // 2026-10-11 Phase N：每次 fetch 之前（包含这个 postJson 的第一次）先向执行级
+      // 预算申请。lastError 在第一次尝试时是 undefined——预算在这个 postJson 一开始
+      // 就已经用尽（例如前一个 stage 把次数用光了）时，错误里就没有「最后一次实际错误」。
+      let budgetFetchStartedAtMs = null;
+      if (executionBudget) {
+        const gate = executionBudget.tryBeginFetch();
+        if (!gate.ok) throw createBudgetExhaustedError_(gate.reason, gate.snapshot, lastError);
+        budgetFetchStartedAtMs = gate.startedAtMs;
+      }
+      let response;
+      try {
+        response = io.fetch(url, {
+          method: 'post',
+          contentType: 'application/json',
+          headers,
+          payload: JSON.stringify(body),
+          muteHttpExceptions: true
+        });
+      } finally {
+        // 不管 fetch 成功、回 HTTP 错误还是直接抛例外，都要记下这次花了多久——
+        // 预算用「本次执行里最慢的一次」估计下一次呼叫要多久。没有预算时什么都不做。
+        if (executionBudget) executionBudget.endFetch(budgetFetchStartedAtMs);
+      }
       const code = response.getResponseCode();
       const text = response.getContentText();
       if (code >= 200 && code < 300) {
@@ -738,6 +925,12 @@ function createRetryingPostJson_(io, retryBudget) {
         capped.isCapacityIssue = lastError.isCapacityIssue === true;
         throw capped;
       }
+      // 2026-10-11 Phase N：睡完之后下一次 fetch 预算还容得下吗？容不下就不要白睡
+      // （睡的这几十秒本身就是在吃执行时间），直接用预算错误结束这个 postJson。
+      if (executionBudget) {
+        const gate = executionBudget.canContinueAfter(delayMs);
+        if (!gate.ok) throw createBudgetExhaustedError_(gate.reason, gate.snapshot, lastError);
+      }
       io.sleep(delayMs);
       totalSleptMs += delayMs;
     }
@@ -745,8 +938,12 @@ function createRetryingPostJson_(io, retryBudget) {
   };
 }
 
-/** 真的调 DriveApp/UrlFetchApp/Utilities 的那一层——只能在真实 GAS 环境跑，Node 测不了。 */
-function realLLMExtractorDeps_(now, retryBudget) {
+/**
+ * 真的调 DriveApp/UrlFetchApp/Utilities 的那一层——只能在真实 GAS 环境跑，Node 测不了
+ * （2026-10-11 起 128 另外用假的 GAS 全域物件在 Node 里测「预算有没有真的接到这一层」）。
+ * executionBudget（可选，Phase N）原样传给 createRetryingPostJson_。
+ */
+function realLLMExtractorDeps_(now, retryBudget, executionBudget) {
   return {
     driveService: {
       getFileBytes(fileId) {
@@ -769,7 +966,7 @@ function realLLMExtractorDeps_(now, retryBudget) {
       postJson: createRetryingPostJson_({
         fetch: (url, options) => UrlFetchApp.fetch(url, options),
         sleep: (ms) => Utilities.sleep(ms)
-      }, retryBudget)
+      }, retryBudget, executionBudget)
     },
     now: now || new Date()
   };
@@ -786,10 +983,16 @@ function realLLMExtractorDeps_(now, retryBudget) {
  *   三层模型链（config.modelChain）+ 耐心的 SINGLE_RETRY_BUDGET_。
  * - 'batch'：112 的 lazyLLMExtractor_ 用——只用主模型（不换模型，
  *   modelChain 收窄成只有一个元素）+ 收紧的 BATCH_RETRY_BUDGET_。
+ *
+ * 2026-10-11 Phase N 新增 executionBudget（可选）：createExecutionBudget_() 的回传值，
+ * 由 170 的 consoleRunDailyAllocation_ 每次执行建一个、传进来。给了就是这次执行底下
+ * 全部 fetch 共用的准入控制（见 createExecutionBudget_ 的说明）；没给（112 的 'batch'
+ * 路径、999_* 观察脚本）行为跟以前完全一样。
  * @param {('single'|'batch')} [profile] 预设 'single'
+ * @param {Object} [executionBudget] createExecutionBudget_() 的回传值
  * @return {{extract: function(Object): Object, extractOrders: function(Object, ?Object): Object}}
  */
-function realLLMExtractor_(profile) {
+function realLLMExtractor_(profile, executionBudget) {
   const isBatch = profile === 'batch';
   const config = resolveLLMExtractorConfig_(PropertiesService.getScriptProperties());
   if (isBatch) {
@@ -801,7 +1004,7 @@ function realLLMExtractor_(profile) {
   // 'gemini-3.5-flash'（2026-09-27 除错记录里看到的值），这里会照旧读到
   // 3.5-flash，不会自动变成 3.8-flash。要用 3.8-flash：把该 key 的值改成
   // gemini-3.8-flash，或整个删掉这个 key。
-  return createLLMExtractor_(config, realLLMExtractorDeps_(undefined, isBatch ? BATCH_RETRY_BUDGET_ : SINGLE_RETRY_BUDGET_));
+  return createLLMExtractor_(config, realLLMExtractorDeps_(undefined, isBatch ? BATCH_RETRY_BUDGET_ : SINGLE_RETRY_BUDGET_, executionBudget));
 }
 
 if (typeof module !== 'undefined') {
@@ -819,6 +1022,12 @@ if (typeof module !== 'undefined') {
     postJsonWithModelFallback_,
     SINGLE_RETRY_BUDGET_,
     BATCH_RETRY_BUDGET_,
+    createExecutionBudget_,
+    createBudgetExhaustedError_,
+    EXECUTION_HARD_LIMIT_MS_,
+    EXECUTION_RESERVE_MS_,
+    EXECUTION_MIN_CALL_ESTIMATE_MS_,
+    EXECUTION_MAX_FETCHES_,
     DEFAULT_LLM_EXTRACTOR_FALLBACK_MODEL_,
     DEFAULT_LLM_EXTRACTOR_FALLBACK_MODEL_2_,
     MAX_SINGLE_RETRY_SLEEP_MS_,

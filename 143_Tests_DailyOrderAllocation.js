@@ -260,6 +260,24 @@ function resolveDoalTestDeps143_() {
   return { candidateFromGeminiOrderRow_, mergeChunkedExtractionResults_, runGeminiOrderExtractionWithFallback_ }; // GAS：142 已经载入，直接引用全域
 }
 
+// 2026-10-11 Phase N：整条「真的 127 重试 + 模型链 + 执行级预算 + 真的 142 编排」的测试要用到 127 的
+// 一组函式。理由跟上面 resolveDoalTestDeps143_ 一样——放在文件顶层，不嵌在
+// runDailyOrderAllocationTests_ 里（GAS 单一全域 scope 下，嵌在里面的 const 解构会遮蔽全域同名函式，
+// 在初始化期间落入 TDZ）。测试里一律用 B143.xxx 取用，不在函式里再解构同名变量。
+function resolveBudgetTestDeps143_() {
+  if (typeof require === 'function') {
+    const m = require('./127_LLMExtractor.js');
+    return {
+      createRetryingPostJson_: m.createRetryingPostJson_, createLLMExtractor_: m.createLLMExtractor_,
+      createExecutionBudget_: m.createExecutionBudget_, SINGLE_RETRY_BUDGET_: m.SINGLE_RETRY_BUDGET_,
+      EXECUTION_MAX_FETCHES_: m.EXECUTION_MAX_FETCHES_, EXECUTION_HARD_LIMIT_MS_: m.EXECUTION_HARD_LIMIT_MS_,
+      EXECUTION_RESERVE_MS_: m.EXECUTION_RESERVE_MS_, EXECUTION_MIN_CALL_ESTIMATE_MS_: m.EXECUTION_MIN_CALL_ESTIMATE_MS_
+    };
+  }
+  // GAS：127 已经载入，直接引用全域
+  return { createRetryingPostJson_, createLLMExtractor_, createExecutionBudget_, SINGLE_RETRY_BUDGET_, EXECUTION_MAX_FETCHES_, EXECUTION_HARD_LIMIT_MS_, EXECUTION_RESERVE_MS_, EXECUTION_MIN_CALL_ESTIMATE_MS_ };
+}
+
 function runDailyOrderAllocationTests_() {
   const results = [];
 
@@ -759,6 +777,247 @@ function runDailyOrderAllocationTests_() {
   );
   results.push({ name: '额度用尽(第一个 chunk): 剩下的 chunk 被跳过，attempts 有明确的 remaining_chunks_skipped_quota_exhausted 记录', pass: quotaChunkResult.attempts.some((a) => a.label === 'remaining_chunks_skipped_quota_exhausted') && !quotaChunkResult.attempts.some((a) => a.label.indexOf('chunk_12') === 0), actual: quotaChunkResult.attempts.map((a) => a.label), expected: '包含 remaining_chunks_skipped_quota_exhausted，不包含第二个 chunk（chunk_12-24）的 label' });
   results.push({ name: '额度用尽(第一个 chunk): extractor 只被呼叫 2 次（1 full + 1 chunk），第二个 chunk 完全没打', pass: quotaChunkExtractor._callCount() === 2, actual: quotaChunkExtractor._callCount(), expected: 2 });
+
+  // =====================================================================
+  // 2026-10-11 Phase N（Steven 授权：单笔执行预算与 6 分钟硬限制风险）——执行级调用预算用尽时，
+  // 142 的 fallback 编排怎么处理。127 的 createExecutionBudget_ 在「再打一次放不下」时让 postJson
+  // 抛出带 isBudgetExhausted 旗标的错误；这里先单测 142 收到这个旗标之后的行为（mock extractor），
+  // 再用「真的 127 重试 + 模型链 + 预算 + 真的 142 编排」跑整条链的次数 / 时间数字，
+  // 最后是带种子的随机不变量模拟。全部是 Node + 假时钟 + 假 HTTP 回应——不是真实 GAS、不是真实 Gemini。
+  // =====================================================================
+  function budgetExhaustedError_(reason, alsoQuota) {
+    const e = new Error('单次执行的 LLM 调用预算已耗尽（测试用）');
+    e.isBudgetExhausted = true;
+    e.budgetReason = reason || 'max_fetches';
+    if (alsoQuota) e.isQuotaExhausted = true; // 预算是在 429 之后喊停的：错误上同时带着上一次 429 的旗标
+    return e;
+  }
+  const phaseNDoc = { fileId: 'f1', documentId: 'doc1', totalPages: 24 };
+  const phaseNNow = new Date('2026-10-12T00:00:00Z');
+  const hasBudgetFlag = (a) => Object.prototype.hasOwnProperty.call(a, 'budgetExhausted');
+
+  // ---- full_document 阶段被预算拒绝 ----
+  const budgetFullExtractor = mockExtractor_(budgetExhaustedError_(), []);
+  const budgetFullResult = runGeminiOrderExtractionWithFallback_(phaseNDoc, vic, { extractor: budgetFullExtractor, now: phaseNNow });
+  results.push({ name: '预算用尽(full_document): 明确落 Needs_Review，不抛例外，不产生任何 dailyAllocations / orderRows（不会写任何东西、不会变 Fully_Allocated）', pass: budgetFullResult.allocationStatus === 'Needs_Review' && budgetFullResult.dailyAllocations.length === 0 && budgetFullResult.orderRows.length === 0, actual: { status: budgetFullResult.allocationStatus, daily: budgetFullResult.dailyAllocations.length, orders: budgetFullResult.orderRows.length }, expected: 'Needs_Review / 0 / 0' });
+  results.push({ name: '预算用尽(full_document): attempts 恰好是 [full_document(budgetExhausted), chunk_fallback_skipped_budget_exhausted(budgetExhausted)]——明确记录、不是静默跳过，也没有被误记成 quota 那个标签', pass: JSON.stringify(budgetFullResult.attempts.map((a) => [a.label, a.budgetExhausted === true])) === JSON.stringify([['full_document', true], ['chunk_fallback_skipped_budget_exhausted', true]]), actual: budgetFullResult.attempts.map((a) => [a.label, a.budgetExhausted]), expected: '[[full_document,true],[chunk_fallback_skipped_budget_exhausted,true]]' });
+  results.push({ name: '预算用尽(full_document): extractor 只被呼叫一次，完全没有再打 chunk（省下的呼叫就是预算要保的执行时间）', pass: budgetFullExtractor._callCount() === 1, actual: budgetFullExtractor._callCount(), expected: 1 });
+  results.push({ name: '预算用尽(full_document): 跳过记录有可读的原因（说明是「放不下」+「重新执行会拿到全新的预算」），nonRetryableErrors 同样带着这些记录（跟既有失败路径同一个形状）', pass: /放不下/.test(budgetFullResult.attempts[1].reason) && /重新执行会拿到全新的预算/.test(budgetFullResult.attempts[1].reason) && budgetFullResult.nonRetryableErrors === budgetFullResult.attempts, actual: budgetFullResult.attempts[1].reason, expected: '含「放不下」「重新执行会拿到全新的预算」' });
+
+  const budgetQuotaExtractor = mockExtractor_(budgetExhaustedError_('time', true), []);
+  const budgetQuotaResult = runGeminiOrderExtractionWithFallback_(phaseNDoc, vic, { extractor: budgetQuotaExtractor, now: phaseNNow });
+  results.push({ name: '预算用尽 + 最后一次实际错误是 429(两个旗标都在): 以预算为准（label 是 budget 那个），reason 补一句「最后一次实际错误是额度用尽」；不会同时记两个跳过标签', pass: budgetQuotaResult.attempts.map((a) => a.label).join(',') === 'full_document,chunk_fallback_skipped_budget_exhausted' && /额度用尽/.test(budgetQuotaResult.attempts[1].reason) && budgetQuotaExtractor._callCount() === 1, actual: budgetQuotaResult.attempts.map((a) => a.label), expected: 'full_document,chunk_fallback_skipped_budget_exhausted（reason 提到额度用尽）' });
+
+  // ---- 第一个 chunk 被预算拒绝（整份文件那次有回应但验证没过）----
+  const brokenFullCandidate = { extraction_scope: { first_page_seen: 1, last_page_seen: 24 }, days: 'broken', notes: '' };
+  const budgetChunk1Extractor = mockExtractor_(brokenFullCandidate, [budgetExhaustedError_(), chunkB.candidate]);
+  const budgetChunk1Result = runGeminiOrderExtractionWithFallback_(phaseNDoc, vic, { extractor: budgetChunk1Extractor, now: phaseNNow });
+  results.push({ name: '预算用尽(第一个 chunk): attempts 依序是 full_document(没过验证、不带预算旗标) → chunk_1-13(带旗标) → remaining_chunks_skipped_budget_exhausted(带旗标) → all_chunks_failed；第二个 chunk 完全没打', pass: JSON.stringify(budgetChunk1Result.attempts.map((a) => [a.label, a.budgetExhausted === true])) === JSON.stringify([['full_document', false], ['chunk_1-13', true], ['remaining_chunks_skipped_budget_exhausted', true], ['all_chunks_failed', false]]) && budgetChunk1Extractor._callCount() === 2, actual: budgetChunk1Result.attempts.map((a) => [a.label, a.budgetExhausted === true]), expected: '见 name' });
+  results.push({ name: '预算用尽(第一个 chunk): 落 Needs_Review、dailyAllocations 为空（没有任何已验证的结果可以写）', pass: budgetChunk1Result.allocationStatus === 'Needs_Review' && budgetChunk1Result.dailyAllocations.length === 0, actual: budgetChunk1Result.allocationStatus, expected: 'Needs_Review' });
+
+  // ---- 第二个（最后一个）chunk 被预算拒绝：已成功的 chunk 照常走合并 + 验证 + checksum，判定标准完全没动 ----
+  const budgetChunk2Extractor = mockExtractor_(brokenFullCandidate, [chunkA.candidate, budgetExhaustedError_()]);
+  const budgetChunk2Result = runGeminiOrderExtractionWithFallback_(phaseNDoc, vic, { extractor: budgetChunk2Extractor, now: phaseNNow });
+  results.push({ name: '预算用尽(最后一个 chunk、第一个 chunk 只带不完整的一天): chunk_12-24 带旗标；没有「remaining」记录（已经是最后一个 range）；部分数据合并后被 merged_chunks_rejected 拒绝 → Needs_Review，不会变 Fully_Allocated', pass: budgetChunk2Result.attempts.some((a) => a.label === 'chunk_12-24' && a.budgetExhausted === true) && !budgetChunk2Result.attempts.some((a) => a.label === 'remaining_chunks_skipped_budget_exhausted') && budgetChunk2Result.attempts.some((a) => a.label === 'merged_chunks_rejected') && budgetChunk2Result.allocationStatus === 'Needs_Review' && budgetChunk2Result.dailyAllocations.length === 0, actual: { labels: budgetChunk2Result.attempts.map((a) => a.label), status: budgetChunk2Result.allocationStatus }, expected: 'chunk_12-24[budget] + merged_chunks_rejected + Needs_Review' });
+
+  const completeDayChunk = { extraction_scope: { first_page_seen: 1, last_page_seen: 13 }, days: [{ weekday_name: 'Ahad', day: 4, month_name: 'Januari', day_block_complete: true, printed_daily_subtotal: 5.50, orders: [geminiOrderSample] }], notes: '' };
+  const partialCoverage = runGeminiOrderExtractionWithFallback_(phaseNDoc, Object.assign({}, vic, { netDeliveryIncome: 205.50 }), { extractor: mockExtractor_(brokenFullCandidate, [completeDayChunk, budgetExhaustedError_()]), now: phaseNNow });
+  results.push({ name: '预算用尽(最后一个 chunk 被拒绝、第一个 chunk 有完整的一天、但整份对帐单总额更大——只覆盖了一部分): 日层级 Matched、整份 statement checksum 是 Discrepancy_Flagged → Needs_Review。Fully_Allocated 的判定标准没有被预算放宽', pass: partialCoverage.allocationStatus === 'Needs_Review' && partialCoverage.statementChecksum.status === 'Discrepancy_Flagged' && partialCoverage.dailyAllocations.every((d) => d.checksum_status === 'Matched') && partialCoverage.attempts.some((a) => a.label === 'chunk_12-24' && a.budgetExhausted === true), actual: { status: partialCoverage.allocationStatus, stmt: partialCoverage.statementChecksum, labels: partialCoverage.attempts.map((a) => a.label) }, expected: 'Needs_Review + Discrepancy_Flagged' });
+  const coverageComplete = runGeminiOrderExtractionWithFallback_(phaseNDoc, vic, { extractor: mockExtractor_(brokenFullCandidate, [completeDayChunk, budgetExhaustedError_()]), now: phaseNNow });
+  results.push({ name: '对照：同一份 chunk 数据、整份总额恰好就是它（5.50）→ Fully_Allocated——成功与否只由 checksum 决定；预算拒绝了第二个 chunk 这件事本身既不会让它失败、也不会让它放水', pass: coverageComplete.allocationStatus === 'Fully_Allocated' && coverageComplete.statementChecksum.status === 'Matched' && coverageComplete.attempts.some((a) => a.label === 'chunk_12-24' && a.budgetExhausted === true), actual: { status: coverageComplete.allocationStatus, stmt: coverageComplete.statementChecksum }, expected: 'Fully_Allocated + Matched' });
+  // 注意：上面既有的 chunkA/chunkB fixture 不是自洽的（chunkB 印刷小计 205.50，但两笔订单只加到 11.30，既有测试只比对 attempts
+  // 标签、从来没看最后的 status），所以对照组另外造一组自洽的：chunk1 只有半天（没有印刷小计）、chunk2 有完整的一天（205.50 = 5.50 + 200.00）。
+  const ctrlBigOrder = Object.assign({}, geminiOrderSample, { order_ids_raw: ['A-CTRLBIGORDER1'], base_income: 150, other_income: 50, net_income: 200, source_page: 9 });
+  const ctrlChunk1 = { extraction_scope: { first_page_seen: 1, last_page_seen: 13 }, days: [{ weekday_name: 'Ahad', day: 4, month_name: 'Januari', day_block_complete: false, printed_daily_subtotal: null, orders: [geminiOrderSample] }], notes: '' };
+  const ctrlChunk2 = { extraction_scope: { first_page_seen: 12, last_page_seen: 24 }, days: [{ weekday_name: 'Ahad', day: 4, month_name: 'Januari', day_block_complete: true, printed_daily_subtotal: 205.50, orders: [geminiOrderSample, ctrlBigOrder] }], notes: '' };
+  const bothChunksOk = runGeminiOrderExtractionWithFallback_(phaseNDoc, Object.assign({}, vic, { netDeliveryIncome: 205.50 }), { extractor: mockExtractor_(brokenFullCandidate, [ctrlChunk1, ctrlChunk2]), now: phaseNNow });
+  results.push({ name: '对照：预算没有介入时两个 chunk 都成功（自洽的两份 chunk 数据）→ 合并后 Fully_Allocated（既有行为不变），attempts 完全没有预算旗标', pass: bothChunksOk.allocationStatus === 'Fully_Allocated' && bothChunksOk.statementChecksum.status === 'Matched' && !bothChunksOk.attempts.some(hasBudgetFlag), actual: { status: bothChunksOk.allocationStatus, stmt: bothChunksOk.statementChecksum, flags: bothChunksOk.attempts.filter(hasBudgetFlag).length }, expected: 'Fully_Allocated / Matched / 0' });
+  const onlyChunk1Ok = runGeminiOrderExtractionWithFallback_(phaseNDoc, Object.assign({}, vic, { netDeliveryIncome: 205.50 }), { extractor: mockExtractor_(brokenFullCandidate, [ctrlChunk1, budgetExhaustedError_()]), now: phaseNNow });
+  results.push({ name: '对照的反面：同一组自洽数据，第二个 chunk 被预算拒绝 → Needs_Review（只有半天、没有印刷小计，合并被拒绝），不是 Fully_Allocated——少了的那一半不会被猜出来补上', pass: onlyChunk1Ok.allocationStatus === 'Needs_Review' && onlyChunk1Ok.attempts.some((a) => a.label === 'merged_chunks_rejected') && onlyChunk1Ok.dailyAllocations.length === 0, actual: { status: onlyChunk1Ok.allocationStatus, labels: onlyChunk1Ok.attempts.map((a) => a.label) }, expected: 'Needs_Review + merged_chunks_rejected' });
+
+  // ---- 「逐日 checksum」这一层也有测试守着。Phase N 做变异测试时，「拿掉逐日 checksum 必须 Matched」那个变异曾经存活——
+  // 既有测试里能抓到它的只有已知失败的 W01 legacy 测试，所以补这一个：两天各差 −1.00 / +1.00、加总恰好抵销 →
+  // 整份对帐单 checksum 是 Matched，但每一天都是 Discrepancy_Flagged → 必须 Needs_Review；对照组把印刷小计改对 → Fully_Allocated。 ----
+  const offsetSatOrder = Object.assign({}, geminiOrderSample, { order_ids_raw: ['A-OFFSETSAT0001'], base_income: 7, other_income: 3, net_income: 10, source_page: 5 });
+  const offsetDaysCandidate = (satPrinted, sunPrinted) => ({ extraction_scope: { first_page_seen: 1, last_page_seen: 24 }, days: [
+    { weekday_name: 'Sabtu', day: 3, month_name: 'Januari', day_block_complete: true, printed_daily_subtotal: satPrinted, orders: [offsetSatOrder] },
+    { weekday_name: 'Ahad', day: 4, month_name: 'Januari', day_block_complete: true, printed_daily_subtotal: sunPrinted, orders: [geminiOrderSample, ctrlBigOrder] }
+  ], notes: '' });
+  const offsetVic = Object.assign({}, vic, { netDeliveryIncome: 215.50 });
+  const offsetMismatch = runGeminiOrderExtractionWithFallback_(phaseNDoc, offsetVic, { extractor: mockExtractor_(offsetDaysCandidate(11.00, 204.50), []), now: phaseNNow });
+  const offsetControl = runGeminiOrderExtractionWithFallback_(phaseNDoc, offsetVic, { extractor: mockExtractor_(offsetDaysCandidate(10.00, 205.50), []), now: phaseNNow });
+  results.push({ name: '逐日 checksum 把关：两天印刷小计各差 +1.00 / −1.00、加总恰好抵销 → 整份对帐单 checksum 是 Matched，但每一天都是 Discrepancy_Flagged → Needs_Review（不是 Fully_Allocated）；对照组印刷小计改对 → Fully_Allocated', pass: offsetMismatch.allocationStatus === 'Needs_Review' && offsetMismatch.statementChecksum.status === 'Matched' && offsetMismatch.dailyAllocations.length === 2 && offsetMismatch.dailyAllocations.every((d) => d.checksum_status === 'Discrepancy_Flagged') && offsetControl.allocationStatus === 'Fully_Allocated' && offsetControl.dailyAllocations.every((d) => d.checksum_status === 'Matched'), actual: { mismatch: [offsetMismatch.allocationStatus, offsetMismatch.statementChecksum.status, offsetMismatch.dailyAllocations.map((d) => d.checksum_status)], control: [offsetControl.allocationStatus, offsetControl.dailyAllocations.map((d) => d.checksum_status)] }, expected: 'Needs_Review / Matched / [Discrepancy_Flagged x2]；对照 Fully_Allocated' });
+
+  // ---- 既有失败路径的 attempts 不带预算旗标（加法性：没有预算介入就没有新栏位）----
+  results.push({ name: '预算旗标是加法性的：既有失败路径（全部失败 / 额度用尽 / 非额度例外 / totalPages 缺失）的 attempts 完全不带 budgetExhausted 栏位', pass: [totalFailure, quotaFullResult, nonQuotaFullResult, quotaChunkResult, missingTotalPagesResult, happyPath].every((r) => !r.attempts.some(hasBudgetFlag)), actual: 'n/a', expected: '全部没有 budgetExhausted 栏位' });
+
+  // ---- 整条链：真的 127 重试 + 模型链 + 执行级预算 + 真的 142 编排；假时钟 + 假 HTTP ----
+  const B143 = resolveBudgetTestDeps143_();
+  const FS_MODELS = ['gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3.5-flash'];
+  const FS_BODY = (code, status) => JSON.stringify({ error: { code, status: status || 'ERR' } });
+  const geminiResp_ = (candidate) => ({ code: 200, text: JSON.stringify({ candidates: [{ finishReason: 'STOP', content: { role: 'model', parts: [{ text: JSON.stringify(candidate) }] } }] }) });
+  const fsR429 = (sec) => ({ code: 429, text: JSON.stringify({ error: { code: 429, status: 'RESOURCE_EXHAUSTED', details: [{ '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: `${sec}s` }] } }) });
+  const fsR503 = { code: 503, text: FS_BODY(503, 'UNAVAILABLE') };
+  const fsR500 = { code: 500, text: FS_BODY(500) };
+  const fsR504 = { code: 504, text: FS_BODY(504) };
+  const fsR400 = { code: 400, text: FS_BODY(400) };
+  const fsR200Bad = { code: 200, text: JSON.stringify({ candidates: [{ finishReason: 'STOP', content: { role: 'model', parts: [{ text: JSON.stringify({ days: [] }) }] } }] }) };
+  const fsRGood = geminiResp_(goodFullCandidate);
+
+  /** 假时钟 + 假 HTTP：script(idx) 回传第 idx 次 fetch 的回应；latencyOf(idx, response) 回传这次 fetch 花几毫秒；睡眠也推进同一个时钟。 */
+  function fsRun_(script, latencyOf, withBudget) {
+    const clock = { t: 0 };
+    const calls = [];
+    const events = [];
+    const io = {
+      fetch(url) {
+        const idx = calls.length;
+        const r = script(idx);
+        calls.push({ idx, model: (url.match(/\/models\/([^:]+):generateContent/) || [])[1], startMs: clock.t, code: r.code });
+        events.push('fetch');
+        clock.t += latencyOf(idx, r);
+        if (r.throws) throw new Error(r.throws);
+        return { getResponseCode: () => r.code, getContentText: () => r.text };
+      },
+      sleep(ms) { events.push('sleep'); clock.t += ms; }
+    };
+    const budget = withBudget ? B143.createExecutionBudget_({ now: () => clock.t }) : undefined;
+    const drive = { getFileBytes: () => 'bytes', bytesToBase64: (b) => `b64(${b})`, writeJsonFile: () => 'ev' };
+    const extractor = B143.createLLMExtractor_(
+      { apiKey: 'k', evidenceFolderId: 'f', model: FS_MODELS[0], modelChain: FS_MODELS },
+      { driveService: drive, httpClient: { postJson: B143.createRetryingPostJson_(io, B143.SINGLE_RETRY_BUDGET_, budget) }, now: phaseNNow });
+    let extractOrdersCalls = 0;
+    const counting = { extractOrders(doc, range) { extractOrdersCalls++; return extractor.extractOrders(doc, range); } };
+    const res = runGeminiOrderExtractionWithFallback_(phaseNDoc, vic, { extractor: counting, now: phaseNNow });
+    const sleepMs = events.reduce((sum, e, i) => sum, 0); // 占位，下面用 clock 反推
+    return {
+      status: res.allocationStatus, labels: res.attempts.map((a) => a.label), budgetFlag: res.attempts.some((a) => a.budgetExhausted === true),
+      extractOrdersCalls, calls, events, elapsedMs: clock.t, statementChecksum: res.statementChecksum, dailyAllocations: res.dailyAllocations,
+      snapshot: budget ? budget.snapshot() : null
+    };
+  }
+  const flat = (ms) => () => ms;
+  const sumSleepsMs_ = (run) => run.elapsedMs - 0; // 只在「fetch 即回」的场景里使用（耗时 == 睡眠）
+
+  // 1) 全部 503（每次 fetch 即回）：没有预算 = 3 stage × 3 模型 × 4 次 = 36；有预算 = 12
+  const fs503None = fsRun_(() => fsR503, flat(0), false);
+  const fs503Budget = fsRun_(() => fsR503, flat(0), true);
+  results.push({ name: 'Phase N·整条链·全部 503：没有预算（2026-10-02 行为）= 36 次 fetch；有预算 = 12 次，Needs_Review，attempts 明确记录「预算用尽跳过」（full_document → chunk_1-13 → remaining_chunks_skipped_budget_exhausted → all_chunks_failed）', pass: fs503None.calls.length === 36 && fs503Budget.calls.length === 12 && fs503Budget.status === 'Needs_Review' && fs503Budget.budgetFlag === true && fs503Budget.labels.join(',') === 'full_document,chunk_1-13,remaining_chunks_skipped_budget_exhausted,all_chunks_failed' && fs503Budget.snapshot.exhaustedReason === 'max_fetches', actual: { none: fs503None.calls.length, budget: fs503Budget.calls.length, labels: fs503Budget.labels }, expected: '36 / 12 / 见 name' });
+
+  // 2) 最坏睡眠：每个 postJson = 429(53.5s) + 503 + 503 + 503（睡 54+2+4 = 60 秒）
+  const patWorst = [fsR429(53.5), fsR503, fsR503, fsR503];
+  const fsWorstNone = fsRun_((i) => patWorst[i % 4], flat(0), false);
+  const fsWorstBudget = fsRun_((i) => patWorst[i % 4], flat(0), true);
+  const fsFetchStartLimitMs = B143.EXECUTION_HARD_LIMIT_MS_ - B143.EXECUTION_RESERVE_MS_ - B143.EXECUTION_MIN_CALL_ESTIMATE_MS_; // 任何 fetch 最晚的开始时间 = 215 秒
+  results.push({ name: 'Phase N·整条链·最坏睡眠（每个 postJson 睡 60 秒）：没有预算 = 36 次 fetch、纯睡眠 540 秒（超过 360 秒硬限制 → 平台硬杀）；有预算 = 12 次、180 秒，而且每次 fetch 都在 215 秒（= 360 − 30 − 115）以前开始', pass: fsWorstNone.calls.length === 36 && fsWorstNone.elapsedMs === 540000 && fsWorstBudget.calls.length === 12 && fsWorstBudget.elapsedMs === 180000 && fsWorstBudget.calls.every((c) => c.startMs <= fsFetchStartLimitMs), actual: { none: [fsWorstNone.calls.length, fsWorstNone.elapsedMs], budget: [fsWorstBudget.calls.length, fsWorstBudget.elapsedMs] }, expected: '[36,540000] / [12,180000]' });
+
+  // 3) 全部 500（链不换模型、chunk 照走）：既有最坏情况本来就是 12 次——预算不能改变它
+  const fs500None = fsRun_(() => fsR500, flat(0), false);
+  const fs500Budget = fsRun_(() => fsR500, flat(0), true);
+  results.push({ name: 'Phase N·整条链·全部 500（非 503 的 5xx，不换模型）：既有最坏情况本来就是 12 次（3 stage × 4 次）——有预算时次数、耗时、attempts 完全一样，预算没有介入（没有预算旗标）', pass: fs500None.calls.length === 12 && fs500Budget.calls.length === 12 && JSON.stringify(fs500None.labels) === JSON.stringify(fs500Budget.labels) && fs500Budget.budgetFlag === false && fs500None.elapsedMs === fs500Budget.elapsedMs, actual: { none: fs500None.labels, budget: fs500Budget.labels, flag: fs500Budget.budgetFlag }, expected: '同样 12 次、同样 attempts、无旗标' });
+
+  // 4) 慢呼叫（时间主导）：整份 200 秒才回、验证没过 → chunk 放不下
+  const slow200 = (i) => [200, 110, 110][i] * 1000;
+  const fsSlowNone = fsRun_(() => fsR200Bad, slow200, false);
+  const fsSlowBudget = fsRun_(() => fsR200Bad, slow200, true);
+  results.push({ name: 'Phase N·整条链·慢呼叫（整份 200 秒才回、验证没过，chunk 各 110 秒）：没有预算 = 420 秒（超过 360 秒 → 被平台硬杀、连 Needs_Review 都回不来）；有预算 = 200 秒时明确 Needs_Review（只打了整份那 1 次，chunk 被明确拒绝）', pass: fsSlowNone.elapsedMs === 420000 && fsSlowBudget.calls.length === 1 && fsSlowBudget.elapsedMs === 200000 && fsSlowBudget.status === 'Needs_Review' && fsSlowBudget.budgetFlag === true && fsSlowBudget.snapshot.exhaustedReason === 'time', actual: { none: fsSlowNone.elapsedMs, budget: [fsSlowBudget.calls.length, fsSlowBudget.elapsedMs, fsSlowBudget.status, fsSlowBudget.snapshot.exhaustedReason] }, expected: '420000 / [1,200000,Needs_Review,time]' });
+  const slow289 = (i) => [289, 150, 150][i] * 1000;
+  const fsSlow289Budget = fsRun_(() => fsR200Bad, slow289, true);
+  results.push({ name: 'Phase N·整条链·Gate 2 最慢的真实整份呼叫（289 秒）验证没过：没有预算会再打两个 chunk（总共 589 秒）；有预算 = 289 秒明确 Needs_Review', pass: fsRun_(() => fsR200Bad, slow289, false).elapsedMs === 589000 && fsSlow289Budget.elapsedMs === 289000 && fsSlow289Budget.calls.length === 1 && fsSlow289Budget.budgetFlag === true, actual: [fsSlow289Budget.elapsedMs, fsSlow289Budget.calls.length], expected: '[289000,1]' });
+
+  // 5) 预算「放得下」的时候完全不介入：整份 115 秒验证没过，chunk 各 70 秒 → 三次都照打，结果跟没有预算一模一样
+  const plausible = (i) => [115, 70, 70][i] * 1000;
+  const fsPlausibleNone = fsRun_(() => fsR200Bad, plausible, false);
+  const fsPlausibleBudget = fsRun_(() => fsR200Bad, plausible, true);
+  results.push({ name: 'Phase N·整条链·放得下时预算不介入：整份 115 秒验证没过、chunk 各 70 秒（255 秒内跑完）→ 三次呼叫照打，次数/耗时/attempts 跟没有预算完全一致，没有预算旗标（正常的 chunk fallback 不被打扰）', pass: fsPlausibleBudget.calls.length === 3 && fsPlausibleBudget.elapsedMs === 255000 && JSON.stringify(fsPlausibleNone.labels) === JSON.stringify(fsPlausibleBudget.labels) && fsPlausibleBudget.budgetFlag === false, actual: { calls: fsPlausibleBudget.calls.length, elapsed: fsPlausibleBudget.elapsedMs, flag: fsPlausibleBudget.budgetFlag }, expected: '[3, 255000, false]' });
+
+  // 6) 真实验证过的路径：429 等 54 秒后重试成功（整份 115 秒）→ Fully_Allocated，预算完全不介入
+  const fsProvenScript = (i) => (i === 0 ? fsR429(53.5) : fsRGood);
+  const fsProvenLatency = (i) => (i === 0 ? 1000 : 115000);
+  const fsProvenBudget = fsRun_(fsProvenScript, fsProvenLatency, true);
+  const fsProvenNone = fsRun_(fsProvenScript, fsProvenLatency, false);
+  results.push({ name: 'Phase N·整条链·回归守卫（真实验证过的路径）：整份先撞 429（建议等 53.5 秒）、等完重试成功（整份 115 秒）→ Fully_Allocated，2 次 fetch、耗时 170 秒，预算不介入，结果跟没有预算完全一样', pass: fsProvenBudget.status === 'Fully_Allocated' && fsProvenBudget.calls.length === 2 && fsProvenBudget.elapsedMs === 170000 && fsProvenBudget.budgetFlag === false && fsProvenNone.status === 'Fully_Allocated' && fsProvenNone.elapsedMs === 170000, actual: { status: fsProvenBudget.status, calls: fsProvenBudget.calls.length, elapsed: fsProvenBudget.elapsedMs }, expected: 'Fully_Allocated / 2 / 170000' });
+  const fsSlowSuccess = fsRun_(() => fsRGood, () => 289000, true);
+  results.push({ name: 'Phase N·整条链·第一次呼叫永远放行：整份 289 秒才回、而且是合法答案 → Fully_Allocated（预算不会因为「很慢」就拒绝第一次呼叫）', pass: fsSlowSuccess.status === 'Fully_Allocated' && fsSlowSuccess.calls.length === 1 && fsSlowSuccess.budgetFlag === false, actual: { status: fsSlowSuccess.status, calls: fsSlowSuccess.calls.length }, expected: 'Fully_Allocated / 1' });
+
+  // 7) 带种子的随机不变量模拟：随机回应序列（200 合法/200 不合法/429(随机建议秒数)/503/500/504/400/网络例外）× 随机延迟（多数很快、少数 20–120 秒、少数 120–300 秒）
+  function mulberry32_(seedIn) {
+    let seed = seedIn >>> 0;
+    return function () {
+      seed = (seed + 0x6D2B79F5) >>> 0;
+      let t = seed;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  // 三种情境轮流（seed % 3）：0 = 混合；1 = 服务中断（几乎全是可重试的失败、回得很快——才会真的撞到「次数」闸）；
+  // 2 = 慢（多数呼叫要 60–260 秒——才会真的撞到「时间」闸、并且示范平台硬杀）。
+  function randomScript_(seed) {
+    const rnd = mulberry32_(seed);
+    const regime = seed % 3;
+    const responses = [];
+    const latencies = [];
+    for (let k = 0; k < 80; k++) {
+      const x = rnd();
+      let r;
+      if (regime === 1) {
+        if (x < 0.60) r = fsR503;
+        else if (x < 0.82) r = fsR500;
+        else if (x < 0.88) r = fsR504;
+        else if (x < 0.93) r = fsR429(Math.round(1 + rnd() * 9));
+        else if (x < 0.97) r = fsR200Bad;
+        else r = fsRGood;
+      } else if (x < 0.14) r = fsRGood;
+      else if (x < 0.32) r = fsR200Bad;
+      else if (x < 0.55) r = fsR503;
+      else if (x < 0.65) r = fsR500;
+      else if (x < 0.70) r = fsR504;
+      else if (x < 0.84) r = fsR429(Math.round(1 + rnd() * 119));
+      else if (x < 0.90) r = fsR400;
+      else if (x < 0.93) r = { code: 0, throws: 'network error' };
+      else r = fsRGood;
+      responses.push(r);
+      const y = rnd();
+      if (regime === 1) latencies.push(Math.floor(rnd() * 2000));
+      else if (regime === 2) latencies.push(y < 0.2 ? Math.floor(rnd() * 3000) : 60000 + Math.floor(rnd() * 200000));
+      else latencies.push(y < 0.70 ? Math.floor(rnd() * 3000) : (y < 0.90 ? 20000 + Math.floor(rnd() * 100000) : 120000 + Math.floor(rnd() * 180000)));
+    }
+    return { responses, latencies };
+  }
+  const SKIP_LABELS = ['chunk_fallback_skipped_budget_exhausted', 'remaining_chunks_skipped_budget_exhausted', 'chunk_fallback_skipped_quota_exhausted', 'remaining_chunks_skipped_quota_exhausted', 'chunk_fallback_skipped'];
+  const SIM_RUNS = 600;
+  const violations = [];
+  const cover = { exhausted: 0, byCount: 0, byTime: 0, fully: 0, intervened: 0, notIntervened: 0, wouldHaveExceeded360: 0, budgetExceeded360: 0 };
+  for (let seed = 1; seed <= SIM_RUNS; seed++) {
+    const sc = randomScript_(seed);
+    const script = (i) => sc.responses[i];
+    const latency = (i) => sc.latencies[i];
+    const withB = fsRun_(script, latency, true);
+    const noB = fsRun_(script, latency, false);
+    const again = fsRun_(script, latency, true);
+    const tag = (msg) => violations.push(`seed ${seed}: ${msg}`);
+    if (withB.calls.length > B143.EXECUTION_MAX_FETCHES_) tag(`fetch 次数 ${withB.calls.length} 超过 ${B143.EXECUTION_MAX_FETCHES_}`);
+    if (!withB.calls.every((c) => c.startMs <= fsFetchStartLimitMs)) tag('有 fetch 在最晚开始时间（215 秒）之后才开始');
+    if (withB.events.length > 0 && withB.events[withB.events.length - 1] === 'sleep') tag('最后一个事件是 sleep（白睡）');
+    const prefix = noB.calls.slice(0, withB.calls.length).map((c) => [c.startMs, c.code, c.model]);
+    if (JSON.stringify(prefix) !== JSON.stringify(withB.calls.map((c) => [c.startMs, c.code, c.model]))) tag('有预算的 fetch 序列不是没有预算那条的前缀（预算只能截断，不能改变既有行为）');
+    if (withB.status === 'Fully_Allocated' && !(withB.statementChecksum && withB.statementChecksum.status === 'Matched' && withB.dailyAllocations.every((d) => d.checksum_status === 'Matched'))) tag('Fully_Allocated 但 checksum 没有全部 Matched');
+    if (noB.status === 'Fully_Allocated' && !(noB.statementChecksum && noB.statementChecksum.status === 'Matched')) tag('（对照组）Fully_Allocated 但 checksum 没有 Matched');
+    if (withB.status === 'Fully_Allocated' && noB.status !== 'Fully_Allocated') tag('预算凭空制造了 Fully_Allocated（没有预算那条不是）');
+    if (!(withB.extractOrdersCalls === 3 || withB.status === 'Fully_Allocated' || withB.labels.some((l) => SKIP_LABELS.indexOf(l) !== -1))) tag('少于 3 次 extractOrders 又没有 Fully_Allocated，而且没有任何明确的跳过记录（静默跳过）');
+    if (withB.budgetFlag !== withB.snapshot.exhausted) tag(`预算旗标(${withB.budgetFlag}) 跟预算状态(${withB.snapshot.exhausted}) 不一致`);
+    if (['Fully_Allocated', 'Needs_Review'].indexOf(withB.status) === -1) tag(`未知状态 ${withB.status}`);
+    if (!withB.budgetFlag && (withB.status !== noB.status || JSON.stringify(withB.labels) !== JSON.stringify(noB.labels) || withB.calls.length !== noB.calls.length || withB.elapsedMs !== noB.elapsedMs)) tag('预算没有介入（没有旗标）但结果跟没有预算的不一样');
+    if (JSON.stringify([withB.calls, withB.status, withB.labels, withB.elapsedMs]) !== JSON.stringify([again.calls, again.status, again.labels, again.elapsedMs])) tag('同一个种子跑两次结果不同（不可重现）');
+    if (withB.snapshot.exhausted) { cover.exhausted++; if (withB.snapshot.exhaustedReason === 'max_fetches') cover.byCount++; else cover.byTime++; }
+    if (withB.status === 'Fully_Allocated') cover.fully++;
+    if (withB.budgetFlag) cover.intervened++; else cover.notIntervened++;
+    if (noB.elapsedMs > 360000) cover.wouldHaveExceeded360++;
+    if (withB.elapsedMs > 360000) cover.budgetExceeded360++;
+  }
+  results.push({ name: `Phase N·随机不变量模拟（${SIM_RUNS} 个种子、每个跑「有预算 / 没有预算 / 有预算重跑」三次）：fetch ≤ 12；每次 fetch 都在 215 秒前开始；没有白睡；有预算的序列是没有预算那条的前缀（只截断不改变）；Fully_Allocated 一定 checksum 全 Matched 且预算不会凭空制造；少于 3 次 extractOrders 一定有明确的跳过记录；旗标跟预算状态一致；预算没介入时结果跟没有预算完全一样；同种子可重现`, pass: violations.length === 0, actual: violations.slice(0, 5), expected: '[]（无违反）' });
+  results.push({ name: 'Phase N·随机不变量模拟·覆盖检查（不是空转）：预算因「次数」拒绝、因「时间」拒绝、没介入、Fully_Allocated 的各至少 10 个种子；「没有预算时会超过 360 秒」的种子至少 10 个，而「有预算」的这一组里超过 360 秒的比没有预算的少', pass: cover.byCount >= 10 && cover.byTime >= 10 && cover.notIntervened >= 10 && cover.fully >= 10 && cover.wouldHaveExceeded360 >= 10 && cover.budgetExceeded360 < cover.wouldHaveExceeded360, actual: cover, expected: '各 ≥ 10；有预算超过 360 秒的 < 没有预算的' });
 
   // ---- 7: repeated header / footer 不被误判成订单行 ----
   results.push({ name: 'TEST 7: repeated header/footer 不产生假的 invalid-row 噪音（W01 invalid 数量应该很小，不是几十笔）', pass: w01.invalid.length < 5, actual: w01.invalid.length, expected: '< 5' });

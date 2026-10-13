@@ -17,6 +17,9 @@ if (typeof require === 'function') {
   var { DOCUMENTS_COLUMNS } = require('./110_DocumentImport.js');
   require('./112_DocumentTextExtractor.js');
   var { assertEqual_, fakeStore_, fakeSheetAccessor_, fakeLockProvider_, TEST_FIXTURE_GRAB_WEEKLY_STATEMENT } = require('./105_TestUtils.js');
+  // 2026-10-11 Phase N：执行级调用预算（127）。GAS 里 127 已经载入、这些就是全域函式/常数，
+  // 所以只在 Node 分支 require（跟上面每一行同一个守卫惯例）。
+  var { createExecutionBudget_, createBudgetExhaustedError_, EXECUTION_MAX_FETCHES_, EXECUTION_HARD_LIMIT_MS_, EXECUTION_RESERVE_MS_ } = require('./127_LLMExtractor.js');
 }
 
 /** 假的 folderScanner——Node 测不了真的 DriveApp，但可以测扫描/去重/批次的编排逻辑。 */
@@ -381,10 +384,13 @@ function runAllOperatorConsoleTests() {
   seedNeedsAllocationFixture_(depsRDA5a);
   const depsRDA5b = fakeConsoleDeps_();
   seedNeedsAllocationFixture_(depsRDA5b);
+  // 2026-10-11 Phase N：回传多了 executionBudget.elapsedMs（真实时钟量到的耗时）。两次独立呼叫比整个物件时，
+  // 若各自用真实时钟，elapsedMs 会因为跨过毫秒边界而偶尔差 1（实测约 7/30 次失败的 flaky）——这个断言要验证的是
+  // 「公开版本只是转发」，不是耗时，所以两边都注入同一个固定时钟的预算，整个物件仍然逐栏位比对。
   assertEqual_(
     'consoleRunDailyAllocation 公开版本转发结果跟 consoleRunDailyAllocation_ 一致',
-    consoleRunDailyAllocation('CMP-INCOME-2026-W01', Object.assign({}, depsRDA5a, { orderExtractor: fakeOrderExtractor_(fakeFullyAllocatedCandidate_) })),
-    consoleRunDailyAllocation_('CMP-INCOME-2026-W01', Object.assign({}, depsRDA5b, { orderExtractor: fakeOrderExtractor_(fakeFullyAllocatedCandidate_) })),
+    consoleRunDailyAllocation('CMP-INCOME-2026-W01', Object.assign({}, depsRDA5a, { orderExtractor: fakeOrderExtractor_(fakeFullyAllocatedCandidate_), executionBudget: createExecutionBudget_({ now: () => 0 }) })),
+    consoleRunDailyAllocation_('CMP-INCOME-2026-W01', Object.assign({}, depsRDA5b, { orderExtractor: fakeOrderExtractor_(fakeFullyAllocatedCandidate_), executionBudget: createExecutionBudget_({ now: () => 0 }) })),
     results
   );
 
@@ -456,6 +462,275 @@ function runAllOperatorConsoleTests() {
   assertEqual_('consoleRunDailyAllocation_·失败时 errors 带着底层例外文字（不再是没有线索的黑盒 Needs_Review）', rdaDiag.errors.some((e) => String(e.exception || '').indexOf('模拟 Gemini HTTP 400') !== -1), true, results);
   assertEqual_('consoleRunDailyAllocation_·extractor 被呼叫三次（整份 + 两段），每次收到的 document.totalPages 都是那个具名假设值', { calls: seenByExtractor.length, allUseAssumedTotalPages: seenByExtractor.every((c) => c.totalPages === ASSUMED_STATEMENT_TOTAL_PAGES_) }, { calls: 3, allUseAssumedTotalPages: true }, results);
   assertEqual_('consoleRunDailyAllocation_·成功时 attempts/errors 也是阵列（回传形状固定，前端不用判断有没有这两个欄位）', { attempts: Array.isArray(rdaResult.attempts), errors: Array.isArray(rdaResult.errors) }, { attempts: true, errors: true }, results);
+
+  // ============================================================
+  // 2026-10-11 Phase N（Steven 授权：单笔执行预算与 6 分钟硬限制风险）——consoleRunDailyAllocation_ 这一层。
+  // 127（预算本身）跟 142（编排）已经分别在 128 / 143 测过；这里测的是 170 把它们接起来的那一段：
+  //   (1) 每次执行有没有自己建一个预算、回传里有没有明确的旗标与快照（而且没有动到既有栏位）
+  //   (2) 预算用尽时 170 回传什么（Done + Needs_Review + budgetExhausted，不是 Error、更不是 Fully_Allocated）、
+  //       Sheet 有没有被写坏（Daily_Allocation 0 笔、Verified_Income 不变）、诊断 log 带不带旗标
+  //   (3) 预算有没有真的接到「真正打 Gemini 的那一层」——用假的 GAS 全域物件（UrlFetchApp / Utilities /
+  //       DriveApp / PropertiesService）从 consoleRunDailyAllocation_ 一路跑进真的 127 + 142（只能在 Node 跑；
+  //       「建了预算却没接上」是这类修复最容易出的漏洞）
+  //   (4) 重复写入安全：预算用尽的那次不写任何东西；重新执行拿到全新的预算；已经 Fully_Allocated 的不会再多写一批
+  // 全部是 Node + 假时钟 + 假 HTTP 回应——不是真实 GAS、真实 Gemini、真实浏览器的验证（那些仍是 PENDING）。
+  // ============================================================
+  function captureWarnPhaseN171_(fn) {
+    const originalWarn = console.warn;
+    const lines = [];
+    console.warn = function () { lines.push(Array.prototype.slice.call(arguments).join(' ')); };
+    try { return { value: fn(), warnings: lines }; } finally { console.warn = originalWarn; }
+  }
+  /** 会真的向「执行级预算」申请的假 extractor：用法跟 127 createRetryingPostJson_ 对预算的用法一样
+   *  （tryBeginFetch → 做事 → endFetch）；预算拒绝就抛 createBudgetExhaustedError_；准许时模拟这次 Gemini
+   *  呼叫以「可重试的失败」收场（不是预算错误），而且把花掉的时间记到假时钟上。 */
+  function budgetAskingExtractorPhaseN171_(budget, clock, perFetchMs) {
+    const asked = [];
+    return {
+      asked,
+      extractOrders(document, pageRange) {
+        const gate = budget.tryBeginFetch();
+        asked.push({ range: pageRange ? `${pageRange.firstPage}-${pageRange.lastPage}` : 'full', granted: gate.ok });
+        if (!gate.ok) throw createBudgetExhaustedError_(gate.reason, gate.snapshot);
+        clock.t += perFetchMs;
+        budget.endFetch(gate.startedAtMs);
+        throw new Error('模拟 Gemini HTTP 503（可重试的失败，不是预算错误）');
+      }
+    };
+  }
+  function runBudgetScenarioPhaseN171_(budgetOptions, perFetchMs) {
+    const clock = { t: 0 };
+    const budget = createExecutionBudget_(Object.assign({ now: () => clock.t }, budgetOptions));
+    const extractor = budgetAskingExtractorPhaseN171_(budget, clock, perFetchMs);
+    const deps = fakeConsoleDeps_();
+    seedNeedsAllocationFixture_(deps);
+    const captured = captureWarnPhaseN171_(() => consoleRunDailyAllocation_('CMP-INCOME-2026-W01', Object.assign({}, deps, { orderExtractor: extractor, executionBudget: budget })));
+    const warnLine = captured.warnings.find((w) => w.indexOf('[DailyAllocation]') !== -1) || '';
+    let warnJson = null;
+    try { warnJson = JSON.parse(warnLine.slice(warnLine.indexOf('{'))); } catch (e) { warnJson = null; }
+    return {
+      result: captured.value, asked: extractor.asked, warnJson,
+      dailyRows: deps._accessor.getWritten('Daily_Allocation').length,
+      incomeStatus: deps.sheetReader.readAll('Verified_Income', VERIFIED_INCOME_COLUMNS).find((r) => r.income_id === 'CMP-INCOME-2026-W01').status
+    };
+  }
+
+  // ---- (1) 成功路径：新增栏位是加法性的，既有栏位不变 ----
+  const rdaBudgetSnapshot = rdaResult.executionBudget || {};
+  assertEqual_('Phase N·成功时（没有注入 deps.executionBudget——170 自己建了预算）：回传带 budgetExhausted:false 跟预算快照（上限 = 127 的常数、没有用尽、没开始任何 fetch——假 extractor 不打 HTTP）；既有栏位 status / allocationStatus / rowsWritten 完全不变', {
+    budgetExhausted: rdaResult.budgetExhausted,
+    maxFetches: rdaBudgetSnapshot.maxFetches, hardLimitMs: rdaBudgetSnapshot.hardLimitMs, reserveMs: rdaBudgetSnapshot.reserveMs,
+    exhausted: rdaBudgetSnapshot.exhausted, exhaustedReason: rdaBudgetSnapshot.exhaustedReason, fetchesStarted: rdaBudgetSnapshot.fetchesStarted,
+    existing: [rdaResult.status, rdaResult.allocationStatus, rdaResult.rowsWritten]
+  }, {
+    budgetExhausted: false,
+    maxFetches: EXECUTION_MAX_FETCHES_, hardLimitMs: EXECUTION_HARD_LIMIT_MS_, reserveMs: EXECUTION_RESERVE_MS_,
+    exhausted: false, exhaustedReason: null, fetchesStarted: 0,
+    existing: ['Done', 'Fully_Allocated', 1]
+  }, results);
+  assertEqual_('Phase N·executionBudget 快照只含 primitive（数字/布尔/字符串/null；没有 Date、函式、巢状物件）——经 google.script.run 回传安全；前端用到的栏位都在；整个回传没有原生 Date', {
+    allPrimitive: Object.keys(rdaBudgetSnapshot).every((k) => rdaBudgetSnapshot[k] === null || ['number', 'boolean', 'string'].indexOf(typeof rdaBudgetSnapshot[k]) !== -1),
+    hasFrontendKeys: ['fetchesStarted', 'maxFetches', 'elapsedMs', 'exhausted', 'exhaustedReason'].every((k) => k in rdaBudgetSnapshot),
+    elapsedIsSmallNonNegative: typeof rdaBudgetSnapshot.elapsedMs === 'number' && rdaBudgetSnapshot.elapsedMs >= 0 && rdaBudgetSnapshot.elapsedMs < 60000,
+    noDateAnywhere: collectDatePaths_(rdaResult, 'rda', [])
+  }, { allPrimitive: true, hasFrontendKeys: true, elapsedIsSmallNonNegative: true, noDateAnywhere: [] }, results);
+  assertEqual_('Phase N·新栏位只出现在 Done 的回传上：Skipped / Error 的回传形状完全没动（没有 budgetExhausted / executionBudget）', {
+    skippedKeys: Object.keys(rdaSkipFull).sort(), errorKeys: Object.keys(rdaMissing).sort()
+  }, {
+    skippedKeys: ['incomeId', 'reason', 'status'], errorKeys: ['error', 'incomeId', 'status']
+  }, results);
+
+  // ---- (2) 预算用尽（透过会真的向预算申请的假 extractor，预算快照跟回传一致） ----
+  const bScenarioCount = runBudgetScenarioPhaseN171_({ maxFetches: 1 }, 1000);
+  assertEqual_('Phase N·预算「次数」用尽（上限 1）：整份打了 1 次失败 → chunk_1-13 被预算拒绝 → 剩下的 chunk 明确跳过（连问都没问 chunk_12-24）→ all_chunks_failed；回 Done + Needs_Review + budgetExhausted:true（不是 Error，更不是 Fully_Allocated），写 0 笔', {
+    status: bScenarioCount.result.status, allocationStatus: bScenarioCount.result.allocationStatus, budgetExhausted: bScenarioCount.result.budgetExhausted,
+    rowsWritten: bScenarioCount.result.rowsWritten, skipped: bScenarioCount.result.skipped,
+    labels: bScenarioCount.result.attempts.map((a) => a.label), asked: bScenarioCount.asked
+  }, {
+    status: 'Done', allocationStatus: 'Needs_Review', budgetExhausted: true, rowsWritten: 0, skipped: false,
+    labels: ['full_document', 'chunk_1-13', 'remaining_chunks_skipped_budget_exhausted', 'all_chunks_failed'],
+    asked: [{ range: 'full', granted: true }, { range: '1-13', granted: false }]
+  }, results);
+  assertEqual_('Phase N·预算「次数」用尽：回传的预算快照是这次执行真的用到的那一个（exhausted:true、原因 max_fetches、开始 1 次/上限 1 次）；attempts 里带旗标的是被拒绝的那几项，整份那次真实失败的记录没有被盖掉', {
+    snapshot: { exhausted: bScenarioCount.result.executionBudget.exhausted, reason: bScenarioCount.result.executionBudget.exhaustedReason, started: bScenarioCount.result.executionBudget.fetchesStarted, max: bScenarioCount.result.executionBudget.maxFetches },
+    flagged: bScenarioCount.result.attempts.filter((a) => a.budgetExhausted === true).map((a) => a.label),
+    fullDocumentEntryIsRealFailure: bScenarioCount.result.attempts[0].label === 'full_document' && bScenarioCount.result.attempts[0].budgetExhausted !== true
+  }, {
+    snapshot: { exhausted: true, reason: 'max_fetches', started: 1, max: 1 },
+    flagged: ['chunk_1-13', 'remaining_chunks_skipped_budget_exhausted'],
+    fullDocumentEntryIsRealFailure: true
+  }, results);
+  assertEqual_('Phase N·预算用尽时 Sheet 没有被写坏：Daily_Allocation 0 笔、Verified_Income 状态不变（仍是 Verified，160 看到的还是 Needs_Allocation，不会误判成已分配）', { dailyRows: bScenarioCount.dailyRows, incomeStatus: bScenarioCount.incomeStatus }, { dailyRows: 0, incomeStatus: 'Verified' }, results);
+  assertEqual_('Phase N·预算用尽时诊断 log（console.warn）的 JSON 带 budgetExhausted:true 跟预算快照——真实 GAS 的执行记录靠这个分辨「预算用尽」跟「一般的 Needs_Review」', {
+    parsed: bScenarioCount.warnJson !== null,
+    budgetExhausted: bScenarioCount.warnJson && bScenarioCount.warnJson.budgetExhausted,
+    reason: bScenarioCount.warnJson && bScenarioCount.warnJson.executionBudget && bScenarioCount.warnJson.executionBudget.exhaustedReason,
+    attemptsKept: bScenarioCount.warnJson && Array.isArray(bScenarioCount.warnJson.attempts) && bScenarioCount.warnJson.attempts.length === 4
+  }, { parsed: true, budgetExhausted: true, reason: 'max_fetches', attemptsKept: true }, results);
+
+  const bScenarioZero = runBudgetScenarioPhaseN171_({ maxFetches: 0 }, 1000);
+  assertEqual_('Phase N·预算一开始就容不下任何呼叫（上限 0）：连整份都被拒绝 → 整个 chunk fallback 明确跳过（chunk_fallback_skipped_budget_exhausted，extractor 只被问了一次）；Done + Needs_Review + budgetExhausted:true，写 0 笔', {
+    status: bScenarioZero.result.status, allocationStatus: bScenarioZero.result.allocationStatus, budgetExhausted: bScenarioZero.result.budgetExhausted, rowsWritten: bScenarioZero.result.rowsWritten,
+    labels: bScenarioZero.result.attempts.map((a) => a.label), asked: bScenarioZero.asked, started: bScenarioZero.result.executionBudget.fetchesStarted, dailyRows: bScenarioZero.dailyRows
+  }, {
+    status: 'Done', allocationStatus: 'Needs_Review', budgetExhausted: true, rowsWritten: 0,
+    labels: ['full_document', 'chunk_fallback_skipped_budget_exhausted'], asked: [{ range: 'full', granted: false }], started: 0, dailyRows: 0
+  }, results);
+
+  const bScenarioTime = runBudgetScenarioPhaseN171_({}, 200000);
+  assertEqual_('Phase N·预算「时间」用尽（默认常数；整份呼叫花了 200 秒才失败）：剩下的时间放不下再一次呼叫 → chunk 被拒绝（原因 time、已耗时 200 秒）；Done + Needs_Review + budgetExhausted:true，写 0 笔', {
+    status: bScenarioTime.result.status, allocationStatus: bScenarioTime.result.allocationStatus, budgetExhausted: bScenarioTime.result.budgetExhausted, rowsWritten: bScenarioTime.result.rowsWritten,
+    reason: bScenarioTime.result.executionBudget.exhaustedReason, elapsedMs: bScenarioTime.result.executionBudget.elapsedMs, started: bScenarioTime.result.executionBudget.fetchesStarted,
+    labels: bScenarioTime.result.attempts.map((a) => a.label), dailyRows: bScenarioTime.dailyRows
+  }, {
+    status: 'Done', allocationStatus: 'Needs_Review', budgetExhausted: true, rowsWritten: 0,
+    reason: 'time', elapsedMs: 200000, started: 1,
+    labels: ['full_document', 'chunk_1-13', 'remaining_chunks_skipped_budget_exhausted', 'all_chunks_failed'], dailyRows: 0
+  }, results);
+
+  // 只看 142 attempts 里的结构化旗标，不解析错误文字：错误文字里写着「预算已耗尽」但没有 isBudgetExhausted 旗标 → 不算
+  const depsBudgetTextOnly = fakeConsoleDeps_();
+  seedNeedsAllocationFixture_(depsBudgetTextOnly);
+  const rdaTextOnly = captureWarnPhaseN171_(() => consoleRunDailyAllocation_('CMP-INCOME-2026-W01', Object.assign({}, depsBudgetTextOnly, { orderExtractor: fakeOrderExtractor_(new Error('单次执行的 LLM 调用预算已耗尽（这句话只是错误文字，没有结构化旗标）')) }))).value;
+  assertEqual_('Phase N·只认结构化旗标、不解析错误文字：extractor 丢出的错误文字写着「预算已耗尽」但没有 isBudgetExhausted → budgetExhausted 是 false（一般的失败不会被误报成预算用尽）', { budgetExhausted: rdaTextOnly.budgetExhausted, allocationStatus: rdaTextOnly.allocationStatus }, { budgetExhausted: false, allocationStatus: 'Needs_Review' }, results);
+
+  // ---- (3)(4) 真实接线 + 重复写入安全（Node 专用：用假的 GAS 全域物件，一路跑进真的 127 + 142）----
+  // GAS 里 UrlFetchApp / Utilities / DriveApp / PropertiesService 是真的服务，不能（也不该）被换掉，
+  // 所以这一整段只在 Node 跑；装上去的假全域物件一律在 finally 里还原，不会漏到后面的测试。
+  if (typeof require === 'function') {
+    const gasGlobalNamesPhaseN = ['PropertiesService', 'UrlFetchApp', 'Utilities', 'DriveApp'];
+    const gasGlobalRefPhaseN = globalThis;
+    const makeFakeGasWorldPhaseN = function (script, latencyOf) {
+      const clock = { t: 0 };
+      const fetchLog = [];
+      const sleepLog = [];
+      const evidenceWrites = [];
+      const props = { GEMINI_API_KEY: 'test-key', EXTRACTION_EVIDENCE_FOLDER_ID: 'evidence-folder' };
+      const fakes = {
+        PropertiesService: { getScriptProperties: () => ({ getProperty: (k) => (Object.prototype.hasOwnProperty.call(props, k) ? props[k] : null) }) },
+        UrlFetchApp: {
+          fetch(url, options) {
+            const idx = fetchLog.length;
+            const r = script(idx);
+            fetchLog.push({ idx, startMs: clock.t, code: r.code, model: (String(url).match(/\/models\/([^:]+):generateContent/) || [])[1], muteHttpExceptions: !!(options && options.muteHttpExceptions) });
+            clock.t += latencyOf(idx, r);
+            return { getResponseCode: () => r.code, getContentText: () => r.text };
+          }
+        },
+        Utilities: {
+          sleep(ms) { sleepLog.push(ms); clock.t += ms; },
+          base64Encode(bytes) { return 'b64:' + String(bytes.length); },
+          newBlob(data, type, name) { return { data, type, name }; }
+        },
+        DriveApp: {
+          getFileById() { return { getBlob: () => ({ getBytes: () => [1, 2, 3] }) }; },
+          getFolderById() { return { createFile(blob) { evidenceWrites.push(blob.name); return { getId: () => 'evidence-' + evidenceWrites.length }; } }; }
+        }
+      };
+      return { clock, fetchLog, sleepLog, evidenceWrites, fakes };
+    };
+    // budgetMode: 'default'（不注入——走 production 路径，由 170 自己建预算）/ 'virtual'（注入假时钟的预算）/
+    // 'unlimited'（注入实际上不设限的预算——对照组：证明没有预算时这个假世界真的会打到 36 次）
+    const runWiredPhaseN = function (script, latencyOf, budgetMode, depsIn) {
+      const world = makeFakeGasWorldPhaseN(script, latencyOf);
+      const saved = {};
+      gasGlobalNamesPhaseN.forEach((n) => { saved[n] = { had: Object.prototype.hasOwnProperty.call(gasGlobalRefPhaseN, n), value: gasGlobalRefPhaseN[n] }; });
+      const deps = depsIn || (function () { const x = fakeConsoleDeps_(); seedNeedsAllocationFixture_(x); return x; })();
+      const d = Object.assign({}, deps); // 刻意不注入 orderExtractor：走 production 的 lazyOrderExtractor_ → realLLMExtractor_
+      if (budgetMode === 'virtual') d.executionBudget = createExecutionBudget_({ now: () => world.clock.t });
+      if (budgetMode === 'unlimited') d.executionBudget = createExecutionBudget_({ now: () => world.clock.t, maxFetches: 1e9, hardLimitMs: 1e12, reserveMs: 0, minCallEstimateMs: 0 });
+      try {
+        gasGlobalNamesPhaseN.forEach((n) => { gasGlobalRefPhaseN[n] = world.fakes[n]; });
+        const captured = captureWarnPhaseN171_(() => consoleRunDailyAllocation_('CMP-INCOME-2026-W01', d));
+        return {
+          result: captured.value, world, deps,
+          fetches: world.fetchLog.length, models: world.fetchLog.map((f) => f.model),
+          sleepMs: world.sleepLog.reduce((a, b) => a + b, 0), elapsedMs: world.clock.t,
+          dailyRows: deps._accessor.getWritten('Daily_Allocation').length,
+          labels: (captured.value.attempts || []).map((a) => a.label)
+        };
+      } finally {
+        gasGlobalNamesPhaseN.forEach((n) => { if (saved[n].had) gasGlobalRefPhaseN[n] = saved[n].value; else delete gasGlobalRefPhaseN[n]; });
+      }
+    };
+    const resp503PhaseN = { code: 503, text: JSON.stringify({ error: { code: 503, status: 'UNAVAILABLE' } }) };
+    const respGoodPhaseN = { code: 200, text: JSON.stringify({ candidates: [{ finishReason: 'STOP', content: { role: 'model', parts: [{ text: JSON.stringify(fakeFullyAllocatedCandidate_) }] } }] }) };
+    const resp429PhaseN = (sec) => ({ code: 429, text: JSON.stringify({ error: { code: 429, status: 'RESOURCE_EXHAUSTED', details: [{ '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: `${sec}s` }] } }) });
+    const instantPhaseN = () => 0;
+    const fetchStartLimitPhaseN = EXECUTION_HARD_LIMIT_MS_ - EXECUTION_RESERVE_MS_ - 115000; // 215 秒：默认常数下，任何一次 fetch 都得在这之前开始
+
+    const wiredNoGlobalsLeaked = () => gasGlobalNamesPhaseN.every((n) => !(n in gasGlobalRefPhaseN));
+
+    const wired503 = runWiredPhaseN(() => resp503PhaseN, instantPhaseN, 'virtual');
+    assertEqual_('Phase N·真实接线（假 GAS 全域物件）·全部 503：consoleRunDailyAllocation_ → lazyOrderExtractor_ → realLLMExtractor_ → 真的 127 重试/模型链 + 真的 142 编排——整次执行只打 12 次 fetch（没有预算是 36 次），Done + Needs_Review、写 0 笔、预算旗标成立；三个模型各 4 次、1/2/4 秒退避共睡 21 秒', {
+      fetches: wired503.fetches, status: wired503.result.status, allocationStatus: wired503.result.allocationStatus, rowsWritten: wired503.result.rowsWritten, dailyRows: wired503.dailyRows,
+      budgetExhausted: wired503.result.budgetExhausted, labels: wired503.labels,
+      snapshot: { started: wired503.result.executionBudget.fetchesStarted, reason: wired503.result.executionBudget.exhaustedReason },
+      perModelFetches: (function () { const c = {}; wired503.models.forEach((m) => { c[m] = (c[m] || 0) + 1; }); return Object.keys(c).map((k) => c[k]); })(),
+      sleepMs: wired503.sleepMs,
+      allStartedBeforeLimit: wired503.world.fetchLog.every((f) => f.startMs <= fetchStartLimitPhaseN)
+    }, {
+      fetches: 12, status: 'Done', allocationStatus: 'Needs_Review', rowsWritten: 0, dailyRows: 0,
+      budgetExhausted: true, labels: ['full_document', 'chunk_1-13', 'remaining_chunks_skipped_budget_exhausted', 'all_chunks_failed'],
+      snapshot: { started: 12, reason: 'max_fetches' },
+      perModelFetches: [4, 4, 4],
+      sleepMs: 21000,
+      allStartedBeforeLimit: true
+    }, results);
+    assertEqual_('Phase N·真实接线·没有注入预算（production 路径：170 每次执行自己建一个）：同样只打 12 次 fetch、预算旗标成立——证明「建了预算」跟「接到打 Gemini 的那一层」都成立', (function () {
+      const r = runWiredPhaseN(() => resp503PhaseN, instantPhaseN, 'default');
+      return { fetches: r.fetches, budgetExhausted: r.result.budgetExhausted, allocationStatus: r.result.allocationStatus, dailyRows: r.dailyRows };
+    })(), { fetches: 12, budgetExhausted: true, allocationStatus: 'Needs_Review', dailyRows: 0 }, results);
+    const wiredUnlimited = runWiredPhaseN(() => resp503PhaseN, instantPhaseN, 'unlimited');
+    assertEqual_('Phase N·真实接线·对照组（注入实际上不设限的预算）：同一个假世界打到 36 次 fetch（3 个 stage × 3 个模型 × 4 次）、睡 63 秒、没有预算旗标——证明上面的 12 是预算的功劳，不是假世界本身只会打 12 次', {
+      fetches: wiredUnlimited.fetches, sleepMs: wiredUnlimited.sleepMs, budgetExhausted: wiredUnlimited.result.budgetExhausted,
+      labels: wiredUnlimited.labels, allocationStatus: wiredUnlimited.result.allocationStatus
+    }, {
+      fetches: 36, sleepMs: 63000, budgetExhausted: false,
+      labels: ['full_document', 'chunk_1-13', 'chunk_12-24', 'all_chunks_failed'], allocationStatus: 'Needs_Review'
+    }, results);
+
+    const wiredSlow = runWiredPhaseN(() => resp503PhaseN, () => 200000, 'virtual');
+    assertEqual_('Phase N·真实接线·慢呼叫（每次 fetch 要 200 秒才回 503）：只打 1 次、没有白睡（重试睡眠之前就被预算拒绝）、200 秒时明确 Needs_Review（原因 time）——没有预算会打 36 次、一路超过 360 秒被平台硬杀', {
+      fetches: wiredSlow.fetches, sleepMs: wiredSlow.sleepMs, elapsedMs: wiredSlow.elapsedMs,
+      allocationStatus: wiredSlow.result.allocationStatus, budgetExhausted: wiredSlow.result.budgetExhausted, reason: wiredSlow.result.executionBudget.exhaustedReason,
+      labels: wiredSlow.labels, dailyRows: wiredSlow.dailyRows
+    }, {
+      fetches: 1, sleepMs: 0, elapsedMs: 200000,
+      allocationStatus: 'Needs_Review', budgetExhausted: true, reason: 'time',
+      labels: ['full_document', 'chunk_fallback_skipped_budget_exhausted'], dailyRows: 0
+    }, results);
+
+    const wiredProven = runWiredPhaseN((i) => (i === 0 ? resp429PhaseN(53.5) : respGoodPhaseN), (i) => (i === 0 ? 1000 : 115000), 'default');
+    assertEqual_('Phase N·真实接线·回归守卫（真实 GAS 验证过的路径）：整份先撞 429（建议等 53.5 秒）、等 54 秒后重试成功（整份 115 秒）→ Fully_Allocated 写 1 笔，2 次 fetch、耗时 170 秒，预算没有介入', {
+      status: wiredProven.result.status, allocationStatus: wiredProven.result.allocationStatus, rowsWritten: wiredProven.result.rowsWritten, dailyRows: wiredProven.dailyRows,
+      fetches: wiredProven.fetches, sleepsMs: wiredProven.world.sleepLog, elapsedMs: wiredProven.elapsedMs, budgetExhausted: wiredProven.result.budgetExhausted,
+      snapshot: { started: wiredProven.result.executionBudget.fetchesStarted, exhausted: wiredProven.result.executionBudget.exhausted }
+    }, {
+      status: 'Done', allocationStatus: 'Fully_Allocated', rowsWritten: 1, dailyRows: 1,
+      fetches: 2, sleepsMs: [54000], elapsedMs: 170000, budgetExhausted: false,
+      snapshot: { started: 2, exhausted: false }
+    }, results);
+
+    // ---- 重复写入安全：同一份（持久的）假 Sheet 上连续跑四次 ----
+    const depsSeqPhaseN = fakeConsoleDeps_();
+    seedNeedsAllocationFixture_(depsSeqPhaseN);
+    const dailyRowsOf = (deps) => deps._accessor.getWritten('Daily_Allocation').length;
+    const incomeStatusOf = (deps) => deps.sheetReader.readAll('Verified_Income', VERIFIED_INCOME_COLUMNS).find((r) => r.income_id === 'CMP-INCOME-2026-W01').status;
+    const seq1 = runWiredPhaseN(() => resp503PhaseN, instantPhaseN, 'default', depsSeqPhaseN);
+    const seq1Rows = dailyRowsOf(depsSeqPhaseN);
+    const seq2 = runWiredPhaseN(() => respGoodPhaseN, () => 1000, 'default', depsSeqPhaseN);
+    const seq2Rows = dailyRowsOf(depsSeqPhaseN);
+    const seq3 = runWiredPhaseN(() => respGoodPhaseN, () => 1000, 'default', depsSeqPhaseN);
+    const seq3Rows = dailyRowsOf(depsSeqPhaseN);
+    const seq4 = runWiredPhaseN(() => resp503PhaseN, instantPhaseN, 'default', depsSeqPhaseN);
+    const seq4Rows = dailyRowsOf(depsSeqPhaseN);
+    assertEqual_('Phase N·重复写入安全·第 1 步：预算用尽的那一次什么都没写（Daily_Allocation 0 笔、Verified_Income 不变）', { budgetExhausted: seq1.result.budgetExhausted, rowsWritten: seq1.result.rowsWritten, dailyRows: seq1Rows, incomeStatus: incomeStatusOf(depsSeqPhaseN) }, { budgetExhausted: true, rowsWritten: 0, dailyRows: 0, incomeStatus: 'Verified' }, results);
+    assertEqual_('Phase N·重复写入安全·第 2 步：重新执行拿到「全新」的预算（不是沿用上一次已用尽的）→ 成功 → Fully_Allocated 恰好写 1 笔（预算用尽的那次没有留下半批资料）', { allocationStatus: seq2.result.allocationStatus, budgetExhausted: seq2.result.budgetExhausted, fetches: seq2.fetches, freshBudgetStarted: seq2.result.executionBudget.fetchesStarted, rowsWritten: seq2.result.rowsWritten, dailyRows: seq2Rows }, { allocationStatus: 'Fully_Allocated', budgetExhausted: false, fetches: 1, freshBudgetStarted: 1, rowsWritten: 1, dailyRows: 1 }, results);
+    assertEqual_('Phase N·重复写入安全·第 3 步：再重跑一次 → 既有 Fully_Allocated 守卫接手（skipped: Already_Fully_Allocated），Daily_Allocation 仍然只有 1 笔', { skipped: seq3.result.skipped, reason: seq3.result.reason, rowsWritten: seq3.result.rowsWritten, dailyRows: seq3Rows }, { skipped: true, reason: 'Already_Fully_Allocated', rowsWritten: 0, dailyRows: 1 }, results);
+    assertEqual_('Phase N·重复写入安全·第 4 步：已经 Fully_Allocated 之后又碰到预算用尽的一次执行 → 不写任何东西、既有结果原封不动（Daily_Allocation 仍然 1 笔；这一次的回传是 Needs_Review+skipped，「已经 Fully_Allocated 的记录再跑一次」一直是这个形状，预算没有改变它）', { budgetExhausted: seq4.result.budgetExhausted, skipped: seq4.result.skipped, reason: seq4.result.reason, rowsWritten: seq4.result.rowsWritten, dailyRows: seq4Rows, incomeStatus: incomeStatusOf(depsSeqPhaseN) }, { budgetExhausted: true, skipped: true, reason: 'Already_Fully_Allocated', rowsWritten: 0, dailyRows: 1, incomeStatus: 'Verified' }, results);
+    assertEqual_('Phase N·假 GAS 全域物件已全部还原（不会漏到后面的测试；Node 里本来就没有这四个名字）', wiredNoGlobalsLeaked(), true, results);
+  }
 
   // ============ PDF Import Recovery Center（2026-10-02，真实撞到 2026-W06.pdf 卡住要手动删 Documents 才能重试）============
 
@@ -992,6 +1267,115 @@ function runAllOperatorConsoleTests() {
       firstRenderButNoAutoLoad: initTail.indexOf('renderRecovery();') !== -1 && initTail.indexOf('loadRecoveryStatus') === -1
     };
     assertEqual_('170.html·Recovery·页面结构：区块在「Drive 汇入」之后、Debug/Fallback 之前；容器齐全；Filter 是静态输入框（重绘清单不会抢走焦点）；没有「全部重试」功能（重试入口只有单档跟选取多档两个）；页面载入只渲染初始提示、不自动打后端', structureChecks, allTrue(structureChecks), results);
+
+    // ============ 2026-10-11 Phase N：Daily Allocation 结果卡的「预算用尽」提示（describeBudgetExhausted / renderDailyAllocationResult）============
+    // 同一套做法：从 HTML 抽出真正的函数丢进 vm，配最小的假 DOM；测的是 UI 逻辑跟 render 输出，真实浏览器的呈现靠人工清单。
+    const budgetUiEl = { innerHTML: '' };
+    const budgetUiToasts = [];
+    let budgetUiDashboardLoads = 0;
+    const budgetUiSandbox = {
+      document: {
+        getElementById(id) { return id === 'da-CMP-INCOME-UI' ? budgetUiEl : null; },
+        createElement() {
+          let text = '';
+          return {
+            set textContent(v) { text = v; },
+            get innerHTML() { return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+          };
+        }
+      },
+      showToast(msg) { budgetUiToasts.push(msg); },
+      loadDashboard() { budgetUiDashboardLoads++; }
+    };
+    vmHtml.createContext(budgetUiSandbox);
+    vmHtml.runInContext(['escapeHtml', 'escapeJs', 'isFiniteNumber', 'describeBudgetExhausted', 'renderDailyAllocationResult'].map((n) => extractFn(scriptText, n)).join('\n'), budgetUiSandbox);
+    const renderBudgetUi = (result) => {
+      budgetUiEl.innerHTML = '';
+      budgetUiSandbox.renderDailyAllocationResult('CMP-INCOME-UI', '2025-12-29', '2026-01-04', plain(result));
+      return budgetUiEl.innerHTML;
+    };
+    const budgetNeedsReview = (extra) => Object.assign({ status: 'Done', allocationStatus: 'Needs_Review', rowsWritten: 0, skipped: false }, extra);
+    const genericNeedsReviewText = '这次执行没有产生 Fully_Allocated 的结果';
+    const budgetTextMarker = '这次执行的 Gemini 呼叫预算用完了';
+    const loadsBefore = budgetUiDashboardLoads;
+    const toastsBefore = budgetUiToasts.length;
+
+    const uiMaxFetches = renderBudgetUi(budgetNeedsReview({ budgetExhausted: true, executionBudget: { exhaustedReason: 'max_fetches', fetchesStarted: 12, maxFetches: 12, elapsedMs: 21000 } }));
+    const maxFetchesChecks = {
+      budgetText: uiMaxFetches.indexOf(budgetTextMarker) !== -1,
+      countDetail: uiMaxFetches.indexOf('（呼叫次数已用 12/12 次）') !== -1,
+      saysNotSilentAndNoFully: uiMaxFetches.indexOf('不是静默略过') !== -1 && uiMaxFetches.indexOf('没有写入任何 Fully_Allocated') !== -1,
+      saysRerunGetsFreshBudget: uiMaxFetches.indexOf('重新执行会拿到全新的预算') !== -1,
+      notGenericText: uiMaxFetches.indexOf(genericNeedsReviewText) === -1,
+      flaggedBadgeNotSuccess: uiMaxFetches.indexOf('<span class="badge flagged">Needs_Review</span>') !== -1 && uiMaxFetches.indexOf('badge stamp') === -1,
+      rerunButtonStillAskedFirst: uiMaxFetches.indexOf('startDailyAllocationConfirm(') !== -1 && uiMaxFetches.indexOf('重新执行（一样要先确认）') !== -1,
+      noLeakedPlaceholders: !/undefined|NaN|\[object/.test(uiMaxFetches)
+    };
+    assertEqual_('170.html·Phase N·预算「次数」用尽：Needs_Review 徽章（不是成功）+ 明说呼叫次数已用 12/12、不是静默略过、没有写入 Fully_Allocated、重新执行会拿到全新的预算；不显示一般 Needs_Review 的那句话；「重新执行」仍然要先确认', maxFetchesChecks, allTrue(maxFetchesChecks), results);
+
+    const uiTime = renderBudgetUi(budgetNeedsReview({ budgetExhausted: true, executionBudget: { exhaustedReason: 'time', fetchesStarted: 1, maxFetches: 12, elapsedMs: 200000 } }));
+    const timeChecks = {
+      budgetText: uiTime.indexOf(budgetTextMarker) !== -1,
+      timeDetail: uiTime.indexOf('（已耗时约 200 秒，剩余时间放不下再一次呼叫）') !== -1,
+      doesNotShowCountDetail: uiTime.indexOf('呼叫次数已用') === -1,
+      mentionsSlowStatementNeedsSeparateDecision: uiTime.indexOf('需要另外决定怎么处理') !== -1
+    };
+    assertEqual_('170.html·Phase N·预算「时间」用尽：明说已耗时约 200 秒、剩余时间放不下再一次呼叫；同时讲明「每次都这样」不是多点几次就会好', timeChecks, allTrue(timeChecks), results);
+
+    const partialSnapshots = [undefined, null, {}, { exhaustedReason: 'max_fetches' }, { exhaustedReason: 'max_fetches', fetchesStarted: 12 }, { exhaustedReason: 'time' }, { exhaustedReason: 'time', elapsedMs: 'abc' }, { exhaustedReason: 'something_else', fetchesStarted: 1, maxFetches: 2, elapsedMs: 5 }];
+    const partialHtml = partialSnapshots.map((s) => renderBudgetUi(budgetNeedsReview({ budgetExhausted: true, executionBudget: s })));
+    const partialChecks = {
+      alwaysBudgetText: partialHtml.every((h) => h.indexOf(budgetTextMarker) !== -1),
+      neverInventsNumbers: partialHtml.every((h) => !/undefined|NaN|null|\[object/.test(h)),
+      noParentheticalDetail: partialHtml.every((h) => h.indexOf('（呼叫次数已用') === -1 && h.indexOf('（已耗时约') === -1),
+      neverGenericText: partialHtml.every((h) => h.indexOf(genericNeedsReviewText) === -1)
+    };
+    assertEqual_('170.html·Phase N·预算快照缺栏位 / 残缺 / 栏位型别不对 / 不认识的原因（旧版后端没回传、或回传坏掉）：照样说「预算用完了」，但不编数字（不会印出 undefined/NaN/null，也不会把没回传的秒数当成 0 秒）', partialChecks, allTrue(partialChecks), results);
+
+    const notFlaggedCases = [undefined, false, 'true', 1, null, 'yes'];
+    const notFlaggedHtml = notFlaggedCases.map((flag) => renderBudgetUi(budgetNeedsReview({ budgetExhausted: flag, executionBudget: { exhaustedReason: 'max_fetches', fetchesStarted: 12, maxFetches: 12 } })));
+    const notFlaggedChecks = {
+      genericTextShown: notFlaggedHtml.every((h) => h.indexOf(genericNeedsReviewText) !== -1),
+      neverBudgetText: notFlaggedHtml.every((h) => h.indexOf(budgetTextMarker) === -1)
+    };
+    assertEqual_('170.html·Phase N·只认后端的结构化旗标 budgetExhausted === true（undefined / false / 字串 "true" / 1 / null 都当成一般的 Needs_Review）：一般的失败不会被误报成预算用尽，即使快照里写着用尽的样子', notFlaggedChecks, allTrue(notFlaggedChecks), results);
+
+    const loadsAfterBudgetCards = budgetUiDashboardLoads;
+    const toastsAfterBudgetCards = budgetUiToasts.length;
+    const uiFullyWithFlag = renderBudgetUi({ status: 'Done', allocationStatus: 'Fully_Allocated', budgetExhausted: true, rowsWritten: 1, skipped: false, executionBudget: { exhaustedReason: 'max_fetches', fetchesStarted: 12, maxFetches: 12 } });
+    const fullyChecks = {
+      stampBadge: uiFullyWithFlag.indexOf('<span class="badge stamp">Fully_Allocated</span>') !== -1,
+      writtenCount: uiFullyWithFlag.indexOf('成功写入 1 笔 Daily_Allocation') !== -1,
+      noBudgetText: uiFullyWithFlag.indexOf(budgetTextMarker) === -1,
+      refreshedDashboardOnce: budgetUiDashboardLoads === loadsAfterBudgetCards + 1,
+      toasted: budgetUiToasts.length === toastsAfterBudgetCards + 1 && budgetUiToasts[budgetUiToasts.length - 1].indexOf('已分配') !== -1
+    };
+    assertEqual_('170.html·Phase N·Fully_Allocated 永远优先：就算回传里 budgetExhausted 是 true，也是成功徽章 + 写入笔数、不显示预算用尽的说明；只有这个分支会刷新 Dashboard', fullyChecks, allTrue(fullyChecks), results);
+    assertEqual_('170.html·Phase N·预算用尽 / 一般 Needs_Review 的结果卡不刷新 Dashboard、不弹「已分配」的 toast（没有改变任何已汇总的数字）', { loads: loadsAfterBudgetCards - loadsBefore, toasts: toastsAfterBudgetCards - toastsBefore }, { loads: 0, toasts: 0 }, results);
+
+    const uiXss = renderBudgetUi(budgetNeedsReview({ budgetExhausted: true, executionBudget: { exhaustedReason: 'max_fetches', fetchesStarted: '<img src=x onerror=alert(1)>', maxFetches: '<script>alert(1)</script>', elapsedMs: '<b>' } }));
+    const xssChecks = {
+      noRawImgTag: uiXss.indexOf('<img') === -1,
+      noRawScriptTag: uiXss.indexOf('<script') === -1,
+      noRawBoldTag: uiXss.indexOf('<b>') === -1,
+      stillBudgetText: uiXss.indexOf(budgetTextMarker) !== -1
+    };
+    assertEqual_('170.html·Phase N·预算栏位里塞 HTML（<img onerror> / <script>）：一律不会原样出现在页面里（只渲染有限数字，其余忽略），预算用尽的说明照常显示', xssChecks, allTrue(xssChecks), results);
+    const uiXssReason = renderBudgetUi(budgetNeedsReview({ budgetExhausted: true, executionBudget: { exhaustedReason: '<img src=x onerror=alert(1)>', fetchesStarted: 1, maxFetches: 2, elapsedMs: 3 } }));
+    assertEqual_('170.html·Phase N·exhaustedReason 本身塞 HTML 也不会进页面（它只用来比对，不会被印出来）', { noRawImgTag: uiXssReason.indexOf('<img') === -1, stillBudgetText: uiXssReason.indexOf(budgetTextMarker) !== -1 }, { noRawImgTag: true, stillBudgetText: true }, results);
+
+    const uiError = renderBudgetUi({ status: 'Error', error: 'boom <b>x</b>', budgetExhausted: true, executionBudget: { exhaustedReason: 'max_fetches', fetchesStarted: 1, maxFetches: 1 } });
+    const uiSkipped = renderBudgetUi({ status: 'Skipped', reason: '这笔记录目前的分类是 Full', budgetExhausted: true });
+    const otherBranchChecks = {
+      errorBadge: uiError.indexOf('<span class="badge failed">Error</span>') !== -1,
+      errorEscaped: uiError.indexOf('boom &lt;b&gt;x&lt;/b&gt;') !== -1 && uiError.indexOf('<b>x</b>') === -1,
+      errorHasNoBudgetText: uiError.indexOf(budgetTextMarker) === -1,
+      skippedBadge: uiSkipped.indexOf('<span class="badge pending">Skipped</span>') !== -1,
+      skippedReasonShown: uiSkipped.indexOf('这笔记录目前的分类是 Full') !== -1,
+      skippedHasNoBudgetText: uiSkipped.indexOf(budgetTextMarker) === -1
+    };
+    assertEqual_('170.html·Phase N·Error / Skipped 分支完全没动：照旧的徽章跟文字，即使回传里夹带 budgetExhausted 也不会显示预算用尽的说明', otherBranchChecks, allTrue(otherBranchChecks), results);
+    assertEqual_('170.html·Phase N·isFiniteNumber：只认有限数字（数字字串、NaN、Infinity、null、undefined、物件都不算）', ['5', NaN, Infinity, -Infinity, null, undefined, {}, [], 0, 12, -1, 2.5].map((v) => budgetUiSandbox.isFiniteNumber(v)), [false, false, false, false, false, false, false, false, true, true, true, true], results);
   }
 
   const allPass = results.every((r) => r.pass);

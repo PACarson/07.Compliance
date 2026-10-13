@@ -65,10 +65,10 @@
 - **Known limitations**: 本次治理建设 Strict Scope Boundary 明确禁止修改，未重新审阅
 
 ### 127_LLMExtractor.js
-- **Responsibility**: Gemini `generateContent` provider，两个方法：`extract()`（statement 层级）、`extractOrders()`（订单层级，ADR-005）；evidence 一律写入 Drive（不论校验结果）；429/5xx 指数退避重试
+- **Responsibility**: Gemini `generateContent` provider，两个方法：`extract()`（statement 层级）、`extractOrders()`（订单层级，ADR-005）；evidence 一律写入 Drive（不论校验结果）；429/5xx 指数退避重试；**2026-10-11 起**另有执行级调用预算 `createExecutionBudget_`（Phase N：一次 `consoleRunDailyAllocation_` 执行建一个、底下全部 fetch 共用；每次 fetch／重试睡眠之前先问预算，次数 12、时间 `已耗时 + 睡眠 + 预计下一次呼叫 ≤ 360 − 30 秒`；耗尽时抛带 `isBudgetExhausted` 旗标的错误，不是静默跳过，见 ADR-005 2026-10-11 段落）
 - **Dependencies**: Gemini API（`GEMINI_API_KEY` Script Property）
-- **Verification status**: **ADR-005 CLOSED**——但仅限锁定的 W01 fixture、`extractOrders()` 路径，见 ADR-005 全文；`extract()`（statement 层级）本身没有经过同等规格的真实 PDF 独立核对
-- **Known limitations**: 本次治理建设 Strict Scope Boundary 明确禁止修改，未重新审阅
+- **Verification status**: **ADR-005 CLOSED**——但仅限锁定的 W01 fixture、`extractOrders()` 路径，见 ADR-005 全文；`extract()`（statement 层级）本身没有经过同等规格的真实 PDF 独立核对。**2026-10-11 Phase N 新增的执行级预算只经 Node 验证**（虚拟时钟 + 合成 HTTP 回应 + mutation testing）：`128` 现为 122 项；真实 GAS／真实 Gemini **PENDING**，预算耗尽路径从未在真实环境触发过
+- **Known limitations**: 本次治理建设 Strict Scope Boundary 明确禁止修改，未重新审阅（Phase N 经 Steven 明确授权只改重试／模型链的准入控制，Gemini schema／prompt 没动）；预算只能拒绝「开始下一次呼叫」，管不到已经开始的那一次 `UrlFetchApp.fetch`；30 秒保留时间与 115 秒下限是假设值（写入阶段真实 GAS 没量过）
 
 ### 130_Reconciliation.js
 - **Responsibility**: 可选、非阻断的对账（ADR-003），`runReconciliationForWeek_`/`getCurrentReconciliationStatus_`
@@ -84,7 +84,7 @@
 - **Responsibility**: 订单层级抽取编排（`runGeminiOrderExtractionWithFallback_`，内部呼叫 `extractOrders()`）、逐日汇总与持久化（`writeDailyAllocationBatch_`）、幂等（skip-if-已 Fully_Allocated，`force:true` 可覆盖）
 - **Owned data**: `Daily_Allocation`、`Non_Order_Income_Allocation`
 - **Execution entry points**: 2026-09-15 前**无任何生产呼叫方**，只有自己的测试文件调用；2026-09-15 起由 170 的 `consoleRunDailyAllocation_` 调用
-- **Verification status**: **真实 GAS 已验证 PASS**（2026-09-25，`consoleRunDailyAllocation_` 真实呼叫 `extractOrders()`，针对 `CMP-INCOME-2026-W01` 173/173 笔正确映射，见 VERIFICATION_STATUS.md）。2026-09-24 修复一处真实缺陷：`runGeminiOrderExtractionWithFallback_` 原本未验证 `document.totalPages` 合法性，chunk fallback 会算出 `NaN` page range 仍然真实呼叫 Gemini——已加 guard，非法值直接落 `Needs_Review`。**2026-10-07 起的变更不在上述 PASS 范围内**：platform 别名表（`PLATFORM_ALIASES_`/`classifyPlatform_`，`4-Hour Delivery` → `GrabExpress`，由 2026-10-03 的真实 GAS 日志触发，见 ADR-005 2026-10-07 一节）与候选新增的 `platform_raw` 栏位，只经 Node 测试——`143` 现为 133 项、128 通过，另 5 项失败仍是 W01 那笔已知 fixture 层级 artefact，内容未变；含整份真实 W14 PDF 的端到端测试，但其中「Gemini」是 pdfplumber 确定性替身，不是真实 Gemini。W14 在真实 GAS 重跑 `consoleRunDailyAllocation`：**PENDING**
+- **Verification status**: **真实 GAS 已验证 PASS**（2026-09-25，`consoleRunDailyAllocation_` 真实呼叫 `extractOrders()`，针对 `CMP-INCOME-2026-W01` 173/173 笔正确映射，见 VERIFICATION_STATUS.md）。2026-09-24 修复一处真实缺陷：`runGeminiOrderExtractionWithFallback_` 原本未验证 `document.totalPages` 合法性，chunk fallback 会算出 `NaN` page range 仍然真实呼叫 Gemini——已加 guard，非法值直接落 `Needs_Review`。**2026-10-07 起的变更不在上述 PASS 范围内**：platform 别名表（`PLATFORM_ALIASES_`/`classifyPlatform_`，`4-Hour Delivery` → `GrabExpress`，由 2026-10-03 的真实 GAS 日志触发，见 ADR-005 2026-10-07 一节）与候选新增的 `platform_raw` 栏位，只经 Node 测试——`143` 2026-10-07 时为 133 项、128 通过（2026-10-11 Phase N 之后为 157 项、152 通过），另 5 项失败仍是 W01 那笔已知 fixture 层级 artefact，内容未变；含整份真实 W14 PDF 的端到端测试，但其中「Gemini」是 pdfplumber 确定性替身，不是真实 Gemini。W14 在真实 GAS 重跑 `consoleRunDailyAllocation`：**PENDING**。**2026-10-11 Phase N 的变更同样不在上述 PASS 范围内**：预算耗尽时 `runGeminiOrderExtractionWithFallback_` 明确跳过剩余 stage（attempts 标签 `chunk_fallback_skipped_budget_exhausted`／`remaining_chunks_skipped_budget_exhausted`，条目带 `budgetExhausted: true`；回传形状不变，不降低任何验证标准），只经 Node 测试；真实 GAS 上预算耗尽路径 **PENDING**
 - **Known limitations**: platform 别名表目前只有 1 条，证据写在表项的 `evidence` 栏位与 ADR-005 2026-10-07 一节，表结构 Steven 尚未逐项审阅；别的未知 `platform_raw` 仍 fail-closed 拒绝（CMP-P10），这是刻意设计，不是缺陷；Order_Allocation/Monthly_Allocation 未实作；Insentif/Tip/Bayaran lain-lain 逐笔日期抽取未实作（`matchInsentifLineDate_` 等只做日期判定，判不出完整一行，ADR-005 明确排除范围，非缺陷）；`parseOrderRowCandidate_`/`splitIntoDayBlocks_`/`parseDayBlock_` 为 Phase 1-3 遗留死代码，grep 确认生产路径零引用，只有自己的测试文件调用
 
 ### 150_ComplianceCalendar.js
@@ -100,9 +100,9 @@
 - **Known limitations**: `unallocated_non_order_income` 在同一周横跨的两个月各自查询时都会看到（跟既有 `needs_allocation` 同一逻辑），YTD 层级已正确去重，逐月数字本身不去重（设计如此，非缺陷）
 
 ### 170_OperatorConsole.js（+ .html）
-- **Responsibility**: HTMLService Console，唯一的人工操作入口（批次汇入、Retry、Dashboard、Drill-down、2026-09-15 新增 Daily Allocation 触发、2026-10-04/07 新增 PDF 汇入恢复中心——ADR-006、扫描结果排序）
+- **Responsibility**: HTMLService Console，唯一的人工操作入口（批次汇入、Retry、Dashboard、Drill-down、2026-09-15 新增 Daily Allocation 触发、2026-10-04/07 新增 PDF 汇入恢复中心——ADR-006、扫描结果排序、2026-10-11 Phase N 执行级调用预算的接线与预算耗尽的显示——ADR-005）
 - **Execution entry points**: 全部 `consoleXxx`（公开，无底线）转发到 `consoleXxx_`（私有，CMP-CR5）
-- **Verification status**: **真实 GAS 已验证 PASS**——2026-09-15 两轮真实 GAS 执行发现并修复环境相容性问题后第三轮 PASS；2026-09-25，`consoleRunDailyAllocation_` 真实端到端跑通（详见 VERIFICATION_STATUS.md）。**2026-10-04 之后新增的部分不在上述 PASS 范围内**：ADR-006 Recovery Center 后端（`consoleGetRecoveryStatus_`/`summarizeEvidenceFailure_`/`consoleRetrySelectedFiles_`/`realEvidenceScanner_`，2026-10-04）、`.html` 里 2026-10-07 新增的 Recovery Center UI 与扫描结果排序，只经 Node 测试——`171` 现为 141 项全过，UI 部分是从 HTML 抽出真函式、配假 DOM 与假 `google.script.run` 跑的；真实 GAS 部署、真实浏览器渲染都**未验证**（见 ADR-006、VERIFICATION_STATUS.md 第 10–12 项）
+- **Verification status**: **真实 GAS 已验证 PASS**——2026-09-15 两轮真实 GAS 执行发现并修复环境相容性问题后第三轮 PASS；2026-09-25，`consoleRunDailyAllocation_` 真实端到端跑通（详见 VERIFICATION_STATUS.md）。**2026-10-04 之后新增的部分不在上述 PASS 范围内**：ADR-006 Recovery Center 后端（`consoleGetRecoveryStatus_`/`summarizeEvidenceFailure_`/`consoleRetrySelectedFiles_`/`realEvidenceScanner_`，2026-10-04）、`.html` 里 2026-10-07 新增的 Recovery Center UI 与扫描结果排序，只经 Node 测试——`171` 2026-10-07 时为 141 项全过（2026-10-11 Phase N 之后为 171 项），UI 部分是从 HTML 抽出真函式、配假 DOM 与假 `google.script.run` 跑的；真实 GAS 部署、真实浏览器渲染都**未验证**（见 ADR-006、VERIFICATION_STATUS.md 第 10–12 项）。**2026-10-11 Phase N 的新增（`consoleRunDailyAllocation_` 的预算接线、`budgetExhausted`／`executionBudget` 回传、`.html` 的预算耗尽文字）同样只经 Node 测试**——真实 GAS、真实浏览器渲染均 **PENDING**（见 ADR-005 2026-10-11 段落、VERIFICATION_STATUS.md 第 13 项）
 - **Known limitations**: Recovery Center 的 `consoleGetRecoveryStatus` 经真实 `google.script.run` 回传是否会变成 `null`（对照 2026-09-27 起 dashboard 在真实 `google.script.run` 下回传 `null` 的那次，记录里判断的根因是 Date 物件）未知——UI 对 `null`/格式错误有明确的错误显示，但没经真实传输验证；`isoDateStringToParts_` 曾未处理 Sheets 读回的原生 Date 物件（Steven 2026-09-25 真实执行独立诊断+修复，已同步）；`.html` 至今没有任何代码呈现 `partially_allocated`/`unallocated_non_order_income`（2026-09-15 已知缺口，持续未处理，见 VERIFICATION_STATUS.md）
 
 ### 190_Tests_Contracts.js

@@ -34,7 +34,7 @@ if (typeof require === 'function') {
   var { VERIFIED_INCOME_COLUMNS } = require('./140_VerifiedIncome.js');
   var { computeMonthlyIncomeSummary_, computeYearToDateIncomeSummary_, computeMonthlyAllocation_, computeComplianceProjection_, findInvalidPeriodIncomeIds_ } = require('./160_MonthlyProjection.js');
   var { DAILY_ALLOCATION_COLUMNS, runGeminiOrderExtractionWithFallback_, writeDailyAllocationBatch_ } = require('./142_DailyOrderAllocation.js');
-  var { realLLMExtractor_ } = require('./127_LLMExtractor.js');
+  var { realLLMExtractor_, createExecutionBudget_ } = require('./127_LLMExtractor.js');
 var { normalizeIsoDateString_ } = require('./106_Utils.js');
 }
 
@@ -688,9 +688,15 @@ var ASSUMED_STATEMENT_TOTAL_PAGES_ = 24;
  * lazyLLMExtractor_() 同一个理由延迟建构：module 顶层就急着
  * realLLMExtractor_() 的话，Script Properties（GEMINI_API_KEY 等）还没设
  * 定时会让整个专案载入失败，不是只有呼叫到这个函数才失败。
+ *
+ * 2026-10-11 Phase N：executionBudget（127 createExecutionBudget_，可选）——
+ * consoleRunDailyAllocation_ 每次执行建一个、传进来，由这次执行底下全部 fetch
+ * （full_document + chunk、整条模型链、每个 postJson 的重试）共用。这个函数本身
+ * 每次呼叫都回传全新的物件（cached 是闭包变量，不跨呼叫），所以预算不会跨执行外漏。
+ * @param {Object} [executionBudget]
  * @return {{extractOrders: function(Object, ?Array): Object}}
  */
-function lazyOrderExtractor_() {
+function lazyOrderExtractor_(executionBudget) {
   let cached = null;
   return {
     extractOrders(document, pageRange) {
@@ -699,7 +705,10 @@ function lazyOrderExtractor_() {
       // 一笔收入，整个 6 分钟都是它的，适合用完整的三层模型链 + 耐心重试。
       // 跟 112 的 lazyLLMExtractor_（明确传 'batch'）刻意不同，见
       // 127_LLMExtractor.js 的 realLLMExtractor_ 说明。
-      if (!cached) cached = realLLMExtractor_('single');
+      // 2026-10-11：第二个参数把执行级预算接到真正打 Gemini 的那一层——「建了预算
+      // 却没接上」是这类修复最容易出的漏洞，171 另外有用假的 GAS 全域物件跑过
+      // 真的 127 接线的测试。
+      if (!cached) cached = realLLMExtractor_('single', executionBudget);
       return cached.extractOrders(document, pageRange);
     }
   };
@@ -767,14 +776,30 @@ function isoDateStringToParts_(isoDate) {
  *
  * @param {string} incomeId 例如 "CMP-INCOME-2026-W01"
  * @param {Object} [deps]
+ *
+ * 2026-10-11 Phase N（Steven 授权：单笔执行预算与 6 分钟硬限制风险）：每次执行建一个
+ * 「执行级 LLM 调用预算」（127 createExecutionBudget_：最多 12 次 fetch、剩余时间放
+ * 不下一次呼叫就拒绝），由这次执行底下全部 Gemini 呼叫共用——原本 142 的 3 个 stage
+ * × 3 个模型 × 4 次尝试会连乘到 36 次 fetch、纯睡眠最坏 540 秒，超过 GAS 360 秒硬
+ * 限制（平台强制中止，不是 catchable 的例外）。预算只会「拒绝再多打一次」，拒绝之后
+ * 走既有的 Needs_Review 安全状态（142 记进 attempts、写 0 笔 Daily_Allocation），
+ * 不会改任何验证标准。deps.executionBudget 可以注入（测试用假时钟）。
+ *
  * @return {Object} 明确的结果状态（status: 'Done'|'Skipped'|'Error'），不是
  *   Boolean 或裸例外。status 是 'Done' 时额外带 attempts/errors（2026-09-27
  *   新增，来自 142 的 runGeminiOrderExtractionWithFallback_，只有
  *   allocationStatus 不是 Fully_Allocated 时才有实质内容，方便真实 GAS
- *   环境排查是卡在 schema/额度/Drive 哪一层，不用每次都重新手动加 log）
+ *   环境排查是卡在 schema/额度/Drive 哪一层，不用每次都重新手动加 log）。
+ *   2026-10-11 起再带 budgetExhausted（boolean：这次有没有因为执行级预算用尽而
+ *   停止后续重试/换模型/chunk fallback）跟 executionBudget（预算快照：已开始
+ *   fetch 数、上限、已耗时、拒绝原因），都是新增栏位，既有栏位完全不变。
  */
 function consoleRunDailyAllocation_(incomeId, deps) {
   const d = deps || buildConsoleDeps_();
+  // 2026-10-11 Phase N：预算的时钟从这里开始算（比真正的执行起点晚一点点——载入
+  // 脚本、取 Script Properties 的几百毫秒；EXECUTION_RESERVE_MS_ 的保留时间涵盖这个
+  // 误差）。deps.executionBudget 给了就用它（测试注入假时钟），没给就建一个真的。
+  const executionBudget = d.executionBudget || createExecutionBudget_();
 
   const incomeRecord = d.sheetReader.readAll('Verified_Income', VERIFIED_INCOME_COLUMNS)
     .find((r) => r.income_id === incomeId);
@@ -822,8 +847,12 @@ function consoleRunDailyAllocation_(incomeId, deps) {
     // 走到这个 function 的 catch。这里保留 try/catch 是为了 142 自己都没
     // 预期到的例外（例如 deps.extractor 本身有问题），双重保险，不是重复
     // 实作 142 已经有的 fallback。
-    const orderExtractor = d.orderExtractor || lazyOrderExtractor_();
+    const orderExtractor = d.orderExtractor || lazyOrderExtractor_(executionBudget);
     const batchResult = runGeminiOrderExtractionWithFallback_(document, verifiedIncomeContext, { extractor: orderExtractor, now: d.now });
+    // 2026-10-11 Phase N：有没有因为执行级预算用尽而停止后续工作——看 142 attempts 里
+    // 的结构化旗标（budgetExhausted: true），不解析错误文字。142 的返回形状完全没动。
+    const budgetExhausted = (batchResult.attempts || []).some((a) => a && a.budgetExhausted === true);
+    const budgetSnapshot = executionBudget.snapshot();
 
     // 2026-09-27 新增：142 其实早就算出了完整的 attempts/nonRetryableErrors
     // （每一次 full_document/chunk 尝试实际失败的原因——schema 被拒绝、
@@ -835,7 +864,7 @@ function consoleRunDailyAllocation_(incomeId, deps) {
     // 也都是抓特定欄位或用两次独立呼叫互相比对，不是比对整个物件形状，
     // 不受新增欄位影响。
     if (batchResult.allocationStatus !== 'Fully_Allocated') {
-      console.warn('[DailyAllocation] 未能完全分配，详情:', JSON.stringify({ attempts: batchResult.attempts, nonRetryableErrors: batchResult.nonRetryableErrors }, null, 2));
+      console.warn('[DailyAllocation] 未能完全分配，详情:', JSON.stringify({ budgetExhausted, executionBudget: budgetSnapshot, attempts: batchResult.attempts, nonRetryableErrors: batchResult.nonRetryableErrors }, null, 2));
     }
 
     const existingDailyAllocationRows = d.sheetReader.readAll('Daily_Allocation', DAILY_ALLOCATION_COLUMNS);
@@ -849,7 +878,9 @@ function consoleRunDailyAllocation_(incomeId, deps) {
       reason: writeResult.reason,
       rowsWritten: (writeResult.written || []).length,
       attempts: batchResult.attempts,
-      errors: batchResult.nonRetryableErrors
+      errors: batchResult.nonRetryableErrors,
+      budgetExhausted,
+      executionBudget: budgetSnapshot
     };
   } catch (err) {
     return { incomeId, status: 'Error', error: String((err && err.message) || err) };

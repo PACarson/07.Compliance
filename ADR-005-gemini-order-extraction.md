@@ -1,6 +1,6 @@
 # ADR-005: Butiran Tempahan（订单层级）抽取改用 Gemini Extraction Adapter + 确定性验证
 
-- **Status**: **CLOSED**（Gate 2 完整验证链完成，2026-09-15；见下方"含义"说明，`CLOSED` 不等于 `VERIFIED` 或 `IMPLEMENTED` 覆盖全部范围——本 ADR 只对锁定的 W01 fixture 做过完整验证）。**2026-09-29 新增一个独立于此状态的 open item**：Gemini 免费额度是目前的 availability 瓶颈，不影响这里的 accuracy CLOSED 判定——见下方同日期段落。**2026-10-01**：第二份真实 statement（W05）的 accuracy 证据（非完整管线）+ 503 自动切模型修复，同样不影响、不重开 Gate 2——见下方同日期段落。**2026-10-07**：真实 GAS 日志命中 fail-closed 的未知 platform gate（`4-Hour Delivery`），以带证据的别名表修复，同样不影响、不重开 Gate 2——见下方同日期段落
+- **Status**: **CLOSED**（Gate 2 完整验证链完成，2026-09-15；见下方"含义"说明，`CLOSED` 不等于 `VERIFIED` 或 `IMPLEMENTED` 覆盖全部范围——本 ADR 只对锁定的 W01 fixture 做过完整验证）。**2026-09-29 新增一个独立于此状态的 open item**：Gemini 免费额度是目前的 availability 瓶颈，不影响这里的 accuracy CLOSED 判定——见下方同日期段落。**2026-10-01**：第二份真实 statement（W05）的 accuracy 证据（非完整管线）+ 503 自动切模型修复，同样不影响、不重开 Gate 2——见下方同日期段落。**2026-10-07**：真实 GAS 日志命中 fail-closed 的未知 platform gate（`4-Hour Delivery`），以带证据的别名表修复，同样不影响、不重开 Gate 2——见下方同日期段落。**2026-10-11**：单笔执行预算（Phase N）——把 2026-10-02 记录的「已知、未解决的理论风险」（6 分钟硬限制）改成明确的准入控制，只经 Node 验证、真实 GAS PENDING，同样不影响、不重开 Gate 2——见下方同日期段落
 - **Historical date**: 2026-08-25（方向决定），Gate 2 验证链 2026-09-06～2026-09-15
 - **Recovery evidence**: `compliance-os-governance-draft.md` §2.8、§8（原始决策）；`900_Constitution.js` ADR-005 条目全文（changelog 多笔，2026-08-21/25、2026-09-06/09/10/15）；`Gate2_ReClose_Evidence_Proposal_2026-09-10.md`；`Gate2_Independent_Source_Verification_v2_2026-09-14.md`
 
@@ -69,7 +69,7 @@ Insentif/Tip/Bayaran lain-lain 目前没有逐笔可靠日期抽取能力——�
 
 **已修复**：`realLLMExtractor_(profile)` 新增 `profile` 参数——`'single'`（默认，170 的 `lazyOrderExtractor_` 用）保留完整三层链 + 原本的耐心预算（`SINGLE_RETRY_BUDGET_`：单次最长 55 秒／累计最长 60 秒）；`'batch'`（112 的 `lazyLLMExtractor_` 明确传入）收窄成只用主模型（不换模型）+ 收紧的 `BATCH_RETRY_BUDGET_`（单次 8 秒／累计 10 秒）——高峰期没算力就让这一份文件快速、干净地失败，下一份文件才有机会在剩下的时间内处理。`createRetryingPostJson_`/`realLLMExtractorDeps_` 新增可选的 `retryBudget` 参数，不传就照旧用模组层级默认值（既有呼叫方行为不变）。Node 新增测试验证 `retryBudget` 覆盖值确实生效、`BATCH_RETRY_BUDGET_` 确实比 `SINGLE_RETRY_BUDGET_` 收紧（mutation-checked）。
 
-**未完全解决的部分，诚实记录**：这是缓解（大幅降低风险），不是数学上证明过的绝对上限——`consoleRunDailyAllocation_` 经 `142` 最坏情况仍可能呼叫三次 `extractOrders()`（full_document + 两个 chunk），每次都可能走完整三层模型链，理论最坏情况的总耗时仍有可能逼近甚至超过 6 分钟，只是 `BATCH_RETRY_BUDGET_` 单独解决了已经真实发生过的那个事故（consoleBatchImport 多文件情境）。`'single'` 情境尚未真实复现过类似的硬杀，这次没有进一步收紧，留作已知、未解决的理论风险。
+**未完全解决的部分，诚实记录**：这是缓解（大幅降低风险），不是数学上证明过的绝对上限——`consoleRunDailyAllocation_` 经 `142` 最坏情况仍可能呼叫三次 `extractOrders()`（full_document + 两个 chunk），每次都可能走完整三层模型链，理论最坏情况的总耗时仍有可能逼近甚至超过 6 分钟，只是 `BATCH_RETRY_BUDGET_` 单独解决了已经真实发生过的那个事故（consoleBatchImport 多文件情境）。`'single'` 情境尚未真实复现过类似的硬杀，这次没有进一步收紧，留作已知、未解决的理论风险。**（2026-10-11 更新：这个风险已由 Phase N 的执行级预算处理，见下方 2026-10-11 段落；上面这段保留当时的原文不改。）**
 
 **真实 GAS 重新验证**：PENDING——这整段修复目前只有 Node 测试验证过，`consoleBatchImport`/`consoleRunDailyAllocation` 都还没有在真实 GAS 环境重新跑过确认。
 
@@ -101,6 +101,63 @@ Insentif/Tip/Bayaran lain-lain 目前没有逐笔可靠日期抽取能力——�
 - 顺带观察：W14 是 25 页（订单在第 8–23 页），`ASSUMED_STATEMENT_TOTAL_PAGES_` 是 24——chunk fallback 的页码范围（1–13 / 12–24）仍然覆盖所有订单页，这次没有实际影响；但这个假设值仍是 handoff 的 O 项（真实页数应该来自 Documents）。
 
 **以后遇到新的 platform 名称怎么办**：它会继续被拒收、整批 `Needs_Review`——这是设计，不是缺陷。流程：先确认它的归属（最好是 statement 自己的汇总能对上，其次官方来源或真实订单号模式），再在 `PLATFORM_ALIASES_` 加一行带 `evidence` 的条目并补一条测试；`143` 的别名表完整性测试会挡下没有证据、或指向不存在 platform 的条目。不做自动学习/猜测。
+
+## 2026-10-11 新增——单笔执行预算（Phase N）：把 2026-10-02 记录的「已知、未解决的理论风险」改成明确的准入控制
+
+**触发**：Steven 2026-10-11 的 N → O → P 分阶段授权。Phase N 要求最小化修复 `consoleRunDailyAllocation_`/`extractOrders()` 路径的重试预算与 6 分钟硬限制风险——正是上面 2026-10-02 段落「未完全解决的部分」记下来的那个理论风险。这不是新的 accuracy 判准，不重开 Gate 2，也不改任何契约（Schema changes: NONE；Extraction-contract changes: NONE；Persistence-contract changes: NONE）。
+
+**真实调用链（读实际代码核实，不是推演）**：`consoleRunDailyAllocation`（公开）→ `consoleRunDailyAllocation_`（170）→ `lazyOrderExtractor_` → `realLLMExtractor_('single')`（127）；`runGeminiOrderExtractionWithFallback_`（142）最多 3 个 stage（`full_document`、`chunk_1-13`、`chunk_12-24`）→ 每个 stage 一次 `extractOrders()` → `postJsonWithModelFallback_`（模型链最多 3 个，只有 `isCapacityIssue`/503 才换下一个）→ `createRetryingPostJson_`（每个模型最多 4 次 fetch、累计最多睡 60 秒）。
+
+**理论最大值（三个维度分开算，不重复也不遗漏）**：
+
+| 层 | 最大 | 备注 |
+|---|---|---|
+| 外层重试（单个 `postJson`） | 4 次 fetch、睡眠 ≤ 60 秒 | 429 睡 Gemini RetryInfo 建议秒数 + 0.5 秒（单次 ≤ 55 秒、累计 ≤ 60 秒）；5xx 退避 1/2/4 秒 |
+| 模型链 fallback | × 3 个模型 | 只在 503 前进；429/400/500/HTTP 200 但验证失败都不换模型 |
+| chunk fallback（142 的 stage） | × 3 个 stage | `full_document` + 2 个 chunk；`full_document` 因 429 额度用尽时 chunk 本来就会被跳过（2026-09-29） |
+| **合计** | **3 × 3 × 4 = 36 次 fetch；睡眠 ≤ 9 × 60 = 540 秒** | 还没算 HTTP 回应时间（真实 `extractOrders()` 单次 115–289 秒）；GAS 硬限制 360 秒 |
+
+这三个维度只有在每一层都撞 503 时才会相乘到 36。决定预算数字的是各维度自己的最坏次数：stage 维度（3 个 stage × 每个 `postJson` 4 次）= 12，模型维度（3 个模型 × 4 次）= 12。
+
+**设计——「准入控制」，不是计时炸弹**（`127_LLMExtractor.js` 的 `createExecutionBudget_`；一次 `consoleRunDailyAllocation_` 执行建一个，底下全部 fetch 共用）：
+- 每次 fetch 之前（含第一次）、每次重试睡眠之前，都先问预算；不容许就抛出带结构化旗标的错误（`isBudgetExhausted`、`budgetReason`：`'max_fetches'` 或 `'time'`、`executionBudget` 快照），不再多打、也不再白睡。142 只看旗标、不解析错误文字（跟 `isQuotaExhausted`/`isCapacityIssue` 同一个做法）；预算拒绝时，上一次真实错误的 `isQuotaExhausted`/`isCapacityIssue` 与错误文字照样保留，诊断信息不会因为预算拒绝而丢失。
+- 两道闸：**次数** `fetchesStarted < 12`（`EXECUTION_MAX_FETCHES_`；stage 与模型两个维度共用同一个 12，而不是相乘成 36）；**时间** `已耗时 + 接下来要睡的时间 + max(115 秒, 本次执行见过最慢的一次 fetch) ≤ 360 秒 − 30 秒`（`EXECUTION_HARD_LIMIT_MS_`/`EXECUTION_RESERVE_MS_`/`EXECUTION_MIN_CALL_ESTIMATE_MS_`；用默认常数时，任何一次 fetch 都必须不晚于第 215 秒开始）。
+- 拒绝一次即 sticky（之后全部拒绝）——不会出现「这次不行、下一次又行」，142 的「剩下的 stage 跳过」跟预算状态永远一致。
+- 用默认常数时第一次呼叫一定放行（0 + 115 秒 ≤ 330 秒）：慢本身不是拒绝的理由，真实 `extractOrders()` 单次 289 秒也能成功。
+- 预算耗尽 → 明确失败：142 在 `attempts` 留下条目（`budgetExhausted: true`；`full_document` 之后是 `chunk_fallback_skipped_budget_exhausted`，chunk 迴圈中途是 `remaining_chunks_skipped_budget_exhausted`），走既有 `Needs_Review`；170 回传 `budgetExhausted` + `executionBudget` 快照（只放原始型别，不放 Date），Cloud log 的 JSON 也带；`170_OperatorConsole.html` 显示明确文字（呼叫次数或耗时、「不是静默略过、没有写入任何 Fully_Allocated」）。142 回传形状完全没动。
+
+**逐项保留的不变量（每项都有会失败的测试，不是只靠审阅）**：
+1. 确定性验证：`125` 四层验证、逐日 checksum、整份对帐单 checksum（对 Verified_Income 净额）一行没动；预算耗尽、chunk 合并只拿到部分结果时，一样过不了整份对帐单 checksum，所以不可能因此变成 Fully_Allocated。
+2. `Needs_Review` 语义不变；没有新增状态，也没有任何「预算耗尽所以放行」的路径。
+3. 防重复写入：`writeDailyAllocationBatch_` 的 Fully_Allocated 防重复一行没动。测试用同一个持久化 accessor 依序跑「预算耗尽（0 笔写入）→ 新预算成功（1 笔）→ 再跑（`Already_Fully_Allocated`、仍 1 笔）→ 已 Fully_Allocated 之后又预算耗尽（跳过、仍 1 笔）」。
+4. 预算耗尽时没有写入任何 `Daily_Allocation` 行，`Verified_Income` 仍是 `Verified`。
+
+**前后对照**（真实 `127` + `142` 编排，虚拟时钟 + 合成 HTTP 回应——不是真实 GAS、不是真实 Gemini）：
+
+| 情境 | 没有预算（2026-10-02 行为） | 有预算（Phase N） |
+|---|---|---|
+| 全部 503（fetch 即回） | 36 次 fetch、睡 63 秒 | 12 次、睡 21 秒，`Needs_Review` + 预算旗标 |
+| 理论最坏睡眠：每个 `postJson` = 429（53.5 秒）+ 503×3 | 36 次、**睡 540 秒**（超过 360 秒） | 12 次、睡 180 秒 |
+| 整份 200 秒才回、验证失败，chunk 各 110 秒 | 420 秒（会被平台硬杀） | 200 秒，明确 `Needs_Review` |
+| 整份 289 秒（Gate 2 最慢一次）验证失败，chunk 各 150 秒 | 589 秒（硬杀） | 289 秒，明确 `Needs_Review` |
+| 全部 504，每次 100 秒才回 | 1221 秒（硬杀） | 303 秒，明确 `Needs_Review` |
+| 整份 150 秒验证失败，chunk 各 90 秒 | 330 秒（没超过） | 240 秒（`chunk_1-13` 跑完，`chunk_12-24` 被明确拒绝——保守损失，见下方取舍 3） |
+| 全 500、HTTP 200 验证失败、全 400、429 建议 5/52 秒、整份 115 秒 + chunk 各 70 秒 | （逐字相同） | （逐字相同，预算没介入） |
+
+**测试（Node）**：`128` 94 → 122（预算闸、边界、sticky、重试／模型链的接线）；`143` 128 → 152（整条链的最坏次数、预算耗尽后的 attempts 标签、`Fully_Allocated` 不被降低标准、逐日 checksum 把关、600 个种子的随机不变量模拟）；`171` 141 → 171（170 的接线与回传形状、真实 `127`+`142`+`170` 接线下的次数与标签、重复写入四步序列、`170.html` 的 10 项 UI 测试）。全仓回归 697 → 779 PASS／5 FAIL（5 个是既有 W01 legacy failures，内容逐字不变，UTC 与 Asia/Kuala_Lumpur 各一次、相同）。**Mutation testing**：55 种破坏（闸门绕过／差一／边界、忽略保留时间／睡眠／最慢一次、没有 sticky、`endFetch` 漏记、旗标遗失、模型链不停、预算没接线、142 把预算错误当一般错误、降低成功标准、拿掉防重复、170／HTML 各种放松），54 种被真实失败的测试抓到；1 个幸存：`170.html` 拿掉 HTML 转义（数字型别守卫仍在）——等价变异（防御纵深，行为没有差别），保留在案。过程中三项发现：(a) 我自己新增的 `executionBudget.elapsedMs` 让既有的「公开版本转发结果一致」断言变成随机失败（约 7/30，已改为注入固定时钟）；(b) `170.html` 预算文字在快照不完整时会印出 `undefined`/`NaN`（已加有限数字守卫、有测试）；(c) 一个原本就存在的缺口：把逐日 checksum 拿掉，除了已知 legacy 失败外没有任何测试失败（新增 `143` 测试补上）。
+
+**取舍与限制（诚实记录——这是缓解，不是证明）**：
+1. **预算只能决定「要不要开始下一次呼叫」，管不到已经开始的那一次 `UrlFetchApp.fetch`**（GAS 没有可调的逾时）。一次呼叫比假设更慢，仍可能撞到硬限制。Node 随机模拟（600 个种子；合成分布，其中三分之一是故意造的「慢」情境、多数呼叫 60–260 秒）：没有预算 140 个种子超过 360 秒，有预算 13 个——这个比例是合成分布的产物，**不是真实世界的发生率**。
+2. **30 秒保留时间与 115 秒下限是假设值**：保留时间是留给抽取结束后读 `Daily_Allocation`、写一批、回传结果的，真实 GAS 没量过写入阶段；115 秒来自 Gate 2 真实数据里 `extractOrders()` 单次 115–289 秒的最小值。
+3. **chunk fallback 现在会被明确拒绝**的情况：整份呼叫超过约 165 秒（两次一样慢就放不进 330 秒）。之前是会开始、然后很可能被平台硬杀；现在是明确的 `Needs_Review`。chunk 呼叫的真实耗时从未量过——可能比整份快很多，那样这个拒绝就偏保守（上表整份 150–200 秒的情境）。这是保守的取舍，不是最优解。
+4. **`writeDailyAllocationBatch_` 的部分写入窗口**：`Daily_Allocation` 是 append-only、没有「这一批已写完」的完成标记，写到一半被平台硬杀会留下部分行。预算 + 30 秒保留时间只是缩小这个窗口，没有关掉它；真正关掉需要持久化契约变更（例如批次完成标记）——**这是 Steven 的决定，本次没有做**。
+5. **治本方向是架构决定，不在 Phase N 授权范围**：慢 statement（整份 + chunk 合计超过 6 分钟）在单次执行里永远放不下；要根治需要「每个 chunk 一次独立执行」（跨执行续传、要持久化中间结果）或实测 chunk 耗时后调整策略。**本次没有决定**，留给 Steven。
+
+**观察到但没有改动的既有行为**（不是 Phase N 引入，也不在授权范围，只记录）：
+- 对已经 `Fully_Allocated` 的收入重跑 `consoleRunDailyAllocation_`，仍会先呼叫 Gemini（消耗额度与时间），才在 `writeDailyAllocationBatch_` 写入时发现已经 `Fully_Allocated` 而跳过——防重复在「写入时」，不在「呼叫 Gemini 之前」。
+- 已 `Fully_Allocated` 之后重跑失败，回传 `Needs_Review` + `skipped: true`；形状与 Phase N 之前相同。
+
+**真实验证状态**：**PENDING**——真实 GAS、真实 Gemini、真实浏览器对 Phase N 的任何一项都还没有证据；上面所有数字都是 Node + 虚拟时钟 + 合成 HTTP 回应。尤其是：预算耗尽的路径从未在真实 GAS 触发过，`UrlFetchApp.fetch` 的真实耗时分布没有新量测，`170.html` 的预算文字没在真实浏览器看过。Steven 尚未审阅预算常数（12／30 秒／115 秒）与上面第 3 点的取舍。
 
 ## Related
 
