@@ -1,0 +1,148 @@
+[RiderOSAdapter.getWeeklyEstimate] [占位实现，等 Rider OS 真的建好 RIDER_WEEKLY_ESTIMATE_READY 发布能力] week=2026-W28 还没有 Rider OS 的估算数据
+[RiderOSAdapter.getWeeklyEstimate] [占位实现，等 Rider OS 真的建好 RIDER_WEEKLY_ESTIMATE_READY 发布能力] week=2026-W29 还没有 Rider OS 的估算数据
+[RiderOSAdapter.getWeeklyEstimate] [占位实现，等 Rider OS 真的建好 RIDER_WEEKLY_ESTIMATE_READY 发布能力] week=2026-W30 还没有 Rider OS 的估算数据
+
+===== S1 同批三份新文件（各自不同的一周） =====
+{
+  "stages": [
+    "F1:Verified",
+    "F2:Verified",
+    "F3:Verified"
+  ],
+  "documentsRows": 3,
+  "distinctDocumentIds": 1,
+  "documentIdsSeen": [
+    "CMP-DOC-20261001-Grab-WeeklyStatement-1790848800000"
+  ],
+  "verifiedIncomeRows": 3,
+  "sourceDocumentIdByIncome": [
+    "CMP-INCOME-2026-W28 -> CMP-DOC-20261001-Grab-WeeklyStatement-1790848800000",
+    "CMP-INCOME-2026-W29 -> CMP-DOC-20261001-Grab-WeeklyStatement-1790848800000",
+    "CMP-INCOME-2026-W30 -> CMP-DOC-20261001-Grab-WeeklyStatement-1790848800000"
+  ],
+  "drillDown_W30_shouldPointTo_F3": "F1"
+}
+[RiderOSAdapter.getWeeklyEstimate] [占位实现，等 Rider OS 真的建好 RIDER_WEEKLY_ESTIMATE_READY 发布能力] week=2026-W30 还没有 Rider OS 的估算数据
+
+===== S2 同批两份：A 抽取失败、B 成功 =====
+{
+  "stages": [
+    "A:Extraction_Failed",
+    "B:Verified"
+  ],
+  "documentsRows": [
+    "A:CMP-DOC-20261001-Grab-WeeklyStatement-1790848800000",
+    "B:CMP-DOC-20261001-Grab-WeeklyStatement-1790848800000"
+  ],
+  "verifiedIncome": [
+    "CMP-INCOME-2026-W30 src=CMP-DOC-20261001-Grab-WeeklyStatement-1790848800000"
+  ],
+  "scanAfterwards_A_should_needRetry": [
+    "A: alreadyImported=true needsRetry=false",
+    "B: alreadyImported=true needsRetry=false"
+  ],
+  "recoveryCenter_completed": [
+    "A",
+    "B"
+  ],
+  "recoveryCenter_pending": [],
+  "recoveryCenter_failed": [],
+  "drillDown_W30_shouldPointTo_B": "A"
+}
+[RiderOSAdapter.getWeeklyEstimate] [占位实现，等 Rider OS 真的建好 RIDER_WEEKLY_ESTIMATE_READY 发布能力] week=2026-W30 还没有 Rider OS 的估算数据
+[RiderOSAdapter.getWeeklyEstimate] [占位实现，等 Rider OS 真的建好 RIDER_WEEKLY_ESTIMATE_READY 发布能力] week=2026-W30 还没有 Rider OS 的估算数据
+
+===== S3 同批两份、同一周、内容不同 =====
+{
+  "stages": [
+    "G1:Verified",
+    "G2:Verified"
+  ],
+  "verifiedIncomeRows": 2,
+  "distinctIncomeIds": 1,
+  "netPerRow": [
+    "CMP-DOC-20261001-Grab-WeeklyStatement-1790848800000 net=450",
+    "CMP-DOC-20261001-Grab-WeeklyStatement-1790848800000 net=460"
+  ],
+  "reconciliationLogRows": 2,
+  "distinctReconciliationIds": 1,
+  "monthlySummary_2026_07": {
+    "week_count": 1,
+    "net": 450
+  },
+  "consoleRebuild_totalVerifiedCount": 2
+}
+[RiderOSAdapter.getWeeklyEstimate] [占位实现，等 Rider OS 真的建好 RIDER_WEEKLY_ESTIMATE_READY 发布能力] week=2026-W30 还没有 Rider OS 的估算数据
+[RiderOSAdapter.getWeeklyEstimate] [占位实现，等 Rider OS 真的建好 RIDER_WEEKLY_ESTIMATE_READY 发布能力] week=2026-W30 还没有 Rider OS 的估算数据
+[RiderOSAdapter.getWeeklyEstimate] [占位实现，等 Rider OS 真的建好 RIDER_WEEKLY_ESTIMATE_READY 发布能力] week=2026-W30 还没有 Rider OS 的估算数据
+
+===== S4 相同 file_hash 的两份文件：同一批 vs 分两次执行 =====
+{
+  "sameBatch": {
+    "stages": [
+      "H1:Verified",
+      "H2:Verified"
+    ],
+    "documentsRows": 2,
+    "verifiedIncomeRows": 2
+  },
+  "twoSeparateExecutions_control": {
+    "stages": [
+      "H1:Verified",
+      "H2:Skipped_Duplicate"
+    ],
+    "documentsRows": 1,
+    "verifiedIncomeRows": 1
+  }
+}
+[RiderOSAdapter.getWeeklyEstimate] [占位实现，等 Rider OS 真的建好 RIDER_WEEKLY_ESTIMATE_READY 发布能力] week=2026-W30 还没有 Rider OS 的估算数据
+[RiderOSAdapter.getWeeklyEstimate] [占位实现，等 Rider OS 真的建好 RIDER_WEEKLY_ESTIMATE_READY 发布能力] week=2026-W30 还没有 Rider OS 的估算数据
+
+===== S5 两个执行交错处理同一个文件（模拟） =====
+{
+  "stagesA": [
+    "K1:Verified"
+  ],
+  "stagesB": [
+    "K1:Verified"
+  ],
+  "documentsRows_forSameDriveFile": 2,
+  "documentIds": [
+    "CMP-DOC-20261001-Grab-WeeklyStatement-1790848800000",
+    "CMP-DOC-20261001-Grab-WeeklyStatement-1790848800250"
+  ],
+  "verifiedIncomeRows": 2,
+  "distinctIncomeIds": 1
+}
+[RiderOSAdapter.getWeeklyEstimate] [占位实现，等 Rider OS 真的建好 RIDER_WEEKLY_ESTIMATE_READY 发布能力] week=2026-W30 还没有 Rider OS 的估算数据
+[RiderOSAdapter.getWeeklyEstimate] [占位实现，等 Rider OS 真的建好 RIDER_WEEKLY_ESTIMATE_READY 发布能力] week=2026-W30 还没有 Rider OS 的估算数据
+[RiderOSAdapter.getWeeklyEstimate] [占位实现，等 Rider OS 真的建好 RIDER_WEEKLY_ESTIMATE_READY 发布能力] week=2026-W30 还没有 Rider OS 的估算数据
+
+===== S6 三次独立执行：第二份是同一周、内容不同的文件 =====
+{
+  "run1": [
+    "J1:Verified"
+  ],
+  "run2": [
+    "J2:Already_Verified"
+  ],
+  "run3_stillReprocessed": [
+    "J2:Already_Verified"
+  ],
+  "documentsRows": [
+    "J1:CMP-DOC-20261001-Grab-WeeklyStatement-1790848800000",
+    "J2:CMP-DOC-20261001-Grab-WeeklyStatement-1790849100000"
+  ],
+  "verifiedIncomeRows": 1,
+  "reconciliationLogRows": 3,
+  "scanAfterwards": [
+    "J1: alreadyImported=true needsRetry=false",
+    "J2: alreadyImported=false needsRetry=true"
+  ],
+  "recoveryCenter_pending": [
+    "J2"
+  ],
+  "recoveryCenter_completed": [
+    "J1"
+  ]
+}
