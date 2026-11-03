@@ -40,3 +40,21 @@
 ## 如何记录被取代/拒绝/淘汰的决策
 
 不删除旧 ADR。新增 `Superseded by: ADR-XXX` 或 `Rejected because: ...` 字段，保留原文——历史决策本身是证据，删掉就丢失了"为什么当初这样决定"的脉络。
+
+## 草案（DRAFT，未编号；**尚未批准**）——Contribution Planning & Official Payment Records
+
+> **2026-11-02 登记**（Steven 要求把本窗口形成的决定、提议与待决事项写入治理文件）。这一节**只是登记**：下表每一项的状态都是 `PROPOSED`（草案）——**没有**正式 ADR 编号，**没有**被批准，**没有**任何实作，**没有**任何层级的验证。按上面「如何提出新 ADR」第 3 步，只有 Steven 确认后才能改成 `ACCEPTED` 并指定编号。**下一个正式编号仍是 ADR-007——本节没有占用它。**
+
+| 草案标签 | 标题 | 状态 | 与 S1 的关系 | 待决 / 阻塞 |
+|---|---|---|---|---|
+| `ADR-DRAFT-CPR-1` | 官方记录的身份、记录链与写入原语（含证据登记） | `PROPOSED`（DRAFT） | S1 的核心。**表设计部分已被 `S1_Final_Design_2026-10-31.md`（同为 `PROPOSED`：4 表 / 44 列）收窄取代**；**写入原语部分**必须在 TruthWriter 方案确定后修订（Decision Note DT-1 / D-S1-9） | DT-1（Freeze 例外：方案 A 或 B1）、DT-2、DT-3、DT-4；D-S1-1、D-S1-3 |
+| `ADR-DRAFT-CPR-2` | 计划与实际的对照：查询时计算，复用现有状态词汇 | `PROPOSED`（DRAFT） | S1 只做**金额**维度的对照；时间维度（`due_date` / `Overdue`）推迟 | D-S1-3 |
+| `ADR-DRAFT-CPR-3` | SOCSO 覆盖期（陈述值，精确到天）与独立的 Grab 报销 | `PROPOSED`（DRAFT） | A 部分（覆盖期）进 S1，且 S1 比草案多一个 `coverage_statement` 栏位（`NOT_STATED` / `START_ONLY` / `START_AND_END`，用来表达「起点已知、终点未知」）；B 部分（Grab 报销）**不在** S1 | D-S1-6 |
+| `ADR-DRAFT-CPR-4` | 政策规则（`Policy_Rule`）与解析接口；EPF 奖励与 Tax 通知书的边界 | `PROPOSED`（DRAFT） | **不在** S1（后续切片） | 政策登记表 10 项待人工抽查 |
+| `ADR-DRAFT-CPR-5` | 日历集成：派生义务，不建第二套提醒 | `PROPOSED`（DRAFT） | **不在** S1（后续切片；来信明确排除 Calendar 集成） | — |
+
+- **草案正文与配套设计**：`ADR_Drafts_Contribution_Planning_2026-10-26.md`（5 份草案 + 「批准之后才应用」的治理更新提案）、`Contribution_Planning_Design_2026-10-26.md`、`S1_Final_Design_2026-10-31.md`、`TruthWriter_Decision_Note_2026-10-31.md`、`S1_Test_Plan_2026-10-31.md`。这些文件是否已放进本仓库，以仓库实际为准。
+- **业务范围已确认，架构未批准**：Steven 2026-10-21 授权信 D1 – D6 与 2026-10-29 S1 收敛信确认了**业务范围与边界**（登记在 `CHANGELOG.md` 的 2026-11-02 条）。这**不等于**批准上表任何一份草案，也**不等于**授权任何实作。
+- **编号冲突（PENDING）**：本索引写「下一个新 ADR 是 ADR-007」；`PhaseP_Documents_Processing_State_Design_2026-10-17.md` 也把自己的新 ADR 暂称 ADR-007（`:33`、`:575–576`、`:586`；该设计未被采纳，其 §10 的 D1 – D7 在 2026-10-18 的交接清单里仍无答复，本窗口也没有看到答复）。两者谁先用 ADR-007、或如何排序，由 Steven 决定；在那之前所有草案保持 `ADR-DRAFT-…` 标签。
+- **重复索引文件（PENDING）**：仓库里有内容相同的两份索引（本文件与 `README-Architecture Decision Records #U2014 Index.md`），`CHANGELOG.md:42` 记录了「最后只留哪一份由 Steven 决定」。**本次只更新了本文件**；两份都保留的话，另一份需要同步。
+- **被取代的前身**：`Contribution_Planning_Design_2026-10-26.md` §11.1 的 S1 规格（5 表 / 88 栏）已按来信要求重新核对，被 `S1_Final_Design_2026-10-31.md` 的提议（4 表 / 44 列）取代——**取代的只是提议，不是已批准的决定**。上一轮的 D-1 … D-18 与 D-S1-1 … D-S1-15 的对应关系见 `S1_Final_Design_2026-10-31.md` §13.2。

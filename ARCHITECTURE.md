@@ -77,6 +77,7 @@ Monthly/YTD 汇总 + Compliance Projection（SOCSO 固定值/EPF·Tax 明确 Not
 - **EventPublisher 真实串接 Reminder OS**——目前是占位实作，`901_System_Architecture.js` 自己记录"真实调用方式还没确认"
 - **历史 1-9 月 Grab Statement 回填**——未开始，明确要求先完成 Daily Allocation 的真实 GAS 验证才适合动手
 - **106_AI_Integration.js**（Tier 3 Intelligence）——刻意保留 Reserved，Blueprint BP-3
+- **缴款计划与官方付款记录（SOCSO / EPF 缴款记录；Official Contribution Record Core，S1）**（`ADR-DRAFT-CPR-1 … 5`，编号待定；2026-11-02 登记）——业务范围已由 Steven 在 2026-10-21 / 2026-10-29 来信中确认（D1 – D6 与 S1 范围），但**架构仍是 `PROPOSED`**，所以放在这一节、不放进 CURRENT IMPLEMENTATION。目前只有设计文档与 ADR 草案（`S1_Final_Design_2026-10-31.md`：4 表 / 44 列，对照只做金额维度，写入走「受保护追加」），**没有代码、没有建表、没有任何层级的验证**。**写入边界（`115_TruthWriter.js`）走推荐方案 A 需要 Architecture Freeze 例外**（`TruthWriter_Decision_Note_2026-10-31.md`；Steven 尚未决定，DT-1）；不批准则退到方案 B1（不改任何已批准文件）。Tax / CP500、EPF 激励自动计算、Grab 报销自动化、Calendar 集成、PDF / LLM 导入、Phase P 修复均**不在**这个提议范围内（来信排除）。
 
 ## 主要模块依赖关系
 

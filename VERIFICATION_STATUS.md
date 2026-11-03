@@ -126,3 +126,19 @@ Sheets 把日期格式储存格读回来时会变成原生 JS `Date` 物件而�
 ## Historical 9-file-id Provenance（ADR-005 附属，独立未解决项）
 
 confirmed：这批已验证呼叫用同一个 hardcode 的 fixture ID、harness 本身无 runtime override 路径。not confirmed：历史成因、哪个 session、production 是否有对应风险。不因为 ADR-005 CLOSED 而视为已排除。
+
+## Contribution Planning & Official Payment Records（EPF / SOCSO / Tax 设计轮，2026-10-21 → 11-01；2026-11-02 登记）
+
+**结论先行**：本轮是**纯设计**，没有任何实作，所以**没有任何第 3 – 8 层的验证结果，也没有 PASS**。下表只记录**实际发生过**的核对，以及**计划了但没有执行**的验证（NOT DONE）。
+
+| Scope | Evidence source | Date | Result | Limitations |
+|---|---|---|---|---|
+| Static inspection（层级 1）——设计文档的源码行号核对 | `S1_Final_Design` / `TruthWriter_Decision_Note` / `S1_Test_Plan` 与上一轮设计文档里的「文件:行」引用，对照 2026-10-21 上传的 zip 副本；上一轮文档另有一次独立复核（逐条结论没有存档） | 2026-10-29、2026-11-01 | DONE（设计层面） | 机械核对只证明「行号存在」「数字前后一致」；对代码**行为**的描述是人读源码的结果，没有被机械验证；基线不是你当前的工作副本 |
+| Node tests / Mock tests（层级 2/3）——Phase P 重复写入复现 | `tooling/phaseP_dup/repro_dup.js` 在 repo 副本上用内存假对象运行；输出 `repro_dup.observed.txt` | 2026-10-23 | 观察到：同批文件共用 `document_id`；同批同周 / 同内容文件各写一行 `Verified_Income`；读—写交错模拟出现重复（场景 S1 – S6） | **不是真实 GAS 行为**：`fakeLockProvider_` 没有互斥，S5 是读—写交错的模拟；真实 Sheet 里是否已有历史重复未知。这是**调查**，不是对生产代码的修复，也不是 S1 的测试 |
+| Node tests（S1） | — | — | **NOT DONE** | S1 代码不存在 |
+| Real GAS execution（层级 4）：V0 – V7、V10（锁、`flush`、`appendRow` 失败、`Date` 读回、取「今天」等平台行为） | — | — | **NOT DONE** | 计划见 `S1_Test_Plan_2026-10-31.md` §11；要在 Spreadsheet **副本**上由 Steven 执行（独立授权 A-3） |
+| Real Google Sheets persistence（层级 5） | — | — | **NOT DONE** | S1 的表不存在 |
+| Independent source verification（层级 7）：V8、V9；政策登记表 10 项抽查 | — | — | **NOT DONE** | 需要真实 SOCSO / EPF 记录；登记表内容经 WebFetch 转述，待 Steven 打开原网页核对 |
+| Production integration verification（层级 8） | — | — | **NOT DONE** | 另行授权 |
+
+**仍然 UNVERIFIED（不得当事实）**：真实 GAS 的锁语义与 `flush` 可见性；`appendRow` 失败是否会留下半行；官方 SOCSO / EPF 凭证的真实格式；多月预缴时覆盖期的官方规则；`Date` 读回的根因（见本文件上面的「尚未查明」）；UCR6 原文。
